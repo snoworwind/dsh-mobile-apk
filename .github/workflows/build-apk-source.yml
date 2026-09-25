@@ -76,11 +76,11 @@ jobs:
           corepack pnpm install --frozen-lockfile
           corepack pnpm --version > "$GITHUB_WORKSPACE/.deploy-tmp/source-build/package-manager-versions.txt"
           printf 'deployment pnpm: ' >> "$GITHUB_WORKSPACE/.deploy-tmp/source-build/package-manager-versions.txt"
-          corepack pnpm@12.2.0 --version >> "$GITHUB_WORKSPACE/.deploy-tmp/source-build/package-manager-versions.txt"
+          corepack pnpm@12.2.0 --pm-on-fail=ignore --version >> "$GITHUB_WORKSPACE/.deploy-tmp/source-build/package-manager-versions.txt"
           corepack pnpm run build
           corepack pnpm --recursive --if-present run bundle
           corepack pnpm run build:web
-          corepack pnpm@12.2.0 --filter @deepseek-ai/dsh deploy --prod "$GITHUB_WORKSPACE/.deploy-tmp/engine-deploy"
+          corepack pnpm@12.2.0 --pm-on-fail=ignore --filter @deepseek-ai/dsh deploy --prod "$GITHUB_WORKSPACE/.deploy-tmp/engine-deploy"
           cd "$GITHUB_WORKSPACE"
           node scripts/source-build/export-dsh-engine.mjs \
             .deploy-tmp/deepseek-harness .deploy-tmp/engine-overlay
