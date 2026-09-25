@@ -1,0 +1,231 @@
+name: build-apk-source
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-arm64:
+    runs-on: ubuntu-latest
+    env:
+      DSH_APK_DIR: ${{ github.workspace }}
+    steps:
+      - name: Checkout project source without Git LFS runtime archives
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          lfs: false
+
+      - name: Prepare build tools
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Install archive and signature tools
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y xz-utils gnupg
+
+      - name: Checkout pinned DeepSeek Harness source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .deploy-tmp
+          git clone --filter=blob:none --no-checkout --depth=1 https://github.com/deepseek-ai/deepseek-harness.git .deploy-tmp/deepseek-harness
+          git -C .deploy-tmp/deepseek-harness fetch --depth=1 origin 183f08e9c6dde7e36cd2318eaee70b0da08fb35e
+          git -C .deploy-tmp/deepseek-harness checkout --detach 183f08e9c6dde7e36cd2318eaee70b0da08fb35e
+          git -C .deploy-tmp/deepseek-harness fetch --depth=1 origin 7bedce822f2c6b076df167dff46eecf81bbd5de4
+          test "$(git -C .deploy-tmp/deepseek-harness rev-parse HEAD)" = "183f08e9c6dde7e36cd2318eaee70b0da08fb35e"
+
+      - name: Checkout pinned component sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .deploy-tmp/component-sources
+          git clone --filter=blob:none --no-checkout --depth=1 https://github.com/kelai141/dsh-host-web-compat.git .deploy-tmp/component-sources/host-web-compat
+          git -C .deploy-tmp/component-sources/host-web-compat fetch --depth=1 origin 2de902729e01eb3619aa50bdfa164c5231948848
+          git -C .deploy-tmp/component-sources/host-web-compat checkout --detach 2de902729e01eb3619aa50bdfa164c5231948848
+          test "$(git -C .deploy-tmp/component-sources/host-web-compat rev-parse HEAD)" = "2de902729e01eb3619aa50bdfa164c5231948848"
+          cmp dsh-host-web-compat/package.json .deploy-tmp/component-sources/host-web-compat/package.json
+          cmp dsh-host-web-compat/lib/index.js .deploy-tmp/component-sources/host-web-compat/lib/index.js
+          git clone --filter=blob:none --no-checkout --depth=1 https://github.com/DshMarketPlace/dsh-plugins-store.git .deploy-tmp/component-sources/marketplace
+          git -C .deploy-tmp/component-sources/marketplace fetch --depth=1 origin 8354d9a0a1ad49ad12075d8ec0c2bf44f4349856
+          git -C .deploy-tmp/component-sources/marketplace checkout --detach 8354d9a0a1ad49ad12075d8ec0c2bf44f4349856
+          test "$(git -C .deploy-tmp/component-sources/marketplace rev-parse HEAD)" = "8354d9a0a1ad49ad12075d8ec0c2bf44f4349856"
+          test "$(node -p "require('./.deploy-tmp/component-sources/marketplace/package.json').version")" = "0.1.5"
+          rm -rf vendor/dshmarketplace-plugin
+          mkdir -p vendor/dshmarketplace-plugin
+          git -C .deploy-tmp/component-sources/marketplace archive HEAD | tar -x -C vendor/dshmarketplace-plugin
+
+      - name: Build and pack DeepSeek Harness from source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd .deploy-tmp/deepseek-harness
+          corepack enable
+          corepack pnpm install --frozen-lockfile
+          corepack pnpm run build
+          corepack pnpm --recursive --if-present run bundle
+          corepack pnpm run build:web
+          corepack pnpm --filter @deepseek-ai/dsh deploy --prod --legacy "$GITHUB_WORKSPACE/.deploy-tmp/engine-deploy"
+          cd "$GITHUB_WORKSPACE"
+          node scripts/source-build/export-dsh-engine.mjs \
+            .deploy-tmp/deepseek-harness .deploy-tmp/engine-overlay
+
+      - name: Build clean Termux bootstrap base from official source release
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .deploy-tmp/source-build .deploy-tmp/arm64-base
+          curl --fail --location --retry 3 \
+            'https://github.com/termux/termux-packages/releases/download/bootstrap-2026.09.20-r1%2Bapt.android-7/bootstrap-aarch64.zip' \
+            --output .deploy-tmp/source-build/bootstrap-aarch64.zip
+          python3 scripts/source-build/prepare-termux-bootstrap.py \
+            .deploy-tmp/source-build/bootstrap-aarch64.zip \
+            .deploy-tmp/deepseek-harness \
+            .deploy-tmp/engine-deploy \
+            .deploy-tmp/arm64-base/base-usr.tar.xz
+          mkdir -p .deploy-tmp/source-build/bootstrap-extracted
+          tar -xJf .deploy-tmp/arm64-base/base-usr.tar.xz \
+            -C .deploy-tmp/source-build/bootstrap-extracted usr
+
+      - name: Build project plugins and marketplace from source
+        shell: bash
+        run: |
+          set -euo pipefail
+          for d in plugins/dsh-android-bridge plugins/dsh-android-manage plugins/dsh-android-linux-env plugins/dsh-android-file-open plugins/dsh-model-capability plugins/dsh-android-browser plugins/dsh-android-vdisplay dsh-shell-termux dsh-client-ui-responsive vendor/dshmarketplace-plugin; do
+            echo "== source build $d =="
+            if [ -f "$d/package-lock.json" ]; then
+              (cd "$d" && npm ci --no-audit --no-fund)
+            else
+              (cd "$d" && npm install --no-audit --no-fund)
+            fi
+            (cd "$d" && npm run build)
+          done
+
+      - name: Add Node.js to the clean Termux base
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .deploy-tmp/source-build
+          cp scripts/snapshot-config/preinstall.json .deploy-tmp/source-build/preinstall.original.json
+          cp scripts/snapshot-config/engine-overlay.json .deploy-tmp/source-build/engine-overlay.original.json
+          node -e 'const fs=require("fs"); const p="scripts/snapshot-config/preinstall.json"; const x=JSON.parse(fs.readFileSync(p,"utf8")); if (!x.targets.includes("nodejs-lts")) x.targets.push("nodejs-lts"); x.requiredTargets=["nodejs-lts"]; fs.writeFileSync(p,JSON.stringify(x,null,2)+"\n")'
+          node <<'NODE'
+          const fs = require('fs')
+          const path = 'scripts/snapshot-config/engine-overlay.json'
+          const manifest = JSON.parse(fs.readFileSync(path, 'utf8'))
+          const omitted = manifest.keepUnpublished ?? []
+          manifest.keepUnpublished = []
+          fs.writeFileSync(path, JSON.stringify(manifest, null, 2) + '\n')
+          fs.writeFileSync('.deploy-tmp/source-build/source-build-policy.json', JSON.stringify({
+            omittedLegacyKeepUnpublished: omitted,
+            reason: 'These packages are absent from the pinned Harness source commit and are unmounted legacy residue inherited only from the old LFS runtime base.'
+          }, null, 2) + '\n')
+          NODE
+
+      - name: Verify signed Termux repository and stage pinned packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/source-build/prepare-termux-signed-repo.py \
+            .deploy-tmp/source-build/bootstrap-extracted/usr \
+            .deploy-tmp/source-build/termux-webroot \
+            scripts/snapshot-config/preinstall.json
+
+      - name: Build runtime snapshot from verified inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          original=".deploy-tmp/source-build/preinstall.original.json"
+          test -f "$original"
+          restore_config() { cp "$original" scripts/snapshot-config/preinstall.json; }
+          server_pid=""
+          cleanup() {
+            restore_config
+            if [ -n "$server_pid" ]; then kill "$server_pid" 2>/dev/null || true; fi
+          }
+          trap cleanup EXIT
+          node -e 'const fs=require("fs"); const p="scripts/snapshot-config/preinstall.json"; const x=JSON.parse(fs.readFileSync(p,"utf8")); x.mirrors=["http://127.0.0.1:8787"]; fs.writeFileSync(p,JSON.stringify(x,null,2)+"\n")'
+          python3 -m http.server 8787 --bind 127.0.0.1 \
+            --directory .deploy-tmp/source-build/termux-webroot \
+            > .deploy-tmp/source-build/termux-http.log 2>&1 &
+          server_pid=$!
+          for attempt in $(seq 1 30); do
+            if curl --silent --fail http://127.0.0.1:8787/dists/stable/main/binary-aarch64/Packages.gz >/dev/null; then break; fi
+            sleep 1
+          done
+          curl --silent --fail http://127.0.0.1:8787/dists/stable/main/binary-aarch64/Packages.gz >/dev/null
+          node scripts/build-snapshot-013.mjs arm64
+
+      - name: Generate ephemeral signing certificate from the installed JDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f keystore/debug.keystore
+          keytool -genkeypair -noprompt \
+            -keystore keystore/debug.keystore -storetype PKCS12 \
+            -storepass android -keypass android -alias androiddebugkey \
+            -keyalg RSA -keysize 2048 -validity 3650 \
+            -dname 'CN=DSH Source Build,OU=Ephemeral,O=dsh-mobile-apk,C=US'
+          keytool -list -v -keystore keystore/debug.keystore \
+            -storepass android -alias androiddebugkey \
+            | grep '^SHA256:' > .deploy-tmp/source-build/signing-certificate-sha256.txt
+
+      - name: Build ARM64 APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          restore_overlay() { cp .deploy-tmp/source-build/engine-overlay.original.json scripts/snapshot-config/engine-overlay.json; }
+          trap restore_overlay EXIT
+          node scripts/build-apk.mjs --abi arm64 --suffix -source
+          find out -type f -name '*.apk' -print -exec sha256sum {} \; > .deploy-tmp/source-build/apk-sha256.txt
+          test -s .deploy-tmp/source-build/apk-sha256.txt
+          find .deploy-tmp/engine-overlay -maxdepth 1 -type f -name '*.tgz' -print0 \
+            | sort -z | xargs -0 -r sha256sum \
+            > .deploy-tmp/source-build/engine-overlay-sha256.txt
+          find .deploy-tmp/snapshot-013/arm64/.debs -maxdepth 1 -type f -name '*.tgz' -print0 \
+            | sort -z | xargs -0 -r sha256sum \
+            > .deploy-tmp/source-build/runtime-tarballs-sha256.txt
+          for d in plugins/dsh-android-bridge plugins/dsh-android-manage plugins/dsh-android-linux-env plugins/dsh-android-file-open plugins/dsh-model-capability plugins/dsh-android-browser plugins/dsh-android-vdisplay dsh-shell-termux dsh-client-ui-responsive vendor/dshmarketplace-plugin; do
+            sha256sum "$d/package.json" "$d/package-lock.json" 2>/dev/null || true
+          done > .deploy-tmp/source-build/plugin-lock-sha256.txt
+          printf '%s\n' "$GITHUB_SHA" > .deploy-tmp/source-build/project-source-commit.txt
+          node -e 'const fs=require("fs"); const cp=require("child_process"); const dirs={"dsh-host-web-compat":".deploy-tmp/component-sources/host-web-compat","dshmarketplace-plugin":".deploy-tmp/component-sources/marketplace"}; const out={projectCommit:process.env.GITHUB_SHA,deepseekHarnessCommit:cp.execFileSync("git",["-C",".deploy-tmp/deepseek-harness","rev-parse","HEAD"],{encoding:"utf8"}).trim(),components:{}}; for(const [name,dir] of Object.entries(dirs)) out.components[name]={commit:cp.execFileSync("git",["-C",dir,"rev-parse","HEAD"],{encoding:"utf8"}).trim()}; out.components["dsh-undo-savepoint"]={source:"checked-in JavaScript source",fileSha256:require("crypto").createHash("sha256").update(fs.readFileSync("vendor/dsh-undo-savepoint/lib/index.js")).digest("hex")}; fs.writeFileSync(".deploy-tmp/source-build/component-source-provenance.json",JSON.stringify(out,null,2)+"\n")'
+          sha256sum app/build.gradle.kts build.gradle.kts settings.gradle.kts \
+            > .deploy-tmp/source-build/android-build-inputs-sha256.txt
+          gradle_artifacts="${GRADLE_USER_HOME:-$HOME/.gradle}/caches/modules-2/files-2.1"
+          find "$gradle_artifacts" -type f \( -name '*.jar' -o -name '*.aar' \) -print0 \
+            | sort -z | xargs -0 -r sha256sum \
+            > .deploy-tmp/source-build/gradle-artifacts-sha256.txt
+          cat .deploy-tmp/source-build/apk-sha256.txt
+
+      - name: Upload APK and provenance
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-mobile-apk-arm64-source-${{ github.sha }}
+          path: |
+            out/v*/*.apk
+            .deploy-tmp/arm64-base/base-usr.tar.xz.provenance.json
+            .deploy-tmp/source-build/termux-packages-provenance.json
+            .deploy-tmp/engine-overlay/source-build-manifest.json
+            .deploy-tmp/source-build/apk-sha256.txt
+            .deploy-tmp/source-build/engine-overlay-sha256.txt
+            .deploy-tmp/source-build/runtime-tarballs-sha256.txt
+            .deploy-tmp/source-build/plugin-lock-sha256.txt
+            .deploy-tmp/source-build/project-source-commit.txt
+            .deploy-tmp/source-build/component-source-provenance.json
+            .deploy-tmp/source-build/source-build-policy.json
+            .deploy-tmp/source-build/android-build-inputs-sha256.txt
+            .deploy-tmp/source-build/gradle-artifacts-sha256.txt
+            .deploy-tmp/source-build/signing-certificate-sha256.txt
+          if-no-files-found: error
+          retention-days: 30
