@@ -179,7 +179,35 @@ jobs:
             sleep 1
           done
           curl --silent --fail http://127.0.0.1:8787/dists/stable/main/binary-aarch64/Packages.gz >/dev/null
-          node scripts/build-snapshot-013.mjs arm64
+          if node scripts/build-snapshot-013.mjs arm64; then
+            :
+          else
+            node <<'NODE'
+          const fs = require('node:fs')
+          const path = require('node:path')
+          const esbuild = require('./plugins/dsh-android-bridge/node_modules/esbuild')
+          const root = '.deploy-tmp/snapshot-013/arm64/stage/root'
+          let failures = 0
+          function walk(dir, rel = '') {
+            for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+              const childRel = rel ? `${rel}/${entry.name}` : entry.name
+              const full = path.join(dir, entry.name)
+              if (entry.isDirectory()) walk(full, childRel)
+              else if (entry.isFile() && (/(^|\/)dsh-web-frontend\/dist\/.*\.js$/.test(childRel) || /(^|\/)lib\/client\.js$/.test(childRel))) {
+                try { esbuild.transformSync(fs.readFileSync(full, 'utf8'), { loader: 'js', logLevel: 'silent', target: 'chrome87' }) }
+                catch (error) {
+                  failures++
+                  console.error(`CHROME87 transform failed: ${childRel}`)
+                  for (const item of error.errors ?? []) console.error(item.text)
+                }
+              }
+            }
+          }
+          if (fs.existsSync(root)) walk(root)
+          if (!failures) console.error('CHROME87 diagnostic found no failing file in the retained stage tree')
+          NODE
+            exit 1
+          fi
 
       - name: Generate ephemeral signing certificate from the installed JDK
         shell: bash
