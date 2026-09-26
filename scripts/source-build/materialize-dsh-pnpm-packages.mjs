@@ -20,6 +20,31 @@ const within = (root, candidate) => {
 const entries = sourceManifest.packages.filter((item) => item.name.startsWith('@deepseek-ai/') && item.name !== '@deepseek-ai/dsh')
 if (entries.length < 266) throw new Error(`expected at least 266 pinned first-party workspace packages, found ${entries.length}`)
 
+function materializeDependencyLookup(sourceDirs, destinationDir) {
+  mkdirSync(destinationDir)
+  const names = new Set(sourceDirs.flatMap((dir) => readdirSync(dir)))
+  for (const name of names) {
+    const candidates = sourceDirs
+      .map((dir) => join(dir, name))
+      .filter((candidate) => existsSync(candidate))
+    if (!candidates.length) continue
+    const isScopeDirectory = name.startsWith('@') && candidates.every((candidate) => {
+      const stat = lstatSync(candidate)
+      return stat.isDirectory() && !stat.isSymbolicLink()
+    })
+    const destination = join(destinationDir, name)
+    if (isScopeDirectory) {
+      materializeDependencyLookup(candidates, destination)
+      continue
+    }
+    const preferred = candidates[0]
+    const resolved = realpathSync(preferred)
+    if (!within(engineRoot, resolved)) throw new Error(`dependency link escapes the engine tree: ${preferred}`)
+    const type = lstatSync(preferred).isDirectory() ? 'dir' : 'file'
+    symlinkSync(relative(destinationDir, preferred), destination, type)
+  }
+}
+
 const materialized = []
 for (const item of entries) {
   const target = join(engineRoot, 'node_modules', ...item.name.split('/'))
@@ -43,19 +68,20 @@ for (const item of entries) {
   const linkBackup = join(dirname(target), `.${basename(target)}.source-link-backup-${process.pid}`)
   if (existsSync(linkBackup)) throw new Error(`materialization backup already exists: ${linkBackup}`)
   const packageNodeModules = join(physicalTarget, 'node_modules')
-  // pnpm commonly stores dependency links beside the package path, in the
-  // virtual package's node_modules directory, rather than inside the package.
-  const physicalDependencyNodeModules = existsSync(packageNodeModules)
-    ? packageNodeModules
-    : dirname(dirname(physicalTarget))
-  const resolvedDependencyNodeModules = realpathSync(physicalDependencyNodeModules)
-  if (!within(engineRoot, resolvedDependencyNodeModules)) {
-    throw new Error(`${item.name} dependency node_modules escapes the engine tree`)
+  // Node searches a package-local node_modules first, then the node_modules
+  // directory beside its pnpm virtual-store package path.
+  const pnpmPeerNodeModules = dirname(dirname(physicalTarget))
+  const physicalDependencyLookupRoots = [...new Set([packageNodeModules, pnpmPeerNodeModules]
+    .filter(existsSync)
+    .map((candidate) => realpathSync(candidate)))]
+  if (!physicalDependencyLookupRoots.length
+    || physicalDependencyLookupRoots.some((candidate) => !within(engineRoot, candidate))) {
+    throw new Error(`${item.name} dependency lookup roots are missing or escape the engine tree`)
   }
 
   renameSync(target, linkBackup)
   mkdirSync(target)
-  symlinkSync(relative(target, physicalDependencyNodeModules), join(target, 'node_modules'), 'dir')
+  materializeDependencyLookup(physicalDependencyLookupRoots, join(target, 'node_modules'))
 
   const movedEntries = []
   for (const child of readdirSync(physicalTarget, { withFileTypes: true })) {
@@ -76,7 +102,7 @@ for (const item of entries) {
     name: item.name,
     version: item.version,
     materializedRegularFiles: true,
-    preservedPnpmDependencyDirectory: relative(engineRoot, physicalDependencyNodeModules).replaceAll(sep, '/'),
+    preservedPnpmDependencyDirectories: physicalDependencyLookupRoots.map((root) => relative(engineRoot, root).replaceAll(sep, '/')),
     movedTopLevelEntries: movedEntries,
     physicalStorePath: relative(engineRoot, physicalTarget).replaceAll(sep, '/'),
   })
@@ -86,9 +112,9 @@ const report = {
   sourceCommit: sourceManifest.commit,
   packageCount: materialized.length,
   convertedSymlinkCount: materialized.filter((item) => item.materializedRegularFiles).length,
-  preservedPnpmNodeModulesLinkCount: materialized.filter((item) => typeof item.preservedPnpmDependencyDirectory === 'string').length,
+  preservedPnpmNodeModulesLinkCount: materialized.filter((item) => item.preservedPnpmDependencyDirectories?.length).length,
   packages: materialized,
-  purpose: 'Expose source-built package payload files at their normal node_modules paths for snapshot scanners. The original .pnpm package payloads are replaced by relative links to the top-level files, while each top-level package links node_modules to its original pnpm dependency lookup directory so Node resolves the same locked closure.',
+  purpose: 'Expose source-built package payload files at their normal node_modules paths for snapshot scanners. The original .pnpm package payloads are replaced by relative links to the top-level files, while each top-level package gets a merged node_modules lookup tree that preserves package-local precedence and falls back to its original pnpm virtual-store links.',
 }
 mkdirSync(dirname(reportPath), { recursive: true })
 writeFileSync(reportPath, JSON.stringify(report, null, 2) + '\n')
