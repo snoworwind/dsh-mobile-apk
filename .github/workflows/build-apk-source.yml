@@ -306,6 +306,19 @@ jobs:
           NODE
             exit 1
           fi
+          node scripts/source-build/materialize-dsh-pnpm-packages.mjs \
+            .deploy-tmp/snapshot-013/arm64/stage/root/usr/lib/node_modules/@deepseek-ai/dsh \
+            .deploy-tmp/engine-overlay/source-build-manifest.json \
+            .deploy-tmp/source-build/pnpm-package-materialization.json
+          snapshot_archive="$GITHUB_WORKSPACE/.deploy-tmp/snapshot-013/arm64/snapshot.tar.xz"
+          snapshot_repacked="$GITHUB_WORKSPACE/.deploy-tmp/snapshot-013/arm64/snapshot.source-built.tar.xz"
+          (
+            cd .deploy-tmp/snapshot-013/arm64/stage/root
+            tar -c --mtime=@1704067200 usr home/.dsh home/.gitconfig 2>/dev/null \
+              | xz -T8 -6 > "$snapshot_repacked"
+          )
+          mv "$snapshot_repacked" "$snapshot_archive"
+          sha256sum "$snapshot_archive" | cut -d' ' -f1 > .deploy-tmp/snapshot-013/arm64/snapshot.sha256
           node scripts/source-build/check-dsh-runtime-dependencies.mjs \
             .deploy-tmp/snapshot-013/arm64/stage/root/usr/lib/node_modules/@deepseek-ai/dsh \
             .deploy-tmp/source-build/post-snapshot-runtime-dependency-check.json
@@ -402,5 +415,6 @@ jobs:
             .deploy-tmp/source-build/harness-web-preview-exclusion.json
             .deploy-tmp/source-build/post-snapshot-runtime-dependency-check.json
             .deploy-tmp/source-build/source-engine-snapshot-check.json
+            .deploy-tmp/source-build/pnpm-package-materialization.json
           if-no-files-found: error
           retention-days: 30
