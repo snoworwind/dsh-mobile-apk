@@ -83,15 +83,15 @@ jobs:
           workspace_config="$GITHUB_WORKSPACE/.deploy-tmp/deepseek-harness/pnpm-workspace.yaml"
           workspace_backup="$GITHUB_WORKSPACE/.deploy-tmp/source-build/pnpm-workspace.original.yaml"
           package_backup_dir="$GITHUB_WORKSPACE/.deploy-tmp/source-build/pnpm-deploy-runtime-closure"
-          package_backup="$package_backup_dir/package.json.original"
+          package_backup="$package_backup_dir/apps-cli-package.json.original"
           lock_backup="$package_backup_dir/pnpm-lock.yaml.original"
           cp "$workspace_config" "$workspace_backup"
           mkdir -p "$package_backup_dir"
-          cp package.json "$package_backup"
+          cp apps/cli/package.json "$package_backup"
           cp pnpm-lock.yaml "$lock_backup"
           restore_deploy_inputs() {
             cp "$workspace_backup" "$workspace_config"
-            cp "$package_backup" package.json
+            cp "$package_backup" apps/cli/package.json
             cp "$lock_backup" pnpm-lock.yaml
           }
           trap restore_deploy_inputs EXIT
@@ -103,8 +103,6 @@ jobs:
             "$GITHUB_WORKSPACE/scripts/snapshot-config/engine-overlay.json" \
             "$package_backup_dir" \
             "$GITHUB_WORKSPACE/.deploy-tmp/source-build/pnpm-deploy-runtime-closure.json"
-          corepack pnpm@12.2.0 --pm-on-fail=ignore install --lockfile-only --offline --ignore-scripts
-          node -e 'const fs=require("node:fs"); const crypto=require("node:crypto"); const path=require("node:path"); const p=path.join(process.env.GITHUB_WORKSPACE,".deploy-tmp/source-build/pnpm-deploy-runtime-closure.json"); const report=JSON.parse(fs.readFileSync(p,"utf8")); report.temporaryLockfileSha256=crypto.createHash("sha256").update(fs.readFileSync("pnpm-lock.yaml")).digest("hex"); fs.writeFileSync(p,JSON.stringify(report,null,2)+"\n")'
           corepack pnpm@12.2.0 --pm-on-fail=ignore --filter @deepseek-ai/dsh deploy --prod "$GITHUB_WORKSPACE/.deploy-tmp/engine-deploy"
           restore_deploy_inputs
           trap - EXIT
