@@ -99,20 +99,26 @@ jobs:
           cp scripts/snapshot-config/engine-overlay.json .deploy-tmp/source-build/engine-overlay.original.json
           node scripts/source-build/export-dsh-engine.mjs \
             .deploy-tmp/deepseek-harness .deploy-tmp/engine-overlay
+          node scripts/source-build/inject-dsh-engine-packages.mjs \
+            .deploy-tmp/engine-deploy .deploy-tmp/engine-overlay \
+            scripts/snapshot-config/engine-overlay.json \
+            .deploy-tmp/source-build/first-party-deploy-injection.json
           node <<'NODE'
           const fs = require('node:fs')
           const path = 'scripts/snapshot-config/engine-overlay.json'
           const manifest = JSON.parse(fs.readFileSync(path, 'utf8'))
+          const injection = JSON.parse(fs.readFileSync('.deploy-tmp/source-build/first-party-deploy-injection.json', 'utf8'))
           const sourcePackages = Object.entries(manifest.packages ?? {})
             .filter(([name]) => name.startsWith('@deepseek-ai/'))
             .map(([name, version]) => ({ name, version }))
-          if (sourcePackages.length < 200) throw new Error(`expected the pinned first-party package set, found ${sourcePackages.length}`)
+          if (sourcePackages.length !== injection.packageCount) throw new Error(`injected ${injection.packageCount} first-party packages, overlay lists ${sourcePackages.length}`)
           for (const { name } of sourcePackages) delete manifest.packages[name]
           fs.writeFileSync(path, JSON.stringify(manifest, null, 2) + '\n')
           fs.writeFileSync('.deploy-tmp/source-build/source-build-policy.json', JSON.stringify({
             omittedFirstPartyPackageOverlays: sourcePackages,
-            firstPartyOverlayReason: 'The pinned pnpm deploy tree already contains these source-built packages and their virtual-store links. Re-extracting pack tarballs at the package paths severs Node module resolution from that layout; keep the deployed tree and overlay only non-first-party packages.',
-            exportedFirstPartyTarballs: 'Built from the pinned source and listed in source-build-manifest.json, but not injected into the APK; the APK uses the source-built pnpm deploy tree.',
+            firstPartySourceInjection: injection,
+            firstPartyOverlayReason: 'The source-built package tarballs are injected into the physical targets of the pnpm deploy package links before bootstrap packaging. This supplies built lib files while preserving each package symlink and its sibling virtual-store dependency links; the snapshot builder skips re-extracting these packages.',
+            exportedFirstPartyTarballs: 'Built from the pinned source, hashed in source-build-manifest.json, and injected into the pnpm deploy tree before that tree is copied into the APK runtime.',
           }, null, 2) + '\n')
           fs.writeFileSync('.deploy-tmp/source-build/effective-engine-overlay.json', JSON.stringify(manifest, null, 2) + '\n')
           NODE
@@ -284,7 +290,7 @@ jobs:
             exit 1
           fi
           node --input-type=module <<'NODE'
-          import { existsSync, readFileSync, readdirSync } from 'node:fs'
+          import { existsSync, readFileSync, readdirSync, realpathSync } from 'node:fs'
           import { join, resolve } from 'node:path'
           import { pathToFileURL } from 'node:url'
           const engineRoot = resolve('.deploy-tmp/snapshot-013/arm64/stage/root/usr/lib/node_modules/@deepseek-ai/dsh')
@@ -309,7 +315,7 @@ jobs:
             for (const dependency of dependencies) {
               dependencyCount++
               try {
-                import.meta.resolve(dependency, pathToFileURL(packageFile).href)
+                import.meta.resolve(dependency, pathToFileURL(realpathSync(packageFile)).href)
               } catch (error) {
                 failures.push(`${manifest.name ?? packageFile} -> ${dependency}: ${error.message}`)
               }
