@@ -98,6 +98,8 @@ jobs:
           python3 "$GITHUB_WORKSPACE/scripts/source-build/prepare-pnpm-deploy-policy.py" \
             "$workspace_config" \
             "$GITHUB_WORKSPACE/.deploy-tmp/source-build/pnpm-deploy-build-policy.json"
+          cp "$GITHUB_WORKSPACE/.deploy-tmp/source-build/pnpm-deploy-build-policy.json" \
+            "$GITHUB_WORKSPACE/.deploy-tmp/source-build/source-build-policy.json"
           node "$GITHUB_WORKSPACE/scripts/source-build/prepare-pnpm-deploy-runtime-closure.mjs" \
             "$GITHUB_WORKSPACE/.deploy-tmp/deepseek-harness" \
             "$GITHUB_WORKSPACE/scripts/snapshot-config/engine-overlay.json" \
@@ -173,7 +175,10 @@ jobs:
           if (sourcePackages.length !== injection.packageCount) throw new Error(`injected ${injection.packageCount} first-party packages, overlay lists ${sourcePackages.length}`)
           for (const { name } of sourcePackages) delete manifest.packages[name]
           fs.writeFileSync(path, JSON.stringify(manifest, null, 2) + '\n')
+          const sourceBuildPolicyPath = '.deploy-tmp/source-build/source-build-policy.json'
+          const sourceBuildPolicy = JSON.parse(fs.readFileSync(sourceBuildPolicyPath, 'utf8'))
           fs.writeFileSync('.deploy-tmp/source-build/source-build-policy.json', JSON.stringify({
+            ...sourceBuildPolicy,
             omittedFirstPartyPackageOverlays: sourcePackages,
             firstPartySourceInjection: injection,
             pnpmDeployRuntimeClosure: runtimeClosure,
