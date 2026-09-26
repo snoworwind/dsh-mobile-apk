@@ -658,4 +658,4 @@
 
 181. **keytool 证书指纹输出有缩进，`grep '^SHA256:'` 在 `pipefail` 下会让签名步骤假失败**：ARM64 APK 来源构建成功生成了临时 JKS/PKCS12 证书，但指纹提取管道未匹配 keytool 的缩进格式，步骤以 exit 1 结束，Gradle 还没开始。**修法**：匹配 `^[[:space:]]*SHA256:` 并保留匹配行；不要把证书生成成功误判为 JDK 或密钥错误。
 
-182. **来源审计构建替换 marketplace 后，必须先重放仓库补丁再运行 APK 预检**：固定上游 `dsh-plugins-store` 提交提供的是未含移动端 U2 路由鉴权补丁的源码。来源流程从该提交重建 `lib/` 并覆盖 vendored 副本；若直接进入 `build-apk.mjs`，它前置的 `check-api-route-auth` 会正确拒绝 search/install 两条缺 guard 的路由。**修法**：marketplace 源码构建完成后、APK 预检前调用统一 `scripts/patches/apply-patches.mjs vendor`，并附带上游源与树、补丁实现/登记表及生成后 lib 的哈希 provenance；不要放松路由门禁或把旧预编译 `lib/` 复制回去。
+182. **来源审计构建替换 marketplace 后，必须先重放仓库补丁再运行 APK 预检**：固定上游 `dsh-plugins-store` 提交提供的是未含移动端 U2 路由鉴权补丁的源码。来源流程从该提交重建 `lib/` 并覆盖 vendored 副本；若直接进入 `build-apk.mjs`，它前置的 `check-api-route-auth` 会正确拒绝 search/install 两条缺 guard 的路由。**修法**：marketplace 源码构建完成后、APK 预检前显式运行统一 `scripts/patches/apply-patches.mjs vendor --apply`（无 `--apply` 是只检查模式，不会写入补丁），并附带上游源与树、补丁实现/登记表及生成后 lib 的哈希 provenance；不要放松路由门禁或把旧预编译 `lib/` 复制回去。

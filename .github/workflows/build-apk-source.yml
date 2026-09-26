@@ -134,7 +134,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          node scripts/patches/apply-patches.mjs vendor
+          node scripts/patches/apply-patches.mjs vendor --apply
           node <<'NODE'
           const crypto = require('node:crypto')
           const fs = require('node:fs')
@@ -171,7 +171,8 @@ jobs:
             projectCommit: process.env.GITHUB_SHA,
             patchRegistrySha256: sha256('scripts/patches/registry.json'),
             patchImplementationSha256: sha256('scripts/patches/apply-patches.mjs'),
-            appliedPatches: marketplacePatches,
+            patchMode: 'ensure (--apply)',
+            registeredMarketplacePatches: marketplacePatches,
             generatedAndPatchedOutputs: {
               'lib/index.js': sha256(path.join(packageRoot, 'lib/index.js')),
               'lib/client.js': sha256(path.join(packageRoot, 'lib/client.js')),
