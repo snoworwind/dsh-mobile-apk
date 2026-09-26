@@ -657,3 +657,5 @@
 180. **pnpm deploy 把 Harness web 发布清单排除的实验 preview 产物带进运行时**：干净来源构建的 Chrome 87 降级在 `dsh-web-frontend/dist/preview/bootstrap-*.js` 报顶层 `await`。该语法是 `apps/web/src/preview.ts` worker 启动契约所需，但 preview 只由独立 `preview.html` 加载；固定源码 `apps/web/package.json` 明确排除 `dist/preview` 与 `dist/preview.html`。pnpm deploy 的本地 workspace 包副本仍含整个工作树输出，令生产快照意外纳入不发布的实验面。**修法**：`build:web` 与 deploy 后读取并严格校验该固定包的发布 allowlist，在源码树和部署副本中只移除清单明确排除的两个 preview 输出路径；将被移除文件的 SHA-256、上游提交和 package.json 哈希记录进产物 provenance。保留其余 `dist/**/*.js` 的 Chrome 87 转换门禁，不把顶层 await 当作可忽略语法。
 
 181. **keytool 证书指纹输出有缩进，`grep '^SHA256:'` 在 `pipefail` 下会让签名步骤假失败**：ARM64 APK 来源构建成功生成了临时 JKS/PKCS12 证书，但指纹提取管道未匹配 keytool 的缩进格式，步骤以 exit 1 结束，Gradle 还没开始。**修法**：匹配 `^[[:space:]]*SHA256:` 并保留匹配行；不要把证书生成成功误判为 JDK 或密钥错误。
+
+182. **来源审计构建替换 marketplace 后，必须先重放仓库补丁再运行 APK 预检**：固定上游 `dsh-plugins-store` 提交提供的是未含移动端 U2 路由鉴权补丁的源码。来源流程从该提交重建 `lib/` 并覆盖 vendored 副本；若直接进入 `build-apk.mjs`，它前置的 `check-api-route-auth` 会正确拒绝 search/install 两条缺 guard 的路由。**修法**：marketplace 源码构建完成后、APK 预检前调用统一 `scripts/patches/apply-patches.mjs vendor`，并附带上游源与树、补丁实现/登记表及生成后 lib 的哈希 provenance；不要放松路由门禁或把旧预编译 `lib/` 复制回去。

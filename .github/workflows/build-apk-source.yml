@@ -130,6 +130,56 @@ jobs:
             (cd "$d" && npm run build)
           done
 
+      - name: Apply project patches to the source-built marketplace
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/patches/apply-patches.mjs vendor
+          node <<'NODE'
+          const crypto = require('node:crypto')
+          const fs = require('node:fs')
+          const path = require('node:path')
+          const cp = require('node:child_process')
+          const sourceRoot = '.deploy-tmp/component-sources/marketplace'
+          const packageRoot = 'vendor/dshmarketplace-plugin'
+          const sha256 = (file) => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex')
+          const listFiles = (dir) => fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+            const full = path.join(dir, entry.name)
+            return entry.isDirectory() ? listFiles(full) : [full]
+          }).sort()
+          const commit = cp.execFileSync('git', ['-C', sourceRoot, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()
+          const sourcePackage = JSON.parse(fs.readFileSync(path.join(sourceRoot, 'package.json'), 'utf8'))
+          const patchRegistry = JSON.parse(fs.readFileSync('scripts/patches/registry.json', 'utf8'))
+          const marketplacePatches = patchRegistry.patches
+            .filter((patch) => patch.target.startsWith('dshmarketplace-plugin/'))
+            .map(({ id, target }) => ({ id, target }))
+          const expectedPatches = ['market-A', 'market-B', 'market-C', 'market-D-server', 'market-route-auth-U2', 'market-D-client']
+          for (const id of expectedPatches) {
+            if (!marketplacePatches.some((patch) => patch.id === id)) throw new Error(`missing registered marketplace patch: ${id}`)
+          }
+          const sourceFiles = listFiles(path.join(sourceRoot, 'src')).map((file) => ({
+            path: path.relative(sourceRoot, file).replaceAll(path.sep, '/'),
+            sha256: sha256(file),
+          }))
+          const provenance = {
+            repository: 'https://github.com/DshMarketPlace/dsh-plugins-store',
+            sourceCommit: commit,
+            sourceTree: cp.execFileSync('git', ['-C', sourceRoot, 'rev-parse', 'HEAD^{tree}'], { encoding: 'utf8' }).trim(),
+            packageVersion: sourcePackage.version,
+            buildCommand: 'npm run build',
+            sourceFiles,
+            projectCommit: process.env.GITHUB_SHA,
+            patchRegistrySha256: sha256('scripts/patches/registry.json'),
+            patchImplementationSha256: sha256('scripts/patches/apply-patches.mjs'),
+            appliedPatches: marketplacePatches,
+            generatedAndPatchedOutputs: {
+              'lib/index.js': sha256(path.join(packageRoot, 'lib/index.js')),
+              'lib/client.js': sha256(path.join(packageRoot, 'lib/client.js')),
+            },
+          }
+          fs.writeFileSync('.deploy-tmp/source-build/marketplace-source-provenance.json', JSON.stringify(provenance, null, 2) + '\n')
+          NODE
+
       - name: Add Node.js to the clean Termux base
         shell: bash
         run: |
@@ -270,6 +320,7 @@ jobs:
             .deploy-tmp/source-build/plugin-lock-sha256.txt
             .deploy-tmp/source-build/project-source-commit.txt
             .deploy-tmp/source-build/component-source-provenance.json
+            .deploy-tmp/source-build/marketplace-source-provenance.json
             .deploy-tmp/source-build/source-build-policy.json
             .deploy-tmp/source-build/android-build-inputs-sha256.txt
             .deploy-tmp/source-build/gradle-artifacts-sha256.txt
