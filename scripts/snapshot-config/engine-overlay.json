@@ -313,6 +313,7 @@
     "ipaddr.js": "2.5.0",
     "on-headers": "1.1.0",
     "openai": "6.40.0",
+    "partial-json": "0.1.7",
     "readdirp": "5.1.1",
     "resolve.exports": "2.0.3",
     "standardwebhooks": "1.1.1",

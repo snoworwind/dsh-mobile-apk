@@ -651,3 +651,5 @@
 177. **源码打包顺序必须先构建本地 `file:` 依赖**：CI 的 `dsh-android-linux-env` `tsc -p .` 报 `TS2307: Cannot find module '@dsh-android/dsh-shell-termux'`，连带其导入值的参数类型退化为隐式 `any`。workspace 源包通过 `file:../../dsh-shell-termux` 连接，`package.json` 的 `files` 只发布 `lib/`，因此 npm 安装不会替该 TypeScript 根导入现场生成 `lib/`。**修法**：构建循环先编译 `dsh-shell-termux`，再构建 linux-env；只改顺序、不从 registry 安装同名构件，以保持消费的就是 pinned checkout 源码产物。
 
 178. **Termux InRelease 索引路径相对 suite 根，不含 `dists/stable/`**：来源构建验签成功后，索引定位报 `signed Termux Release does not list dists/stable/main/binary-aarch64/Packages.gz`。官方 Release 的 SHA256 清单以 suite 为根，实际条目是 `main/binary-aarch64/Packages.gz`；`dists/stable/` 只出现在仓库下载 URL 与本地 apt 目录结构中。**修法**：分别维护 suite 相对校验路径和完整索引路径，用前者查已验签 Release、后者下载并落入临时仓库；不要因路径匹配失败绕过索引 SHA-256 或退回未签名的包元数据。
+
+179. **干净来源构建不会带上旧 LFS 基座遗留的 npm 依赖副本**：ARM64 来源构建已通过 Termux 签名索引与 `.deb` 校验，但快照内 `pi-ai` 行为检查因找不到 `partial-json` 失败。固定 Harness 的生产 deploy 会裁掉 CLI 开发依赖，而 `engine-overlay.json` 又单独加入了运行时 `pi-ai@0.85.1`；旧 LFS 基座过去恰好提供其 `partial-json@0.1.7`，所以只沿用旧快照的依赖闭包时缺口不可见。**修法**：把该运行时直接依赖显式钉入 `vendorTop`，由 overlay 下载并校验固定包；保持快照行为检查失败即停，不能通过跳过检查或恢复旧基座掩盖依赖缺失。
