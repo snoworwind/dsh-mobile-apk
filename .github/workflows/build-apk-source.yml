@@ -116,7 +116,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for d in plugins/dsh-android-bridge plugins/dsh-android-manage plugins/dsh-android-linux-env plugins/dsh-android-file-open plugins/dsh-model-capability plugins/dsh-android-browser plugins/dsh-android-vdisplay dsh-shell-termux dsh-client-ui-responsive vendor/dshmarketplace-plugin; do
+          for d in plugins/dsh-android-bridge plugins/dsh-android-manage dsh-shell-termux plugins/dsh-android-linux-env plugins/dsh-android-file-open plugins/dsh-model-capability plugins/dsh-android-browser plugins/dsh-android-vdisplay dsh-client-ui-responsive vendor/dshmarketplace-plugin; do
             echo "== source build $d =="
             if [ -f "$d/package-lock.json" ]; then
               (cd "$d" && npm ci --no-audit --no-fund)
