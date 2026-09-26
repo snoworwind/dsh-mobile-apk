@@ -16,7 +16,6 @@ ORIGINAL_SELECTOR = (
     "  '@deepseek-ai/dsh-subprocess-local@file:"
     "packages/subprocess/subprocess-local': true"
 )
-DEPLOY_SELECTOR = f"  '{PACKAGE_NAME}@{PACKAGE_VERSION}': true"
 
 
 def sha256(payload: bytes) -> str:
@@ -31,10 +30,13 @@ def main() -> None:
     needle = ORIGINAL_SELECTOR.encode("ascii")
     if original.count(needle) != 1:
         raise ValueError("pinned Harness allowBuilds source selector changed or is ambiguous")
-    if DEPLOY_SELECTOR.encode("ascii") in original:
+    package_root = workspace_path.parent / PACKAGE_PATH
+    deploy_selector = f"  '{PACKAGE_NAME}@{package_root.resolve().as_uri()}': true"
+    deploy_selector_bytes = deploy_selector.encode("utf-8")
+    if deploy_selector_bytes in original:
         raise ValueError("temporary pnpm deploy selector already exists in pinned workspace config")
 
-    package_json = workspace_path.parent / PACKAGE_PATH / "package.json"
+    package_json = package_root / "package.json"
     build_script = workspace_path.parent / BUILD_SCRIPT_PATH
     package_manifest = json.loads(package_json.read_text(encoding="utf-8"))
     if package_manifest.get("name") != PACKAGE_NAME or package_manifest.get("version") != PACKAGE_VERSION:
@@ -44,7 +46,7 @@ def main() -> None:
         raise ValueError("pinned subprocess helper postinstall behavior changed")
 
     newline = b"\r\n" if b"\r\n" in original else b"\n"
-    insertion = needle + newline + DEPLOY_SELECTOR.encode("ascii")
+    insertion = needle + newline + deploy_selector_bytes
     effective = original.replace(needle, insertion, 1)
     workspace_path.write_bytes(effective)
 
@@ -54,6 +56,7 @@ def main() -> None:
             "path": "pnpm-workspace.yaml",
             "originalSha256": sha256(original),
             "effectiveSha256": sha256(effective),
+            "temporarySelector": deploy_selector.strip(),
         },
         "allowedBuildScript": {
             "package": f"{PACKAGE_NAME}@{PACKAGE_VERSION}",
@@ -61,7 +64,7 @@ def main() -> None:
             "packageJsonSha256": sha256(package_json.read_bytes()),
             "scriptSha256": sha256(script_bytes),
             "effect": "restore executable permission on the pinned node-pty spawn-helper",
-            "reason": "pnpm deploy rewrites the existing file: workspace source selector into a versioned deploy dependency; the temporary exact-name-and-version selector keeps this reviewed local postinstall enabled",
+            "reason": "pnpm deploy rewrites the existing relative file: workspace selector into an absolute file: source; this temporary selector matches only the exact pinned local package path",
         },
     }
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
