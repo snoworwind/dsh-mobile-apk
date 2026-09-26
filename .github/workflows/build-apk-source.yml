@@ -80,7 +80,17 @@ jobs:
           corepack pnpm run build
           corepack pnpm --recursive --if-present run bundle
           corepack pnpm run build:web
+          workspace_config="$GITHUB_WORKSPACE/.deploy-tmp/deepseek-harness/pnpm-workspace.yaml"
+          workspace_backup="$GITHUB_WORKSPACE/.deploy-tmp/source-build/pnpm-workspace.original.yaml"
+          cp "$workspace_config" "$workspace_backup"
+          restore_workspace_config() { cp "$workspace_backup" "$workspace_config"; }
+          trap restore_workspace_config EXIT
+          python3 "$GITHUB_WORKSPACE/scripts/source-build/prepare-pnpm-deploy-policy.py" \
+            "$workspace_config" \
+            "$GITHUB_WORKSPACE/.deploy-tmp/source-build/pnpm-deploy-build-policy.json"
           corepack pnpm@12.2.0 --pm-on-fail=ignore --filter @deepseek-ai/dsh deploy --prod "$GITHUB_WORKSPACE/.deploy-tmp/engine-deploy"
+          restore_workspace_config
+          trap - EXIT
           cd "$GITHUB_WORKSPACE"
           node scripts/source-build/export-dsh-engine.mjs \
             .deploy-tmp/deepseek-harness .deploy-tmp/engine-overlay
@@ -233,5 +243,6 @@ jobs:
             .deploy-tmp/source-build/gradle-artifacts-sha256.txt
             .deploy-tmp/source-build/signing-certificate-sha256.txt
             .deploy-tmp/source-build/package-manager-versions.txt
+            .deploy-tmp/source-build/pnpm-deploy-build-policy.json
           if-no-files-found: error
           retention-days: 30

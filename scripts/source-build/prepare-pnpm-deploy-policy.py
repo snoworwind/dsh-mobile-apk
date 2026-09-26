@@ -1,0 +1,73 @@
+#!/usr/bin/env python3
+"""Temporarily approve the pinned Harness subprocess helper for pnpm deploy."""
+from __future__ import annotations
+
+import hashlib
+import json
+import pathlib
+import sys
+
+SOURCE_COMMIT = "183f08e9c6dde7e36cd2318eaee70b0da08fb35e"
+PACKAGE_NAME = "@deepseek-ai/dsh-subprocess-local"
+PACKAGE_VERSION = "0.1.5-rc.1"
+PACKAGE_PATH = "packages/subprocess/subprocess-local"
+BUILD_SCRIPT_PATH = f"{PACKAGE_PATH}/scripts/ensure-spawn-helper.mjs"
+ORIGINAL_SELECTOR = (
+    "  '@deepseek-ai/dsh-subprocess-local@file:"
+    "packages/subprocess/subprocess-local': true"
+)
+DEPLOY_SELECTOR = f"  '{PACKAGE_NAME}@{PACKAGE_VERSION}': true"
+
+
+def sha256(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
+
+
+def main() -> None:
+    if len(sys.argv) != 3:
+        raise SystemExit("usage: prepare-pnpm-deploy-policy.py <pnpm-workspace.yaml> <manifest.json>")
+    workspace_path, manifest_path = map(pathlib.Path, sys.argv[1:])
+    original = workspace_path.read_bytes()
+    needle = ORIGINAL_SELECTOR.encode("ascii")
+    if original.count(needle) != 1:
+        raise ValueError("pinned Harness allowBuilds source selector changed or is ambiguous")
+    if DEPLOY_SELECTOR.encode("ascii") in original:
+        raise ValueError("temporary pnpm deploy selector already exists in pinned workspace config")
+
+    package_json = workspace_path.parent / PACKAGE_PATH / "package.json"
+    build_script = workspace_path.parent / BUILD_SCRIPT_PATH
+    package_manifest = json.loads(package_json.read_text(encoding="utf-8"))
+    if package_manifest.get("name") != PACKAGE_NAME or package_manifest.get("version") != PACKAGE_VERSION:
+        raise ValueError("pinned subprocess helper package identity changed")
+    script_bytes = build_script.read_bytes()
+    if b"chmodSync(helper, 0o755)" not in script_bytes or b"import.meta.resolve('node-pty')" not in script_bytes:
+        raise ValueError("pinned subprocess helper postinstall behavior changed")
+
+    newline = b"\r\n" if b"\r\n" in original else b"\n"
+    insertion = needle + newline + DEPLOY_SELECTOR.encode("ascii")
+    effective = original.replace(needle, insertion, 1)
+    workspace_path.write_bytes(effective)
+
+    manifest = {
+        "harnessSourceCommit": SOURCE_COMMIT,
+        "workspaceConfig": {
+            "path": "pnpm-workspace.yaml",
+            "originalSha256": sha256(original),
+            "effectiveSha256": sha256(effective),
+        },
+        "allowedBuildScript": {
+            "package": f"{PACKAGE_NAME}@{PACKAGE_VERSION}",
+            "sourcePath": BUILD_SCRIPT_PATH,
+            "packageJsonSha256": sha256(package_json.read_bytes()),
+            "scriptSha256": sha256(script_bytes),
+            "effect": "restore executable permission on the pinned node-pty spawn-helper",
+            "reason": "pnpm deploy rewrites the existing file: workspace source selector into a versioned deploy dependency; the temporary exact-name-and-version selector keeps this reviewed local postinstall enabled",
+        },
+    }
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    print(f"prepared exact pnpm deploy build policy for {PACKAGE_NAME}@{PACKAGE_VERSION}")
+
+
+if __name__ == "__main__":
+    main()
