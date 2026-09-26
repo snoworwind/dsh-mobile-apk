@@ -2,7 +2,6 @@
 // Copy source-built first-party package payloads into the pnpm deploy tree
 // without replacing pnpm's package symlinks or their sibling dependency links.
 import { execFileSync } from 'node:child_process'
-import { randomUUID } from 'node:crypto'
 import {
   existsSync,
   lstatSync,
@@ -14,7 +13,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { checkDshRuntimeDependencies } from './check-dsh-runtime-dependencies.mjs'
 
 const [deployArg, cacheArg, overlayArg, reportArg] = process.argv.slice(2)
 if (!deployArg || !cacheArg || !overlayArg || !reportArg) {
@@ -81,50 +80,17 @@ for (const [name, version] of packages) {
   installed.push({ name, version, deployPath: relative(deployRoot, target).replaceAll(sep, '/'), preservedPnpmLink: wasSymlink })
 }
 
-const engineRoot = deployRoot
-const scopedRoot = join(packageRoot, '@deepseek-ai')
-const packageFiles = [join(engineRoot, 'package.json')]
-for (const name of readdirSync(scopedRoot)) packageFiles.push(join(scopedRoot, name, 'package.json'))
-const failures = []
-let dependencyCount = 0
-for (const packageFile of packageFiles) {
-  if (!existsSync(packageFile)) continue
-  const manifest = JSON.parse(readFileSync(packageFile, 'utf8'))
-  const peerDependencies = Object.keys(manifest.peerDependencies ?? {})
-    .filter((dependency) => !manifest.peerDependenciesMeta?.[dependency]?.optional)
-  const dependencies = [...new Set([
-    ...Object.keys(manifest.dependencies ?? {}),
-    ...peerDependencies,
-  ])]
-  const probeFile = join(dirname(realpathSync(packageFile)), `.dsh-dependency-resolve-${process.pid}-${randomUUID()}.mjs`)
-  writeFileSync(probeFile, 'export const resolve = (specifier) => import.meta.resolve(specifier)\n')
-  try {
-    const { resolve: resolveDependency } = await import(pathToFileURL(probeFile).href)
-    for (const dependency of dependencies) {
-      dependencyCount++
-      try {
-        resolveDependency(dependency)
-      } catch (error) {
-        failures.push(`${manifest.name ?? packageFile} -> ${dependency}: ${error.message}`)
-      }
-    }
-  } finally {
-    rmSync(probeFile, { force: true })
-  }
-}
-if (failures.length) {
-  console.error(failures.join('\n'))
-  throw new Error(`source-built deploy dependency resolution failed (${failures.length})`)
-}
+const dependencyCheck = checkDshRuntimeDependencies(deployRoot)
 
 const report = {
   source: sourceManifest.source,
   sourceCommit: sourceManifest.commit,
   packageCount: installed.length,
   preservedPnpmLinkCount: installed.filter((item) => item.preservedPnpmLink).length,
-  dependencyCount,
-  dependencyResolution: 'passed using Node.js import.meta.resolve before bootstrap packaging',
+  dependencyCount: dependencyCheck.dependencyCount,
+  dependencyPresence: dependencyCheck.dependencyPresence,
+  runtimeDependencyCheck: dependencyCheck,
   packages: installed,
 }
 writeFileSync(resolve(reportArg), JSON.stringify(report, null, 2) + '\n')
-console.log(`injected ${installed.length} source-built first-party packages; preserved ${report.preservedPnpmLinkCount} pnpm links; resolved ${dependencyCount} required dependencies`)
+console.log(`injected ${installed.length} source-built first-party packages; preserved ${report.preservedPnpmLinkCount} pnpm links; found ${dependencyCheck.dependencyCount} required package links in the deploy tree`)

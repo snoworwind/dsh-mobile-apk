@@ -306,52 +306,9 @@ jobs:
           NODE
             exit 1
           fi
-          node --input-type=module <<'NODE'
-          import { randomUUID } from 'node:crypto'
-          import { existsSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
-          import { dirname, join, resolve } from 'node:path'
-          import { pathToFileURL } from 'node:url'
-          const engineRoot = resolve('.deploy-tmp/snapshot-013/arm64/stage/root/usr/lib/node_modules/@deepseek-ai/dsh')
-          const scopeRoot = join(engineRoot, 'node_modules/@deepseek-ai')
-          const failures = []
-          let packageCount = 0
-          let dependencyCount = 0
-          const packageFiles = [join(engineRoot, 'package.json')]
-          for (const name of readdirSync(scopeRoot)) {
-            packageFiles.push(join(scopeRoot, name, 'package.json'))
-          }
-          for (const packageFile of packageFiles) {
-            if (!existsSync(packageFile)) continue
-            const manifest = JSON.parse(readFileSync(packageFile, 'utf8'))
-            packageCount++
-            const peerDependencies = Object.keys(manifest.peerDependencies ?? {})
-              .filter((dependency) => !manifest.peerDependenciesMeta?.[dependency]?.optional)
-            const dependencies = [...new Set([
-              ...Object.keys(manifest.dependencies ?? {}),
-              ...peerDependencies,
-            ])]
-            const probeFile = join(dirname(realpathSync(packageFile)), `.dsh-dependency-resolve-${process.pid}-${randomUUID()}.mjs`)
-            writeFileSync(probeFile, 'export const resolve = (specifier) => import.meta.resolve(specifier)\n')
-            try {
-              const { resolve: resolveDependency } = await import(pathToFileURL(probeFile).href)
-              for (const dependency of dependencies) {
-                dependencyCount++
-                try {
-                  resolveDependency(dependency)
-                } catch (error) {
-                  failures.push(`${manifest.name ?? packageFile} -> ${dependency}: ${error.message}`)
-                }
-              }
-            } finally {
-              rmSync(probeFile, { force: true })
-            }
-          }
-          if (failures.length) {
-            console.error(failures.join('\n'))
-            throw new Error(`source-built runtime dependency resolution failed (${failures.length})`)
-          }
-          console.log(`source-built runtime dependency resolution passed: ${packageCount} packages, ${dependencyCount} required dependencies`)
-          NODE
+          node scripts/source-build/check-dsh-runtime-dependencies.mjs \
+            .deploy-tmp/snapshot-013/arm64/stage/root/usr/lib/node_modules/@deepseek-ai/dsh \
+            .deploy-tmp/source-build/post-snapshot-runtime-dependency-check.json
 
       - name: Generate ephemeral signing certificate from the installed JDK
         shell: bash
@@ -420,5 +377,6 @@ jobs:
             .deploy-tmp/source-build/pnpm-deploy-build-policy.json
             .deploy-tmp/source-build/pnpm-deploy-runtime-closure.json
             .deploy-tmp/source-build/harness-web-preview-exclusion.json
+            .deploy-tmp/source-build/post-snapshot-runtime-dependency-check.json
           if-no-files-found: error
           retention-days: 30
