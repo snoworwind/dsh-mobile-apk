@@ -225,7 +225,7 @@ jobs:
             -dname 'CN=DSH Source Build,OU=Ephemeral,O=dsh-mobile-apk,C=US'
           keytool -list -v -keystore keystore/debug.keystore \
             -storepass android -alias androiddebugkey \
-            | grep '^SHA256:' > .deploy-tmp/source-build/signing-certificate-sha256.txt
+            | grep -E '^[[:space:]]*SHA256:' > .deploy-tmp/source-build/signing-certificate-sha256.txt
 
       - name: Build ARM64 APK
         shell: bash
