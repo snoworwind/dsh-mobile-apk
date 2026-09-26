@@ -2,6 +2,7 @@
 // Copy source-built first-party package payloads into the pnpm deploy tree
 // without replacing pnpm's package symlinks or their sibling dependency links.
 import { execFileSync } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import {
   existsSync,
   lstatSync,
@@ -89,20 +90,26 @@ let dependencyCount = 0
 for (const packageFile of packageFiles) {
   if (!existsSync(packageFile)) continue
   const manifest = JSON.parse(readFileSync(packageFile, 'utf8'))
-  const resolutionParent = pathToFileURL(realpathSync(packageFile)).href
   const peerDependencies = Object.keys(manifest.peerDependencies ?? {})
     .filter((dependency) => !manifest.peerDependenciesMeta?.[dependency]?.optional)
   const dependencies = [...new Set([
     ...Object.keys(manifest.dependencies ?? {}),
     ...peerDependencies,
   ])]
-  for (const dependency of dependencies) {
-    dependencyCount++
-    try {
-      import.meta.resolve(dependency, resolutionParent)
-    } catch (error) {
-      failures.push(`${manifest.name ?? packageFile} -> ${dependency}: ${error.message}`)
+  const probeFile = join(dirname(realpathSync(packageFile)), `.dsh-dependency-resolve-${process.pid}-${randomUUID()}.mjs`)
+  writeFileSync(probeFile, 'export const resolve = (specifier) => import.meta.resolve(specifier)\n')
+  try {
+    const { resolve: resolveDependency } = await import(pathToFileURL(probeFile).href)
+    for (const dependency of dependencies) {
+      dependencyCount++
+      try {
+        resolveDependency(dependency)
+      } catch (error) {
+        failures.push(`${manifest.name ?? packageFile} -> ${dependency}: ${error.message}`)
+      }
     }
+  } finally {
+    rmSync(probeFile, { force: true })
   }
 }
 if (failures.length) {

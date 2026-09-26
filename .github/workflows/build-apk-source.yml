@@ -290,8 +290,9 @@ jobs:
             exit 1
           fi
           node --input-type=module <<'NODE'
-          import { existsSync, readFileSync, readdirSync, realpathSync } from 'node:fs'
-          import { join, resolve } from 'node:path'
+          import { randomUUID } from 'node:crypto'
+          import { existsSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+          import { dirname, join, resolve } from 'node:path'
           import { pathToFileURL } from 'node:url'
           const engineRoot = resolve('.deploy-tmp/snapshot-013/arm64/stage/root/usr/lib/node_modules/@deepseek-ai/dsh')
           const scopeRoot = join(engineRoot, 'node_modules/@deepseek-ai')
@@ -312,13 +313,20 @@ jobs:
               ...Object.keys(manifest.dependencies ?? {}),
               ...peerDependencies,
             ])]
-            for (const dependency of dependencies) {
-              dependencyCount++
-              try {
-                import.meta.resolve(dependency, pathToFileURL(realpathSync(packageFile)).href)
-              } catch (error) {
-                failures.push(`${manifest.name ?? packageFile} -> ${dependency}: ${error.message}`)
+            const probeFile = join(dirname(realpathSync(packageFile)), `.dsh-dependency-resolve-${process.pid}-${randomUUID()}.mjs`)
+            writeFileSync(probeFile, 'export const resolve = (specifier) => import.meta.resolve(specifier)\n')
+            try {
+              const { resolve: resolveDependency } = await import(pathToFileURL(probeFile).href)
+              for (const dependency of dependencies) {
+                dependencyCount++
+                try {
+                  resolveDependency(dependency)
+                } catch (error) {
+                  failures.push(`${manifest.name ?? packageFile} -> ${dependency}: ${error.message}`)
+                }
               }
+            } finally {
+              rmSync(probeFile, { force: true })
             }
           }
           if (failures.length) {
