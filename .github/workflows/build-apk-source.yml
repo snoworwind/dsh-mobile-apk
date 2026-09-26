@@ -92,6 +92,10 @@ jobs:
           restore_workspace_config
           trap - EXIT
           cd "$GITHUB_WORKSPACE"
+          python3 scripts/source-build/prune-harness-preview.py \
+            .deploy-tmp/deepseek-harness \
+            .deploy-tmp/engine-deploy \
+            .deploy-tmp/source-build/harness-web-preview-exclusion.json
           node scripts/source-build/export-dsh-engine.mjs \
             .deploy-tmp/deepseek-harness .deploy-tmp/engine-overlay
 
@@ -272,5 +276,6 @@ jobs:
             .deploy-tmp/source-build/signing-certificate-sha256.txt
             .deploy-tmp/source-build/package-manager-versions.txt
             .deploy-tmp/source-build/pnpm-deploy-build-policy.json
+            .deploy-tmp/source-build/harness-web-preview-exclusion.json
           if-no-files-found: error
           retention-days: 30
