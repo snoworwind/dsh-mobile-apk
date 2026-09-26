@@ -33,7 +33,7 @@ jobs:
       - name: Install archive and signature tools
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y xz-utils gnupg
+          sudo apt-get install -y xz-utils gnupg unzip
 
       - name: Checkout pinned DeepSeek Harness source
         shell: bash
@@ -112,9 +112,6 @@ jobs:
           restore_deploy_inputs
           trap - EXIT
           cd "$GITHUB_WORKSPACE"
-          node scripts/source-build/check-android-native-runtime-packages.mjs \
-            .deploy-tmp/engine-deploy \
-            .deploy-tmp/source-build/android-native-runtime-packages.json
           node <<'NODE'
           const crypto = require('node:crypto')
           const fs = require('node:fs')
@@ -188,22 +185,18 @@ jobs:
           fs.writeFileSync('.deploy-tmp/source-build/effective-engine-overlay.json', JSON.stringify(manifest, null, 2) + '\n')
           NODE
 
-      - name: Build clean Termux bootstrap base from official source release
+      - name: Authenticate official Termux bootstrap and extract signing keys
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p .deploy-tmp/source-build .deploy-tmp/arm64-base
+          mkdir -p .deploy-tmp/source-build
           curl --fail --location --retry 3 \
             'https://github.com/termux/termux-packages/releases/download/bootstrap-2026.09.20-r1%2Bapt.android-7/bootstrap-aarch64.zip' \
             --output .deploy-tmp/source-build/bootstrap-aarch64.zip
           python3 scripts/source-build/prepare-termux-bootstrap.py \
+            --extract-bootstrap-only \
             .deploy-tmp/source-build/bootstrap-aarch64.zip \
-            .deploy-tmp/deepseek-harness \
-            .deploy-tmp/engine-deploy \
-            .deploy-tmp/arm64-base/base-usr.tar.xz
-          mkdir -p .deploy-tmp/source-build/bootstrap-extracted
-          tar -xJf .deploy-tmp/arm64-base/base-usr.tar.xz \
-            -C .deploy-tmp/source-build/bootstrap-extracted usr
+            .deploy-tmp/source-build/bootstrap-extracted/usr
 
       - name: Build project plugins and marketplace from source
         shell: bash
@@ -302,6 +295,64 @@ jobs:
             .deploy-tmp/source-build/termux-webroot \
             scripts/snapshot-config/preinstall.json
 
+      - name: Cross-compile node-pty Android binding from pinned source
+        shell: bash
+        run: |
+          set -euo pipefail
+          ndk_archive=.deploy-tmp/source-build/android-ndk-r30-linux.zip
+          curl --fail --location --retry 3 \
+            https://dl.google.com/android/repository/android-ndk-r30-linux.zip \
+            --output "$ndk_archive"
+          printf '%s  %s\n' '5107f898313790e449e87eee2183d9a20602dee9' "$ndk_archive" | sha1sum --check -
+          printf '%s\n' '5107f898313790e449e87eee2183d9a20602dee9' \
+            > .deploy-tmp/source-build/ndk-archive-sha1.txt
+          unzip -q "$ndk_archive" -d .deploy-tmp/source-build/ndk
+          node_deb=$(python3 - <<'PY'
+          import json, pathlib
+          report = json.loads(pathlib.Path('.deploy-tmp/source-build/termux-packages-provenance.json').read_text())
+          packages = [item for item in report['packages'] if item['package'] == 'nodejs-lts']
+          if len(packages) != 1:
+              raise SystemExit('signed Termux repository must contain exactly one nodejs-lts package')
+          print(pathlib.Path('.deploy-tmp/source-build/termux-webroot') / packages[0]['filename'])
+          PY
+          )
+          mkdir -p .deploy-tmp/source-build/node-deb-extracted
+          dpkg-deb --extract "$node_deb" .deploy-tmp/source-build/node-deb-extracted
+          node_header=$(find .deploy-tmp/source-build/node-deb-extracted -path '*/include/node/node_api.h' -print -quit)
+          test -n "$node_header"
+          node_headers=$(dirname "$node_header")
+          node scripts/source-build/build-node-pty-android.mjs \
+            .deploy-tmp/engine-deploy \
+            "$node_headers" \
+            .deploy-tmp/source-build/ndk/android-ndk-r30 \
+            .deploy-tmp/source-build/node-pty-android-build.json
+          node scripts/source-build/check-android-native-runtime-packages.mjs \
+            .deploy-tmp/engine-deploy \
+            .deploy-tmp/source-build/android-native-runtime-packages.json
+          node <<'NODE'
+          const fs = require('node:fs')
+          const path = '.deploy-tmp/source-build/source-build-policy.json'
+          const policy = JSON.parse(fs.readFileSync(path, 'utf8'))
+          policy.nodePtyAndroidSourceBuild = {
+            report: '.deploy-tmp/source-build/node-pty-android-build.json',
+            source: 'node-pty@1.2.0-beta.15 pinned npm package with the Harness lockfile integrity and patch',
+            headers: 'nodejs-lts headers from the SHA256-authenticated Termux package in the signed repository',
+            toolchain: 'Google Android NDK r30, Linux archive SHA1 5107f898313790e449e87eee2183d9a20602dee9',
+          }
+          fs.writeFileSync(path, JSON.stringify(policy, null, 2) + '\n')
+          NODE
+
+      - name: Assemble clean Termux base with the source-built Android binding
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .deploy-tmp/arm64-base
+          python3 scripts/source-build/prepare-termux-bootstrap.py \
+            .deploy-tmp/source-build/bootstrap-aarch64.zip \
+            .deploy-tmp/deepseek-harness \
+            .deploy-tmp/engine-deploy \
+            .deploy-tmp/arm64-base/base-usr.tar.xz
+
       - name: Build runtime snapshot from verified inputs
         shell: bash
         run: |
@@ -370,6 +421,10 @@ jobs:
           node scripts/source-build/check-dsh-runtime-dependencies.mjs \
             .deploy-tmp/snapshot-013/arm64/stage/root/usr/lib/node_modules/@deepseek-ai/dsh \
             .deploy-tmp/source-build/post-snapshot-runtime-dependency-check.json
+          node scripts/source-build/check-android-native-runtime-packages.mjs \
+            .deploy-tmp/snapshot-013/arm64/stage/root/usr/lib/node_modules/@deepseek-ai/dsh \
+            .deploy-tmp/source-build/post-snapshot-native-runtime-check.json
+          node scripts/source-build/check-dsh-source-snapshot.mjs "$snapshot_archive"
 
       - name: Generate ephemeral signing certificate from the installed JDK
         shell: bash
@@ -462,6 +517,9 @@ jobs:
             .deploy-tmp/source-build/pnpm-deploy-runtime-closure.json
             .deploy-tmp/source-build/pnpm-deploy-runtime-closure.lock.yaml
             .deploy-tmp/source-build/android-native-runtime-packages.json
+            .deploy-tmp/source-build/node-pty-android-build.json
+            .deploy-tmp/source-build/ndk-archive-sha1.txt
+            .deploy-tmp/source-build/post-snapshot-native-runtime-check.json
             .deploy-tmp/source-build/harness-web-preview-exclusion.json
             .deploy-tmp/source-build/post-snapshot-runtime-dependency-check.json
             .deploy-tmp/source-build/source-engine-snapshot-check.json

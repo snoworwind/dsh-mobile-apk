@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Check and hash the trusted publisher packages required by the Android runtime.
+// Check all known Android native loaders and inventory packaged native modules.
 import { createHash } from 'node:crypto'
 import { createRequire } from 'node:module'
 import {
@@ -13,13 +13,6 @@ import {
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-const [engineArg, reportArg] = process.argv.slice(2)
-if (!engineArg || !reportArg) {
-  console.error('usage: node check-android-native-runtime-packages.mjs <deployed-engine-root> <report.json>')
-  process.exit(2)
-}
-
-const engineRoot = realpathSync(resolve(engineArg))
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex')
 const within = (root, path) => {
   const rel = relative(root, path)
@@ -52,14 +45,14 @@ function readPackage(dir, expectedName, expectedVersion) {
   return { manifest, manifestSha256: sha256(readFileSync(manifestPath)) }
 }
 
-function filesUnder(dir) {
+function filesUnder(dir, include = () => true) {
   const files = []
   function walk(current) {
     for (const entry of readdirSync(current, { withFileTypes: true })) {
       const path = join(current, entry.name)
       if (entry.isSymbolicLink()) continue
       if (entry.isDirectory()) walk(path)
-      else if (entry.isFile()) {
+      else if (entry.isFile() && include(relative(dir, path).replaceAll(sep, '/'))) {
         files.push({
           path: relative(dir, path).replaceAll(sep, '/'),
           size: lstatSync(path).size,
@@ -72,6 +65,8 @@ function filesUnder(dir) {
   return files.sort((a, b) => a.path.localeCompare(b.path))
 }
 
+export function checkAndroidNativeRuntimePackages(engineArg, reportArg) {
+const engineRoot = realpathSync(resolve(engineArg))
 const scopeRoot = join(engineRoot, 'node_modules', '@deepseek-ai')
 const subprocessRoot = realpathSync(join(scopeRoot, 'dsh-subprocess-local'))
 const win32ProcessRoot = realpathSync(join(scopeRoot, 'dsh-win32-process'))
@@ -128,8 +123,43 @@ if (!sharpLoader.includes('require("@img/sharp-wasm32/sharp.node")')) {
   throw new Error('Sharp loader no longer exposes the expected WASM fallback')
 }
 
+const ptyRoot = packageAt(engineRoot, subprocessRoot, 'node-pty')
+const ptyPackage = readPackage(ptyRoot, 'node-pty', '1.2.0-beta.15')
+const ptyRelative = 'prebuilds/android-arm64/pty.node'
+const ptyPath = join(ptyRoot, ptyRelative)
+if (!existsSync(ptyPath)) throw new Error(`node-pty is missing ${ptyRelative}`)
+for (const shadow of ['build/Release/pty.node', 'build/Debug/pty.node']) {
+  if (existsSync(join(ptyRoot, shadow))) throw new Error(`node-pty ${shadow} would shadow the Android module`)
+}
+const ptyBytes = readFileSync(ptyPath)
+if (ptyBytes.length < 20 || ptyBytes[0] !== 0x7f || ptyBytes[1] !== 0x45 || ptyBytes[2] !== 0x4c
+  || ptyBytes[3] !== 0x46 || ptyBytes[4] !== 2 || ptyBytes[5] !== 1 || ptyBytes.readUInt16LE(18) !== 183) {
+  throw new Error('node-pty Android module is not a little-endian AArch64 ELF file')
+}
+const ptyLoader = readFileSync(join(ptyRoot, 'lib/utils.js'), 'utf8')
+if (!ptyLoader.includes('process.platform') || !ptyLoader.includes('process.arch') || !ptyLoader.includes('prebuilds/')) {
+  throw new Error('node-pty native loader no longer selects prebuilds/android-arm64')
+}
+const nativeInventory = filesUnder(join(engineRoot, 'node_modules', '.pnpm'),
+  (path) => path.endsWith('.node') || path.endsWith('.node.wasm'))
+const acknowledgedFamilies = [
+  /^@img\+sharp-linux-(?:x64|arm64)@0\.35\.3\//,
+  /^@img\+sharp-wasm32@0\.35\.3\//,
+  /^@koromix\+koffi-(?:android|linux)-(?:arm64|x64)@3\.2\.1\//,
+  /^node-pty@1\.2\.0-beta\.15_.*\//,
+  /^node-addon-require-builtin-linux-(?:arm64|x64)-gnu@0\.1\.4\//,
+  /^@deepseek-ai\+node-addon-system-linux-(?:arm64|x64)@.*\//,
+]
+const unreviewed = nativeInventory.filter((file) => !acknowledgedFamilies.some((pattern) => pattern.test(file.path)))
+if (unreviewed.length) throw new Error(`unreviewed native module families: ${unreviewed.map((file) => file.path).join(', ')}`)
+
 const report = {
   target: 'android-arm64',
+  nodePty: {
+    package: { name: 'node-pty', version: ptyPackage.manifest.version, manifestSha256: ptyPackage.manifestSha256 },
+    androidBinding: { path: ptyRelative, size: ptyBytes.length, sha256: sha256(ptyBytes), elfMachine: 'AArch64' },
+    loader: 'lib/utils.js selects prebuilds/android-arm64 from process.platform and process.arch',
+  },
   koffi: [...koffiCopies.values()],
   sharp: {
     package: { name: 'sharp', version: sharpPackage.manifest.version, manifestSha256: sharpPackage.manifestSha256 },
@@ -142,6 +172,23 @@ const report = {
     },
     emnapiRuntime: { name: emnapiPackage.name, version: emnapiPackage.version },
   },
+  nativeInventory,
+  platformExceptions: [
+    { package: 'node-addon-require-builtin', reason: 'EngineManager starts Node with --expose-internals; Harness loader first uses that JavaScript path and catches absent optional native bindings.' },
+    { package: '@deepseek-ai/node-addon-system', reason: 'The registered flock-android-F3 patch supplies Android single-process fallback; Linux system.node is not loaded.' },
+  ],
 }
-writeFileSync(resolve(reportArg), JSON.stringify(report, null, 2) + '\n')
-console.log(`Android runtime native package audit passed: Koffi ${report.koffi.map((item) => item.androidBinding.version).join(', ')} and Sharp WASM ${report.sharp.wasmFallback.version}`)
+if (reportArg) writeFileSync(resolve(reportArg), JSON.stringify(report, null, 2) + '\n')
+return report
+}
+
+const invokedDirectly = process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href
+if (invokedDirectly) {
+  const [engineArg, reportArg] = process.argv.slice(2)
+  if (!engineArg || !reportArg) {
+    console.error('usage: node check-android-native-runtime-packages.mjs <deployed-engine-root> <report.json>')
+    process.exit(2)
+  }
+  const report = checkAndroidNativeRuntimePackages(engineArg, reportArg)
+  console.log(`Android native runtime audit passed: node-pty ${report.nodePty.package.version}, Koffi ${report.koffi.map((item) => item.androidBinding.version).join(', ')}, Sharp WASM ${report.sharp.wasmFallback.version}, ${report.nativeInventory.length} reviewed native payloads`)
+}

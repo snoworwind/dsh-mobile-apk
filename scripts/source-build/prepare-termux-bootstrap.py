@@ -116,6 +116,15 @@ def tree_manifest(root: pathlib.Path) -> list[dict[str, object]]:
 
 
 def main() -> None:
+    if len(sys.argv) == 4 and sys.argv[1] == '--extract-bootstrap-only':
+        zip_path, extracted_usr = map(pathlib.Path, sys.argv[2:])
+        actual = hashlib.sha256(zip_path.read_bytes()).hexdigest()
+        if actual != BOOTSTRAP_SHA256:
+            raise ValueError(f"official Termux bootstrap SHA-256 mismatch: {actual}")
+        extracted_usr.mkdir(parents=True, exist_ok=True)
+        materialize_zip(zip_path, extracted_usr)
+        print(f"extracted authenticated Termux bootstrap for repository key verification: {extracted_usr}")
+        return
     if len(sys.argv) != 5:
         raise SystemExit("usage: prepare-termux-bootstrap.py <bootstrap-aarch64.zip> <source-root> <dsh-deploy-root> <output-base-usr.tar.xz>")
     zip_path, source_root, dsh_deploy, out_path = map(pathlib.Path, sys.argv[1:])

@@ -2,7 +2,7 @@
 // Source-build replacement for check-engine-overlay.mjs: inspect the final
 // snapshot's pnpm links and source package versions instead of legacy npm paths.
 import { createHash } from 'node:crypto'
-import { execFileSync } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import { createReadStream } from 'node:fs'
 import {
   existsSync,
@@ -17,6 +17,7 @@ import {
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { tmpdir } from 'node:os'
 import { checkDshRuntimeDependencies } from './check-dsh-runtime-dependencies.mjs'
+import { checkAndroidNativeRuntimePackages } from './check-android-native-runtime-packages.mjs'
 
 const snapshotArg = process.argv[2]
 if (!snapshotArg) {
@@ -49,13 +50,22 @@ if (sourceManifest.packageCount !== sourceManifest.packages?.length || sourceMan
 
 const tempRoot = mkdtempSync(join(tmpdir(), 'dsh-source-snapshot-'))
 try {
-  execFileSync('tar', [
-    '-xJf', snapshot,
+  const decoder = spawn('xz', ['-d', '-T0', '-c', snapshot], { stdio: ['ignore', 'pipe', 'inherit'] })
+  const extractor = spawn('tar', [
+    '-xf', '-',
     '-C', tempRoot,
     '--no-same-owner',
     '--no-same-permissions',
     packagePrefix,
-  ], { stdio: 'inherit' })
+    'home/.dsh/profiles/web/node_modules/@napi-rs/canvas-android-arm64',
+  ], { stdio: ['pipe', 'inherit', 'inherit'] })
+  decoder.stdout.pipe(extractor.stdin)
+  extractor.stdin.on('error', () => {}) // tar can close early after an extraction failure.
+  const successful = (child, name) => new Promise((accept, reject) => {
+    child.on('error', reject)
+    child.on('close', (code) => code === 0 ? accept() : reject(new Error(`${name} exited ${code}`)))
+  })
+  await Promise.all([successful(decoder, 'xz'), successful(extractor, 'tar')])
   const engineRoot = join(tempRoot, packagePrefix)
   const physicalEngineRoot = realpathSync(engineRoot)
   const packageChecks = []
@@ -79,6 +89,27 @@ try {
   }
 
   const dependencyCheck = checkDshRuntimeDependencies(engineRoot)
+  const nativeCheck = checkAndroidNativeRuntimePackages(engineRoot)
+  const ptyBuild = JSON.parse(readFileSync(join(sourceBuildRoot, 'node-pty-android-build.json'), 'utf8'))
+  if (nativeCheck.nodePty.androidBinding.sha256 !== ptyBuild.output.sha256) {
+    throw new Error('snapshot node-pty Android binary differs from the local source build')
+  }
+  const canvasRoot = join(tempRoot, 'home/.dsh/profiles/web/node_modules/@napi-rs/canvas-android-arm64')
+  const canvasManifest = JSON.parse(readFileSync(join(canvasRoot, 'package.json'), 'utf8'))
+  if (canvasManifest.name !== '@napi-rs/canvas-android-arm64' || canvasManifest.version !== '1.0.8') {
+    throw new Error(`unexpected Android Canvas package ${canvasManifest.name}@${canvasManifest.version}`)
+  }
+  const canvasFile = join(canvasRoot, 'skia.android-arm64.node')
+  const canvasBytes = readFileSync(canvasFile)
+  if (canvasBytes.length < 20 || canvasBytes[0] !== 0x7f || canvasBytes[1] !== 0x45
+    || canvasBytes[2] !== 0x4c || canvasBytes[3] !== 0x46 || canvasBytes[4] !== 2
+    || canvasBytes[5] !== 1 || canvasBytes.readUInt16LE(18) !== 183) {
+    throw new Error('Canvas Android module is not an AArch64 ELF file')
+  }
+  const launcher = readFileSync('app/src/main/java/com/dsharnessmobile/shell/EngineManager.kt', 'utf8')
+  if (!launcher.includes('"--expose-internals"')) {
+    throw new Error('the Android engine no longer exposes Node internals for the JavaScript loader fallback')
+  }
   const patchRegistry = JSON.parse(readFileSync('scripts/patches/registry.json', 'utf8'))
   const patchChecks = []
   const runtimePrefix = `${packagePrefix}/`
@@ -107,6 +138,8 @@ try {
     packageCount: packageChecks.length,
     packages: packageChecks,
     dependencyCheck,
+    nativeCheck,
+    canvasAndroidArm64: { version: canvasManifest.version, size: canvasBytes.length, sha256: sha256(canvasBytes) },
     patchChecks,
     builtInPresetCount: presetCount,
   }
