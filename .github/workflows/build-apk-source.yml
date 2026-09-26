@@ -117,7 +117,8 @@ jobs:
           const crypto = require('node:crypto')
           const fs = require('node:fs')
           const { createRequire } = require('node:module')
-          const yaml = createRequire('.deploy-tmp/deepseek-harness/apps/cli/package.json')('js-yaml')
+          const path = require('node:path')
+          const yaml = createRequire(path.resolve('.deploy-tmp/deepseek-harness/apps/cli/package.json'))('js-yaml')
           const lockPath = '.deploy-tmp/source-build/pnpm-deploy-runtime-closure.lock.yaml'
           const lock = yaml.load(fs.readFileSync(lockPath, 'utf8'))
           const reportPath = '.deploy-tmp/source-build/pnpm-deploy-runtime-closure.json'
