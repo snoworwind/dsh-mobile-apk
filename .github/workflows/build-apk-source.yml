@@ -82,14 +82,31 @@ jobs:
           corepack pnpm run build:web
           workspace_config="$GITHUB_WORKSPACE/.deploy-tmp/deepseek-harness/pnpm-workspace.yaml"
           workspace_backup="$GITHUB_WORKSPACE/.deploy-tmp/source-build/pnpm-workspace.original.yaml"
+          package_backup_dir="$GITHUB_WORKSPACE/.deploy-tmp/source-build/pnpm-deploy-runtime-closure"
+          package_backup="$package_backup_dir/package.json.original"
+          lock_backup="$package_backup_dir/pnpm-lock.yaml.original"
           cp "$workspace_config" "$workspace_backup"
-          restore_workspace_config() { cp "$workspace_backup" "$workspace_config"; }
-          trap restore_workspace_config EXIT
+          mkdir -p "$package_backup_dir"
+          cp package.json "$package_backup"
+          cp pnpm-lock.yaml "$lock_backup"
+          restore_deploy_inputs() {
+            cp "$workspace_backup" "$workspace_config"
+            cp "$package_backup" package.json
+            cp "$lock_backup" pnpm-lock.yaml
+          }
+          trap restore_deploy_inputs EXIT
           python3 "$GITHUB_WORKSPACE/scripts/source-build/prepare-pnpm-deploy-policy.py" \
             "$workspace_config" \
             "$GITHUB_WORKSPACE/.deploy-tmp/source-build/pnpm-deploy-build-policy.json"
+          node "$GITHUB_WORKSPACE/scripts/source-build/prepare-pnpm-deploy-runtime-closure.mjs" \
+            "$GITHUB_WORKSPACE/.deploy-tmp/deepseek-harness" \
+            "$GITHUB_WORKSPACE/scripts/snapshot-config/engine-overlay.json" \
+            "$package_backup_dir" \
+            "$GITHUB_WORKSPACE/.deploy-tmp/source-build/pnpm-deploy-runtime-closure.json"
+          corepack pnpm@12.2.0 --pm-on-fail=ignore install --lockfile-only --offline --ignore-scripts
+          node -e 'const fs=require("node:fs"); const crypto=require("node:crypto"); const path=require("node:path"); const p=path.join(process.env.GITHUB_WORKSPACE,".deploy-tmp/source-build/pnpm-deploy-runtime-closure.json"); const report=JSON.parse(fs.readFileSync(p,"utf8")); report.temporaryLockfileSha256=crypto.createHash("sha256").update(fs.readFileSync("pnpm-lock.yaml")).digest("hex"); fs.writeFileSync(p,JSON.stringify(report,null,2)+"\n")'
           corepack pnpm@12.2.0 --pm-on-fail=ignore --filter @deepseek-ai/dsh deploy --prod "$GITHUB_WORKSPACE/.deploy-tmp/engine-deploy"
-          restore_workspace_config
+          restore_deploy_inputs
           trap - EXIT
           cd "$GITHUB_WORKSPACE"
           python3 scripts/source-build/prune-harness-preview.py \
@@ -108,6 +125,7 @@ jobs:
           const path = 'scripts/snapshot-config/engine-overlay.json'
           const manifest = JSON.parse(fs.readFileSync(path, 'utf8'))
           const injection = JSON.parse(fs.readFileSync('.deploy-tmp/source-build/first-party-deploy-injection.json', 'utf8'))
+          const runtimeClosure = JSON.parse(fs.readFileSync('.deploy-tmp/source-build/pnpm-deploy-runtime-closure.json', 'utf8'))
           const sourcePackages = Object.entries(manifest.packages ?? {})
             .filter(([name]) => name.startsWith('@deepseek-ai/'))
             .map(([name, version]) => ({ name, version }))
@@ -117,6 +135,7 @@ jobs:
           fs.writeFileSync('.deploy-tmp/source-build/source-build-policy.json', JSON.stringify({
             omittedFirstPartyPackageOverlays: sourcePackages,
             firstPartySourceInjection: injection,
+            pnpmDeployRuntimeClosure: runtimeClosure,
             firstPartyOverlayReason: 'The source-built package tarballs are injected into the physical targets of the pnpm deploy package links before bootstrap packaging. This supplies built lib files while preserving each package symlink and its sibling virtual-store dependency links; the snapshot builder skips re-extracting these packages.',
             exportedFirstPartyTarballs: 'Built from the pinned source, hashed in source-build-manifest.json, and injected into the pnpm deploy tree before that tree is copied into the APK runtime.',
           }, null, 2) + '\n')
@@ -401,6 +420,7 @@ jobs:
             .deploy-tmp/source-build/signing-certificate-sha256.txt
             .deploy-tmp/source-build/package-manager-versions.txt
             .deploy-tmp/source-build/pnpm-deploy-build-policy.json
+            .deploy-tmp/source-build/pnpm-deploy-runtime-closure.json
             .deploy-tmp/source-build/harness-web-preview-exclusion.json
           if-no-files-found: error
           retention-days: 30
