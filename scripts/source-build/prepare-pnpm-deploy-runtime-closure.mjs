@@ -17,11 +17,13 @@ const sourceRoot = resolve(sourceArg)
 const cliDir = join(sourceRoot, 'apps', 'cli')
 const packageFile = join(cliDir, 'package.json')
 const lockFile = join(sourceRoot, 'pnpm-lock.yaml')
+const workspaceFile = join(sourceRoot, 'pnpm-workspace.yaml')
 const backupDir = resolve(backupArg)
 const reportFile = resolve(reportArg)
 const sha256 = (value) => createHash('sha256').update(value).digest('hex')
 const originalPackage = readFileSync(packageFile)
 const originalLock = readFileSync(lockFile)
+const originalWorkspace = readFileSync(workspaceFile)
 const manifest = JSON.parse(originalPackage.toString('utf8'))
 const overlay = JSON.parse(readFileSync(resolve(overlayArg), 'utf8'))
 const packages = Object.entries(overlay.packages ?? {})
@@ -32,8 +34,30 @@ if (packages.length < 200) throw new Error(`expected the pinned first-party pack
 const requireFromCli = createRequire(packageFile)
 const yaml = requireFromCli('js-yaml')
 const lock = yaml.load(originalLock.toString('utf8'))
+const workspaceConfig = yaml.load(originalWorkspace.toString('utf8'))
 const importer = lock.importers?.['apps/cli']
 if (!importer) throw new Error('pnpm-lock.yaml is missing the apps/cli importer')
+
+// The source audit targets Android ARM64, while pnpm deploy runs on Linux x64.
+// Include the upstream Koffi Android binding and Sharp's official WASM backend
+// explicitly in the production closure so those platform-specific runtime
+// fallbacks survive the cross-platform deployment step.
+const androidRuntimeDependencies = {
+  '@img/sharp-wasm32': '0.35.3',
+}
+const dependencies = { ...(manifest.dependencies ?? {}) }
+const importerDependencies = { ...(importer.dependencies ?? {}) }
+for (const [name, version] of Object.entries(androidRuntimeDependencies)) {
+  dependencies[name] = version
+  importerDependencies[name] = { specifier: version, version }
+}
+workspaceConfig.overrides = { ...(workspaceConfig.overrides ?? {}), koffi: '3.2.1' }
+const supported = workspaceConfig.supportedArchitectures ?? {}
+workspaceConfig.supportedArchitectures = {
+  ...supported,
+  os: [...new Set([...(supported.os ?? ['current']), 'android'])],
+  cpu: [...new Set([...(supported.cpu ?? ['current']), 'arm64'])],
+}
 
 const packageDirs = new Map()
 function walk(dir) {
@@ -54,10 +78,8 @@ mkdirSync(backupDir, { recursive: true })
 copyFileSync(packageFile, join(backupDir, 'apps-cli-package.json.original'))
 copyFileSync(lockFile, join(backupDir, 'pnpm-lock.yaml.original'))
 
-const dependencies = { ...(manifest.dependencies ?? {}) }
 const sections = ['devDependencies', 'optionalDependencies', 'peerDependencies']
 const removedFrom = Object.fromEntries(sections.map((section) => [section, []]))
-const importerDependencies = { ...(importer.dependencies ?? {}) }
 const removedFromImporter = Object.fromEntries(['devDependencies', 'optionalDependencies', 'peerDependencies'].map((section) => [section, []]))
 const forcedWorkspacePackages = []
 for (const [name] of packages) {
@@ -95,6 +117,8 @@ const temporaryPackage = Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`)
 const temporaryLock = Buffer.from(yaml.dump(lock, { lineWidth: -1, noRefs: true, quotingType: "'" }))
 writeFileSync(packageFile, temporaryPackage)
 writeFileSync(lockFile, temporaryLock)
+const temporaryWorkspace = Buffer.from(yaml.dump(workspaceConfig, { lineWidth: -1, noRefs: true, quotingType: "'" }))
+writeFileSync(workspaceFile, temporaryWorkspace)
 writeFileSync(reportFile, JSON.stringify({
   sourceCommit: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: sourceRoot, encoding: 'utf8' }).trim(),
   deployTarget: 'apps/cli (@deepseek-ai/dsh)',
@@ -102,10 +126,18 @@ writeFileSync(reportFile, JSON.stringify({
   temporaryPackageJsonSha256: sha256(temporaryPackage),
   originalLockfileSha256: sha256(originalLock),
   temporaryLockfileSha256: sha256(temporaryLock),
+  originalWorkspaceConfigSha256: sha256(originalWorkspace),
+  temporaryWorkspaceConfigSha256: sha256(temporaryWorkspace),
   packageCount: forcedWorkspacePackages.length,
   productionWorkspacePackages: forcedWorkspacePackages,
+  androidRuntimeDependencies: {
+    ...androidRuntimeDependencies,
+    koffiOverride: '3.2.1',
+    supportedArchitectures: workspaceConfig.supportedArchitectures,
+    rationale: 'Koffi 3.1.1 has no Android ARM64 binding; upstream Koffi 3.2.1 publishes @koromix/koffi-android-arm64. sharp 0.35.3 uses @img/sharp-wasm32 as its Android-compatible fallback. Both exact upstream packages are included in the pnpm lock and deployment closure.',
+  },
   removedFromManifestSections: removedFrom,
   removedFromImporterSections: removedFromImporter,
-  purpose: 'Temporarily add pinned first-party overlay workspace packages to the apps/cli production deploy graph and its lockfile importer so pnpm deploy includes their runtime dependency links. Original apps/cli/package.json and pnpm-lock.yaml are restored after deployment.',
+  purpose: 'Temporarily add pinned first-party overlay workspace packages and required Android runtime fallback packages to the apps/cli production deploy graph, pin Koffi to its official Android-capable version, and enable Android ARM64 optional dependencies. Original apps/cli/package.json, pnpm-lock.yaml, and pnpm-workspace.yaml are restored after deployment.',
 }, null, 2) + '\n')
 console.log(`prepared apps/cli production dependency closure for ${forcedWorkspacePackages.length} first-party packages`)
