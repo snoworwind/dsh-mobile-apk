@@ -12,7 +12,8 @@ import tempfile
 import urllib.request
 
 REPOSITORY = "https://packages.termux.dev/apt/termux-main"
-INDEX_REL = "dists/stable/main/binary-aarch64/Packages.gz"
+SUITE_REL = "main/binary-aarch64/Packages.gz"
+INDEX_REL = "dists/stable/" + SUITE_REL
 
 
 def fetch(url: str) -> bytes:
@@ -76,7 +77,9 @@ def main() -> None:
         subprocess.run(["gpgv", "--keyring", str(keyring), "--output", str(release_path), str(inrelease_path)],
                        check=True)
         release_text = release_path.read_text(encoding="utf-8")
-        expected_index_hash, expected_index_size = signed_sha256(release_text, INDEX_REL)
+    # Release checksums are relative to the suite root; the repository URL
+    # and local apt layout additionally include dists/stable/.
+    expected_index_hash, expected_index_size = signed_sha256(release_text, SUITE_REL)
 
     index_gz = fetch(REPOSITORY + "/" + INDEX_REL)
     actual_index_hash = hashlib.sha256(index_gz).hexdigest()
