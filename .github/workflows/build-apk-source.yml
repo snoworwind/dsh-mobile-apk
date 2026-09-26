@@ -328,8 +328,31 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          restore_overlay() { cp .deploy-tmp/source-build/engine-overlay.original.json scripts/snapshot-config/engine-overlay.json; }
+          overlay_gate_backup=.deploy-tmp/source-build/check-engine-overlay.original.mjs
+          cp scripts/check-engine-overlay.mjs "$overlay_gate_backup"
+          restore_overlay() {
+            cp .deploy-tmp/source-build/engine-overlay.original.json scripts/snapshot-config/engine-overlay.json
+            cp "$overlay_gate_backup" scripts/check-engine-overlay.mjs
+          }
           trap restore_overlay EXIT
+          node <<'NODE'
+          const fs = require('node:fs')
+          const crypto = require('node:crypto')
+          const policyPath = '.deploy-tmp/source-build/source-build-policy.json'
+          const policy = JSON.parse(fs.readFileSync(policyPath, 'utf8'))
+          const digest = (path) => crypto.createHash('sha256').update(fs.readFileSync(path)).digest('hex')
+          policy.sourceBuiltEngineOverlayGate = {
+            originalGate: 'scripts/check-engine-overlay.mjs',
+            originalGateSha256: digest('.deploy-tmp/source-build/check-engine-overlay.original.mjs'),
+            temporaryAdapter: 'scripts/source-build/check-dsh-source-snapshot-gate.mjs',
+            temporaryAdapterSha256: digest('scripts/source-build/check-dsh-source-snapshot-gate.mjs'),
+            checker: 'scripts/source-build/check-dsh-source-snapshot.mjs',
+            checkerSha256: digest('scripts/source-build/check-dsh-source-snapshot.mjs'),
+            reason: 'The standard gate models the older flattened npm overlay; this source audit uses the pinned 0.1.5 pnpm deploy tree. The replacement validates the final snapshot against the pinned source package manifest, pnpm dependency links, and registered engine patch markers.'
+          }
+          fs.writeFileSync(policyPath, JSON.stringify(policy, null, 2) + '\n')
+          NODE
+          cp scripts/source-build/check-dsh-source-snapshot-gate.mjs scripts/check-engine-overlay.mjs
           node scripts/build-apk.mjs --abi arm64 --suffix -source
           find out -type f -name '*.apk' -print -exec sha256sum {} \; > .deploy-tmp/source-build/apk-sha256.txt
           test -s .deploy-tmp/source-build/apk-sha256.txt
@@ -378,5 +401,6 @@ jobs:
             .deploy-tmp/source-build/pnpm-deploy-runtime-closure.json
             .deploy-tmp/source-build/harness-web-preview-exclusion.json
             .deploy-tmp/source-build/post-snapshot-runtime-dependency-check.json
+            .deploy-tmp/source-build/source-engine-snapshot-check.json
           if-no-files-found: error
           retention-days: 30
