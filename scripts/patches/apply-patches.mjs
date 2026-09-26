@@ -70,9 +70,17 @@ const IMPLS = {
         changed++
       }
       // A-3 尾部
-      if (!s.includes(')});return n()}}') && s.includes('join(`\n`)}}')) {
-        s = s.replace('join(`\n`)}}', 'join(`\n`)});return n()}}')
-        changed++
+      if (!s.includes(')});return n()}}')) {
+        if (s.includes('join(`\n`)}}')) {
+          s = s.replace('join(`\n`)}}', 'join(`\n`)});return n()}}')
+          changed++
+        } else if (s.includes('join(`\n`)})}}')) {
+          // The fixed marketplace source commit's esbuild output closes the
+          // optional requireApproval call before the callback; preserve that
+          // close and continue the hook waterfall afterward.
+          s = s.replace('join(`\n`)})}}', 'join(`\n`)});return n()}}')
+          changed++
+        }
       }
       if (changed === 0) {
         throw new Error('锚点未命中——未匹配任何已知形态；请人工检查 lib/index.js 的 tt() 实现')
