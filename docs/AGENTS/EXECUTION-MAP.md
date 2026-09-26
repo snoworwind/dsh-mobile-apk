@@ -2153,7 +2153,7 @@ flowchart TD
   S -->|"否"| V["交付 out 目录产物"]
 ```
 
-**ARM64 来源审计变体**：`.github/workflows/build-apk-source.yml` 是独立的 `workflow_dispatch` 入口。它从固定 Harness commit 构建 CLI、递归 bundle 与 Web UI，再用 pnpm deploy 装配生产依赖树；overlay 也从该源码树打包。Termux 官方 bootstrap 以固定 SHA-256 校验后生成 `usr` 基座，并将源码部署树清单写入 provenance；再从 bootstrap 读取 Termux 密钥验证 `InRelease` 和包索引列出的每个 `.deb`。profile 文件由上游 `profile.ts` 模板初始化。壳插件从项目源构建，host-web-compat 对照固定上游 commit，marketplace 从固定上游源构建；此变体把旧 LFS 基座独有且未挂载的四个遗留包排除，名单与理由随策略清单附出。此流程不启用 LFS、不读取 `base/base-usr-*` 或 `base-dsh`，通过本地只读 HTTP 镜像把验签后的索引与 deb 交给既有快照构建器，最后出 ARM64 APK 与来源清单/哈希。实现分别位于 `scripts/source-build/prepare-termux-bootstrap.py`、`prepare-termux-signed-repo.py`、`seed-dsh-profiles.mjs`、`export-dsh-engine.mjs`。
+**ARM64 来源审计变体**：`.github/workflows/build-apk-source.yml` 是独立的 `workflow_dispatch` 入口。它从固定 Harness commit 构建 CLI、递归 bundle 与 Web UI，再用 pnpm deploy 装配生产依赖树；overlay 包也从该源码树打包。随后临时移除第一方包 overlay，让设备快照继续使用 deploy 生成的包树和 `.pnpm` 链接，避免逐包解包覆盖后 Node 无法解析依赖；快照构建后、APK 打包前，对所有部署的 `@deepseek-ai/*` 包的必需依赖运行 `import.meta.resolve` 预检。Termux 官方 bootstrap 以固定 SHA-256 校验后生成 `usr` 基座，并将源码部署树清单写入 provenance；再从 bootstrap 读取 Termux 密钥验证 `InRelease` 和包索引列出的每个 `.deb`。profile 文件由上游 `profile.ts` 模板初始化。壳插件从项目源构建，host-web-compat 对照固定上游 commit，marketplace 从固定上游源构建；此变体把旧 LFS 基座独有且未挂载的四个遗留包排除，名单与理由随策略清单附出。此流程不启用 LFS、不读取 `base/base-usr-*` 或 `base-dsh`，通过本地只读 HTTP 镜像把验签后的索引与 deb 交给既有快照构建器，最后出 ARM64 APK 与来源清单/哈希。实现分别位于 `scripts/source-build/prepare-termux-bootstrap.py`、`prepare-termux-signed-repo.py`、`seed-dsh-profiles.mjs`、`export-dsh-engine.mjs`。
 
 ```mermaid
 flowchart LR

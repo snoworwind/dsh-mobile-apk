@@ -96,8 +96,26 @@ jobs:
             .deploy-tmp/deepseek-harness \
             .deploy-tmp/engine-deploy \
             .deploy-tmp/source-build/harness-web-preview-exclusion.json
+          cp scripts/snapshot-config/engine-overlay.json .deploy-tmp/source-build/engine-overlay.original.json
           node scripts/source-build/export-dsh-engine.mjs \
             .deploy-tmp/deepseek-harness .deploy-tmp/engine-overlay
+          node <<'NODE'
+          const fs = require('node:fs')
+          const path = 'scripts/snapshot-config/engine-overlay.json'
+          const manifest = JSON.parse(fs.readFileSync(path, 'utf8'))
+          const sourcePackages = Object.entries(manifest.packages ?? {})
+            .filter(([name]) => name.startsWith('@deepseek-ai/'))
+            .map(([name, version]) => ({ name, version }))
+          if (sourcePackages.length < 200) throw new Error(`expected the pinned first-party package set, found ${sourcePackages.length}`)
+          for (const { name } of sourcePackages) delete manifest.packages[name]
+          fs.writeFileSync(path, JSON.stringify(manifest, null, 2) + '\n')
+          fs.writeFileSync('.deploy-tmp/source-build/source-build-policy.json', JSON.stringify({
+            omittedFirstPartyPackageOverlays: sourcePackages,
+            firstPartyOverlayReason: 'The pinned pnpm deploy tree already contains these source-built packages and their virtual-store links. Re-extracting pack tarballs at the package paths severs Node module resolution from that layout; keep the deployed tree and overlay only non-first-party packages.',
+            exportedFirstPartyTarballs: 'Built from the pinned source and listed in source-build-manifest.json, but not injected into the APK; the APK uses the source-built pnpm deploy tree.',
+          }, null, 2) + '\n')
+          fs.writeFileSync('.deploy-tmp/source-build/effective-engine-overlay.json', JSON.stringify(manifest, null, 2) + '\n')
+          NODE
 
       - name: Build clean Termux bootstrap base from official source release
         shell: bash
@@ -187,7 +205,7 @@ jobs:
           set -euo pipefail
           mkdir -p .deploy-tmp/source-build
           cp scripts/snapshot-config/preinstall.json .deploy-tmp/source-build/preinstall.original.json
-          cp scripts/snapshot-config/engine-overlay.json .deploy-tmp/source-build/engine-overlay.original.json
+          test -s .deploy-tmp/source-build/engine-overlay.original.json
           node -e 'const fs=require("fs"); const p="scripts/snapshot-config/preinstall.json"; const x=JSON.parse(fs.readFileSync(p,"utf8")); if (!x.targets.includes("nodejs-lts")) x.targets.push("nodejs-lts"); x.requiredTargets=["nodejs-lts"]; fs.writeFileSync(p,JSON.stringify(x,null,2)+"\n")'
           node <<'NODE'
           const fs = require('fs')
@@ -196,10 +214,12 @@ jobs:
           const omitted = manifest.keepUnpublished ?? []
           manifest.keepUnpublished = []
           fs.writeFileSync(path, JSON.stringify(manifest, null, 2) + '\n')
-          fs.writeFileSync('.deploy-tmp/source-build/source-build-policy.json', JSON.stringify({
-            omittedLegacyKeepUnpublished: omitted,
-            reason: 'These packages are absent from the pinned Harness source commit and are unmounted legacy residue inherited only from the old LFS runtime base.'
-          }, null, 2) + '\n')
+          const policyPath = '.deploy-tmp/source-build/source-build-policy.json'
+          const policy = JSON.parse(fs.readFileSync(policyPath, 'utf8'))
+          policy.omittedLegacyKeepUnpublished = omitted
+          policy.omittedLegacyKeepUnpublishedReason = 'These packages are absent from the pinned Harness source commit and are unmounted legacy residue inherited only from the old LFS runtime base.'
+          fs.writeFileSync(policyPath, JSON.stringify(policy, null, 2) + '\n')
+          fs.writeFileSync('.deploy-tmp/source-build/effective-engine-overlay.json', JSON.stringify(manifest, null, 2) + '\n')
           NODE
 
       - name: Verify signed Termux repository and stage pinned packages
@@ -263,6 +283,44 @@ jobs:
           NODE
             exit 1
           fi
+          node --input-type=module <<'NODE'
+          import { existsSync, readFileSync, readdirSync } from 'node:fs'
+          import { join, resolve } from 'node:path'
+          import { pathToFileURL } from 'node:url'
+          const engineRoot = resolve('.deploy-tmp/snapshot-013/arm64/stage/root/usr/lib/node_modules/@deepseek-ai/dsh')
+          const scopeRoot = join(engineRoot, 'node_modules/@deepseek-ai')
+          const failures = []
+          let packageCount = 0
+          let dependencyCount = 0
+          const packageFiles = [join(engineRoot, 'package.json')]
+          for (const name of readdirSync(scopeRoot)) {
+            packageFiles.push(join(scopeRoot, name, 'package.json'))
+          }
+          for (const packageFile of packageFiles) {
+            if (!existsSync(packageFile)) continue
+            const manifest = JSON.parse(readFileSync(packageFile, 'utf8'))
+            packageCount++
+            const peerDependencies = Object.keys(manifest.peerDependencies ?? {})
+              .filter((dependency) => !manifest.peerDependenciesMeta?.[dependency]?.optional)
+            const dependencies = [...new Set([
+              ...Object.keys(manifest.dependencies ?? {}),
+              ...peerDependencies,
+            ])]
+            for (const dependency of dependencies) {
+              dependencyCount++
+              try {
+                import.meta.resolve(dependency, pathToFileURL(packageFile).href)
+              } catch (error) {
+                failures.push(`${manifest.name ?? packageFile} -> ${dependency}: ${error.message}`)
+              }
+            }
+          }
+          if (failures.length) {
+            console.error(failures.join('\n'))
+            throw new Error(`source-built runtime dependency resolution failed (${failures.length})`)
+          }
+          console.log(`source-built runtime dependency resolution passed: ${packageCount} packages, ${dependencyCount} required dependencies`)
+          NODE
 
       - name: Generate ephemeral signing certificate from the installed JDK
         shell: bash
@@ -323,6 +381,7 @@ jobs:
             .deploy-tmp/source-build/component-source-provenance.json
             .deploy-tmp/source-build/marketplace-source-provenance.json
             .deploy-tmp/source-build/source-build-policy.json
+            .deploy-tmp/source-build/effective-engine-overlay.json
             .deploy-tmp/source-build/android-build-inputs-sha256.txt
             .deploy-tmp/source-build/gradle-artifacts-sha256.txt
             .deploy-tmp/source-build/signing-certificate-sha256.txt
