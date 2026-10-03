@@ -129,6 +129,16 @@ adb -s <serial> logcat -d -s dsh-browser:V AndroidRuntime:E System.err:W
 - 参数约定各不相同：`verify-webview-015`/`verify-browser-host` 用 **positional** ws；`verify-vdisplay-viewer` 用 `--ws`；`verify-state-sync` **不要传 --ws**（会禁用 target 重解析）。传错不报错，只是连到旧 target。
 - `verify-vdisplay-viewer` / `verify-vdisplay-float` 需要 Shizuku 已注册：未注册时 `vdisplayCreate` 一步就 FAIL——这是**前置不满足**（先按 §3 把 Shizuku 配起来），不是缺陷，别当回归报。
 
+### 5.1 无 adb 时的 CDP 通道（应用内引擎会话可直接连 WebView，2026-10-03 实测跑通）
+
+`adb forward` 不是唯一入口：**引擎进程与宿主 App 同 uid**，可直接连主 WebView 的 devtools 抽象套接字。适用于「本机没有 adb 授权、但会话跑在目标设备上」的场景（如应用内 AI 自验），步骤：
+
+1. 取 App 进程 pid：从引擎进程沿 `/proc/<pid>/status` 的 `PPid` 往上走两级（node（经 `/system/bin/linker64 …` 拉起）→ `com.dsharnessmobile.shell`）；
+2. Node 里 `net.connect({ path: '\0webview_devtools_remote_<appPid>' })`（Node 接受以 `\0` 开头的抽象套接字路径），先 `GET /json/list` 拿 `webSocketDebuggerUrl` 的 path；
+3. 本机起一个 TCP→unix 代理（`net.createServer` 里把 `client` 与上面那个 `net.connect` 互 `pipe`），再用 **Node 内置全局 `WebSocket`** 连 `ws://127.0.0.1:<port><path>`，即可发 `Runtime.evaluate` / `Page.reload` / `Emulation.setFocusEmulationEnabled`（判「document 是否真的 focused」时必需——剪贴板/焦点类判据在未聚焦文档上会得到不同错误码）。
+
+限制（如实）：这条通道**只做页内读数**；`input tap`、截图、无障碍树仍走 adb/设备控制面。剪贴板类判据不能用 `navigator.clipboard.readText()` 回读（WebView 同样拒），要么给桥装**转发 spy**（注意：`window.androidBridge` 是 Java 对象，给它的方法赋值不生效，必须整体替换 `window.androidBridge` 为转发对象，用完 `Page.reload` 还原），要么由真人 tap 后粘贴验证。
+
 ## 6. 证据与判据（每次验收必须产出）
 
 落盘目录：`.deploy-tmp/<round>/`（已在 `.gitignore` 内），命名：

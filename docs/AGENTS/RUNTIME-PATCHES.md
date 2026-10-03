@@ -39,7 +39,7 @@
   - runtime patch asset missing表示打包遗漏，不是功能通过。
   - `index hash adaptation failed; keeping bundled patch`（hashAdaptive 已于 0.13.7fx-1 随 web-frontend-index.html 退役，见 §8；该日志行不再产生）。
 - **产物抽验**：从 APK 内 assets/patched/ 取出与快照解压树目标文件做字节比对（contentEquals 同一判定）；发布链可用 `tar -xO` 抽验快照内目标文件（AGENTS.md 惯例）。
-- **行为抽验**：剪贴板复制（primitives）、附件上传图片（attachment 2048 上限）、WebView 沉浸式与老内核插件列表（web-frontend）、会话持久化/文件工具（fs-local、session-persistence-jsonl）。
+- **行为抽验**：剪贴板复制（**注入层** `dsh-host-web-compat` 的 `navigator.clipboard.writeText` 回落——`primitives-index.js` 资产已于 0.13.3 退役，别再去 assets 里找它）、附件上传图片（attachment 2048 上限）、WebView 沉浸式与老内核插件列表（web-frontend）、会话持久化/文件工具（fs-local、session-persistence-jsonl）。
 
 ## 5. 机制演进史（改动前先读，防止重蹈）
 
