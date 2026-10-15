@@ -1967,3 +1967,11 @@ EngineBootContinuationTest用latch驱动真实观察函数：winner持CAS但无�
 **现象**：来源快照的补丁副本收敛在 `unknown engine patch verifier: mimo-thinking-toggle-056` 处停止，最终快照检查也会复用同一缺口。
 
 **真因与修法**：registry 和普通补丁链已登记、使用 MiMo 的双文件 planner，但 `verifyCanonicalEnginePatch` 只分派 Pi streaming 和 PTC。补接同一个 `planMimoThinking`，约束读取路径属于引擎根，继续要求所有 plan 的 before==after；未知 verifier 仍拒绝，不改 planner 的版本、锚点或字节判据。`node --test scripts/source-build/reconcile-engine-patch-copies.test.mjs` 6 例通过，含完整双文件通过、只还原一文件即拒绝、未知 verifier 拒绝的受控反例，日志 `.deploy-tmp/source-reconcile-tests.log`。复用 planner 不是跳过 verifier；实际 APK 的快照判据仍须在最终产物上执行。
+
+324. **认证 Termux 新闭包缺许可矩阵项，且 ICU 包把错误页当作 LICENSE**
+
+**现象与真因**：WSL 来源构建的真实候选在第三方许可门禁被拒，缺 c-ares、libicu、nodejs-lts、resolv-conf 四个包名；旧 LFS 基座的依赖闭包没有这些条目。进一步读取认证包，ICU 78.3 的 LICENSE 为 `404: Not Found`（SHA-256 `d5558cd419c8d46bdc958064cb97f963d1ea793866414c025906ec15033512ed`）。Termux 配方下载源使用 `release-78.3`，取许可却将点改成横线，且 curl 未拒绝错误页；包签名证明字节来源，不证明包内文档正确。
+
+**修法**：只补已核对的四个包名，不为未知包提供通配豁免。保留认证包的 c-ares/Node 版权全文、resolv-conf 的官方 Public Domain 声明，并将 ICU 精确发布标签的完整 Unicode 及第三方 notices 固化到仓库 LICENSES，重生成实际版本 notices。候选中的许可文档替换必须逐成员记录原始/替换哈希，程序载荷沿用已验证的来源构建；全部原始 APK 门禁仍须对最终候选执行。各全文路径与上游 URL 只在 [gpl-compliance.md](gpl-compliance.md) 登记。
+
+**证据与边界**：原门禁先以四条缺项反证失败，补登记后对同一实际已注入快照通过，日志 `.deploy-tmp/source-license-check.log`；许可来源及全文 SHA-256 记录 `.deploy-tmp/source-license-evidence.json`。原 Windows 工作树的固定 Shizuku 许可 CRLF 曾触发精确字节校验失败，只恢复为 Git 中 LF 字节，Git 内容差异为空，判据未改；`.gitattributes` 对 LICENSES 原文禁用行尾转换并保留上游空白，避免再把字节校验输入改写。实际 APK 许可文本、修复后的运行时文档与最终签名结果仍以后续交付报告为准；未做设备验证。

@@ -22,6 +22,8 @@ java -classpath gradle/wrapper/gradle-wrapper.jar org.gradle.wrapper.GradleWrapp
 
 ## fx2 本地来源链
 
+来源链的签名 Termux 仓库闭包会引入新的包名，构建时须按实际 dpkg status 补齐许可矩阵，不能降低未知包阻断。2026-10-15 的缺项与 ICU 上游许可错误页已登记 [gpl-compliance.md](gpl-compliance.md) 和坑 324；许可资产、矩阵与 notices 改动后可复用未变化的已注入程序快照，并用 `build-apk.mjs --skip-inject --snapshot <已核对候选>` 重新跑全部实际快照门禁、生成 APK 与许可 assets。必须记录缓存来源、程序输入未变化的差异核对、许可成员转换与最终产物哈希，不把 `--skip-inject` 当成跳过门禁。
+
 2026-10-15 WSL 来源构建暴露两处执行前提：首次 `--no-checkout` 的上游仓尚无 index，`git checkout -- .` 会报 pathspec；仅在来源链的独立上游检出显式 `checkout --detach` 到 workflow 固定 commit 后才可续跑。pnpm 顶层包为目录链接时，原始归档的逐成员物理路径读取无法读取链接下成员；需执行 workflow 本来就规定的 reconcile/materialize/repack，再重跑原始 perf/profile 门禁及来源快照检查，不能把首次失败当通过。每次恢复都须记录命令与操作块哈希，来源输入和门禁判据不变。MiMo verifier 分派的修复与反例见 [gotchas.md](gotchas.md) 坑 323；本次最终证据以后续 APK 交付报告为准。
 
 `node scripts/source-build/run-local-source-chain.mjs --list` / `--dry-run` 只读 committed HEAD 的 workflow；实际执行在原仓之外的独立浅检出。未提交源码不参与构建。用 `--build-workspace /tmp/dsh-build --from <阶段>` 指定可复核的续跑目录，必须属于同一 source/commit；输出留在该目录，不自动回写 base。隔离检出禁用 LFS smudge，sources 阶段负责重建 base，不能跳过缺失的实际输入。
