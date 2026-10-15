@@ -21,7 +21,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  API_LATEST_URL, MIRROR_TEMPLATES, SITE_URL, apkNameCandidates, assetUrl, sha256FromManifest,
+  API_LATEST_URL, LATEST_RELEASE_URL, MIRROR_TEMPLATES, RELEASES_URL, REPO_URL, SITE_URL,
+  apkNameCandidates, assetUrl, sha256FromManifest,
 } from '../src/assets/release.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -116,8 +117,21 @@ function scriptJson(value) {
 }
 
 function render(indexHtml, styles, data, jsonLd) {
-  return indexHtml
+  // 站点与仓库坐标全部来自 release.js（可被 DSH_REPO_SLUG / DSH_SITE_URL 覆盖），
+  // index.html 源文件里不写死任何仓库名——写死会让 fork 的站点指向上游的发布页。
+  const filled = indexHtml
     .replace('/*__STYLES__*/', () => styles)
+    .replaceAll('__SITE_URL__', SITE_URL)
+    .replaceAll('__REPO_URL__', REPO_URL)
+    .replaceAll('__RELEASES_URL__', RELEASES_URL)
+    .replaceAll('__LATEST_RELEASE_URL__', LATEST_RELEASE_URL);
+  // 在注入 JSON 之前做通用扫描：任何漏替换的占位符都会变成站点上的坏链，构建期判红而不是上线后才发现。
+  // 样式与坐标此刻均已替换完毕，只剩两个数据占位符（下一步注入 JSON），按名单排除。
+  const leftover = [...filled.matchAll(/__[A-Z][A-Z0-9_]*__/g)]
+    .map((m) => m[0])
+    .filter((token) => token !== '__JSONLD__' && token !== '__RELEASE_DATA__');
+  if (leftover.length > 0) throw new Error('index.html 存在未替换的占位符: ' + [...new Set(leftover)].join(', '));
+  return filled
     .replace('__JSONLD__', () => scriptJson(jsonLd))
     .replace('__RELEASE_DATA__', () => scriptJson(data));
 }

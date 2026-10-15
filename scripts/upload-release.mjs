@@ -1,6 +1,7 @@
 // upload-release.mjs — fully automated release creation + asset upload (PAT or GH_TOKEN env var)
 // Usage: $env:GH_TOKEN=<pat> node scripts/upload-release.mjs [version, default: newest v dir under release/]
 // v2: version parameterized + dual-ABI assets + single release entry (dsh-mobile-apk repo only; see release/README.md)
+import { execFileSync } from 'node:child_process'
 import { readFileSync, readdirSync, statSync, existsSync } from 'node:fs'
 import { join, dirname, basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -8,8 +9,26 @@ import { fileURLToPath } from 'node:url'
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const token = process.env.GH_TOKEN || process.env.GITHUB_TOKEN
 if (!token) { console.error('需要 GH_TOKEN（PAT）'); process.exit(1) }
-const OWNER = 'kelai141'
-const REPO = 'dsh-mobile-apk'
+
+/**
+ * 发布目标仓库坐标（owner/repo）解析。
+ *
+ * 为什么不再写死：本仓是安全加固分支的 fork，写死上游坐标会让脚本在本 fork 上既发不出去、
+ * 又把资产指向别人的仓库。优先级：DSH_REPO_SLUG > GITHUB_REPOSITORY > git origin；全取不到即判红，不猜。
+ */
+function resolveRepo(root, env = process.env) {
+  let slug = env.DSH_REPO_SLUG || env.GITHUB_REPOSITORY || ''
+  if (!slug) {
+    try {
+      const remote = execFileSync('git', ['-C', root, 'remote', 'get-url', 'origin'], { encoding: 'utf8' }).trim()
+      const match = /github\.com[/:]([^/\s]+\/[^/\s]+?)(?:\.git)?\/?$/.exec(remote)
+      if (match) slug = match[1]
+    } catch { /* 下面统一判红 */ }
+  }
+  if (!/^[^/\s]+\/[^/\s]+$/.test(slug)) throw new Error('无法确定发布目标仓库：设 DSH_REPO_SLUG=<owner>/<repo>，或在带 origin 远端的 git 检出内运行')
+  return slug.split('/')
+}
+const [OWNER, REPO] = resolveRepo(root)
 
 // Version: CLI arg wins; otherwise the newest v* dir under release/
 let version = process.argv[2]
@@ -104,7 +123,6 @@ if (existing.status === 200) {
 // Transfer via curl: Node fetch through the local proxy fails repeatedly for this domain in some
 // environments (api.github.com is fine, curl with the same proxy works); after 2 proxy attempts it
 // retries direct (uploads.github.com is reachable directly).
-import { execFileSync } from 'node:child_process'
 const uploadBase = release.upload_url.replace('{?name,label}', '')
 // Proxy parameterized (Review 2026-08-18 R4): PROXY_URL env var wins, then system HTTPS_PROXY;
 // otherwise direct. No more hardcoded local Clash port.

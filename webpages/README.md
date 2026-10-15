@@ -80,14 +80,15 @@ Publication refresh uses the `release: published` event after a draft becomes pu
 **一个已修的真实缺陷**：早期版本的 `robots.txt` 声明了 `Sitemap: .../sitemap.xml`，
 但构建脚本**从不生成该文件**，爬虫取到 404——站点自己给自己制造坏信号。
 现在两者由同一次构建产出，并有门禁守着（`sitemap.xml 与 robots.txt 由同一次构建产出`）。
-宿主机 `kelai141.github.io/robots.txt` 不存在，因此**无法**从上层目录声明 sitemap；
+宿主机 `<owner>.github.io/robots.txt` 不存在，因此**无法**从上层目录声明 sitemap；
 这是 GitHub Pages 项目站的固有限制，不影响收录（站点自身的 robots 与 sitemap 均可访问）。
 
 正文另有 `关于 dsh-mobile` / `该下载哪个架构` / `安装说明` / `常见问题` 四段静态文字，
 不依赖 JS 渲染即可被抓取，同时服务真人用户。
 
 提交站点到搜索引擎（可选，提升收录速度）：**Google Search Console** 与 **Bing Webmaster Tools**
-均可添加 `https://kelai141.github.io/dsh-mobile-apk/`；但 GitHub Pages 用户**无法**验证域名所有权，
+均可添加本仓 `SITE_URL`（`release.js` 解析出的站点地址，默认 `https://snoworwind.github.io/dsh-mobile-apk/`，
+可用 `DSH_REPO_SLUG` / `DSH_SITE_URL` 覆盖）；但 GitHub Pages 用户**无法**验证域名所有权，
 只能验证 URL 前缀（部分功能受限）。百度对 `github.io` 收录普遍较差，且不提供前缀验证，
 如需百度收录需自有域名。
 

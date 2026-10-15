@@ -3,6 +3,7 @@
 // Background: v0.10.2~v0.10.8 release bodies were written as placeholder templates by
 // upload-release.mjs, with the real notes uploaded only as a notes.md asset. This script
 // backfills the release body with the full notes.md so the GitHub page matches the attachment.
+import { execFileSync } from 'node:child_process'
 import { readFileSync, readdirSync, existsSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -10,8 +11,26 @@ import { fileURLToPath } from 'node:url'
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const token = process.env.GH_TOKEN || process.env.GITHUB_TOKEN
 if (!token) { console.error('需要 GH_TOKEN（PAT）'); process.exit(1) }
-const OWNER = 'kelai141'
-const REPO = 'dsh-mobile-apk'
+
+/**
+ * 发布目标仓库坐标（owner/repo）解析。
+ *
+ * 为什么不再写死：本仓是安全加固分支的 fork，写死上游坐标会去改别人仓库的 release body。
+ * 优先级：DSH_REPO_SLUG > GITHUB_REPOSITORY > git origin；全取不到即判红，不猜。
+ */
+function resolveRepo(root, env = process.env) {
+  let slug = env.DSH_REPO_SLUG || env.GITHUB_REPOSITORY || ''
+  if (!slug) {
+    try {
+      const remote = execFileSync('git', ['-C', root, 'remote', 'get-url', 'origin'], { encoding: 'utf8' }).trim()
+      const match = /github\.com[/:]([^/\s]+\/[^/\s]+?)(?:\.git)?\/?$/.exec(remote)
+      if (match) slug = match[1]
+    } catch { /* 下面统一判红 */ }
+  }
+  if (!/^[^/\s]+\/[^/\s]+$/.test(slug)) throw new Error('无法确定发布目标仓库：设 DSH_REPO_SLUG=<owner>/<repo>，或在带 origin 远端的 git 检出内运行')
+  return slug.split('/')
+}
+const [OWNER, REPO] = resolveRepo(root)
 
 let tags = process.argv.slice(2)
 if (tags.length === 0) tags = readdirSync(join(root, 'release')).filter(d => /^v[0-9]/.test(d)).sort()

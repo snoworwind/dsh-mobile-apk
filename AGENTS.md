@@ -30,10 +30,12 @@ DeepSeek Harness 的**安卓壳应用**（包名 `com.dsharnessmobile.shell`）�
 
 ```powershell
 # 在【协调仓根】执行（壳侧不单独构建）
+# 【本分支例外】security/hardening 禁止用下面两条本地/协调仓链产出任何 APK，只允许来源链构建（见 §4 铁律 9）。
 pwsh -File scripts\build-apk-013.ps1 -Suffix ""   # 双 ABI 全链，门禁失败即拒打包
 pwsh -File scripts\build-apk-013.ps1 -Fast         # dev 档：单 ABI x86_64 + preset 1（禁发布）
 # 发布包不经本地：由 GitHub Action 一键链产出（workflow_dispatch 传 version + notes）——
-# gh workflow run release -R kelai141/dsh-mobile-apk -F version=<版本> -F notes=@release/v<版本>/notes.md
+# gh workflow run release -R snoworwind/dsh-mobile-apk -F version=<版本> -F notes=@release/v<版本>/notes.md
+# （本 fork 坐标；上游为 kelai141/dsh-mobile-apk。发布链切到来源链前，见 §4 铁律 9 的缺口登记。）
 
 # 装机（<serial> 用 adb devices 查；arm64 真机必须用 arm64 产物）
 adb -s <serial> install -r -t out\v<版本>\dsh-mobile-apk-v<版本>-arm64.apk
@@ -134,6 +136,7 @@ adb -s <serial> install -r -t out\v<版本>\dsh-mobile-apk-v<版本>-arm64.apk
 6. **补丁镜像面**：`scripts/patches/**`、`scripts/check-patch-mirror.mjs`、`scripts/build-apk-013.ps1` 等是协调仓的**逐字节镜像**，单边演进即拒。补丁改动**先合本仓镜像 PR，再合协调仓权威源 PR**。
 7. **禁 emoji**：提交信息、PR 标题/描述、文档、标签一律不用。
 8. **工作区卫生**：`.deploy-tmp` 只增不减会拖垮开发机（实测 2026-10-14 达 34.8 GB / 313,393 文件，是开发机第一大空间消耗，文件数本身就在拖慢目录遍历类工具）。每完成一轮交付，在协调仓根跑 `node scripts/clean-deploy-tmp.mjs`（默认 dry-run，`--apply` 执行）。判定口径与保留清单见该脚本头注释；**注册的 git worktree 与近 3 天内活动过的目录一律保留**。
+9. **APK 只能从源码构建（本分支 `security/hardening`）**：本分支上任何 APK 都**必须**由来源链产出（云端 `build-apk-source.yml`，本地 `node scripts/source-build/run-local-source-chain.mjs`），**禁止**用 `build-apk-013.ps1` / `build-release.ps1` 等本地或协调仓链产出、归集或发布 APK。判据、当前缺口与发布链状态见 `docs/AGENTS/SECURITY-HARDENING.md`。
 
 ---
 

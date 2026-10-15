@@ -19,7 +19,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  MIRROR_TEMPLATES, OWNER, REPO, SUPPORTED_ABIS,
+  MIRROR_TEMPLATES, OWNER, RELEASES_URL, REPO, SUPPORTED_ABIS,
   apkNameCandidates, assetUrl, canonicalApkName, classifyAbi, manifestUrl, pickAsset, sha256FromManifest,
 } from '../src/assets/release.js';
 
@@ -243,7 +243,9 @@ test('页面不含第三方脚本与统计（Pages 条款禁止收集用户数�
 test('页面在无 JS 时仍给出可用的下载入口', () => {
   const html = readRepo('webpages/src/index.html');
   assert.ok(/<noscript>/.test(html), '缺少 noscript 兜底');
-  assert.ok(/github\.com\/kelai141\/dsh-mobile-apk\/releases/.test(html), 'noscript 未指向 Releases');
+  // 坐标不再写死在 HTML 里：构建期由 release.js 注入，这里断言占位符指向解析出的 Releases 地址。
+  assert.ok(html.includes('href="__LATEST_RELEASE_URL__"'), 'noscript 未使用 Releases 占位符');
+  assert.ok(RELEASES_URL.endsWith('/releases'), 'Releases 地址形态异常: ' + RELEASES_URL);
 });
 
 // ── SEO：站点必须能被搜索引擎发现 ──────────────────────────────────────────

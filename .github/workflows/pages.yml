@@ -58,7 +58,7 @@ jobs:
           test -s webpages/dist/assets/app.js
           test -s webpages/dist/data/releases.json
           test -f webpages/dist/.nojekyll
-          for token in '__STYLES__' '__RELEASE_DATA__'; do
+          for token in '__STYLES__' '__RELEASE_DATA__' '__SITE_URL__' '__REPO_URL__' '__RELEASES_URL__' '__LATEST_RELEASE_URL__'; do
             if grep -q "$token" webpages/dist/index.html; then
               echo "::error::占位符未替换: $token"
               exit 1

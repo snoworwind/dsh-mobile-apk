@@ -5,9 +5,10 @@ import { createHash } from 'node:crypto'
 import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { captureProjectInputs, captureProjectOutputs } from './record-project-components.mjs'
+import { captureProjectInputs, captureProjectOutputs, resolveSourceRepository } from './record-project-components.mjs'
 
 const dirs = ['dsh-shell-termux', 'dsh-client-ui-responsive', 'dsh-host-web-compat']
+const FIXTURE_REPOSITORY = 'https://github.com/fixture/fork'
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
 function fixture(fn) {
   const root = mkdtempSync(join(tmpdir(), 'project-components-'))
@@ -15,6 +16,7 @@ function fixture(fn) {
   git('init', '-q')
   git('config', 'user.name', 'Fixture')
   git('config', 'user.email', 'fixture@example.invalid')
+  git('remote', 'add', 'origin', FIXTURE_REPOSITORY + '.git')
   writeFileSync(join(root, '.gitignore'), '.deploy-tmp/\ndsh-shell-termux/lib/\ndsh-client-ui-responsive/lib/\n')
   for (const directory of dirs) {
     mkdirSync(join(root, directory, 'src'), { recursive: true })
@@ -36,7 +38,7 @@ function fixture(fn) {
 test('project component source files and actual built outputs bind to the same commit', () => fixture(({ root, commit }) => {
   const inputs = captureProjectInputs(root, commit)
   assert.equal(inputs.projectCommit, commit)
-  assert.equal(inputs.sourceRepository, 'https://github.com/kelai141/dsh-mobile-apk')
+  assert.equal(inputs.sourceRepository, FIXTURE_REPOSITORY)
   for (const directory of dirs) {
     const record = inputs.components[directory]
     assert.equal(record.sourceCommit, commit)
@@ -49,6 +51,16 @@ test('project component source files and actual built outputs bind to the same c
   const outputs = captureProjectOutputs(root, commit, inputs)
   assert.equal(outputs.components['dsh-shell-termux'].outputFiles['lib/index.js'], sha256(Buffer.from('new build output\n')))
   assert.equal(inputs.components['dsh-shell-termux'].outputFiles, undefined)
+}))
+
+test('source repository resolves from env, CI variables or git origin — never hardcoded', () => fixture(({ root }) => {
+  assert.equal(resolveSourceRepository(root, {}), FIXTURE_REPOSITORY)
+  assert.equal(resolveSourceRepository(root, { GITHUB_REPOSITORY: 'acme/fork' }), 'https://github.com/acme/fork')
+  assert.equal(resolveSourceRepository(root, { GITHUB_SERVER_URL: 'https://ghe.example/', GITHUB_REPOSITORY: 'acme/fork' }), 'https://ghe.example/acme/fork')
+  assert.equal(resolveSourceRepository(root, { DSH_SOURCE_REPOSITORY: 'https://git.example/acme/fork/' }), 'https://git.example/acme/fork')
+  // 负控：没有 origin 也没有环境变量时必须判红，不得回落到任何写死的仓库。
+  execFileSync('git', ['-C', root, 'remote', 'remove', 'origin'])
+  assert.throws(() => resolveSourceRepository(root, {}), /无法确定来源仓库/)
 }))
 
 test('dirty tracked and untracked component inputs cannot claim committed provenance', () => fixture(({ root, commit }) => {

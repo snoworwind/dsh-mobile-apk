@@ -13,9 +13,29 @@ function verifyCommit(root, commit) {
   if (!/^[a-f0-9]{40}$/.test(commit ?? '') || git(root, 'rev-parse', 'HEAD').toString().trim() !== commit) throw new Error('project component provenance requires the checked-out GITHUB_SHA')
 }
 
-export function captureProjectInputs(root, commit) {
+/**
+ * 来源仓库坐标（provenance 的 `sourceRepository`）。
+ *
+ * 为什么不再写死：本分支只从源码构建，来源报告必须写明**这次构建实际来自哪个仓库**。
+ * 写死上游坐标会让本 fork 的产物把来源记到别人仓库名下——对以可验证性为宗旨的分支是硬伤。
+ * 优先级：DSH_SOURCE_REPOSITORY > GITHUB_SERVER_URL + GITHUB_REPOSITORY > git origin；全取不到即判红。
+ */
+export function resolveSourceRepository(root, env = process.env) {
+  if (env.DSH_SOURCE_REPOSITORY) return String(env.DSH_SOURCE_REPOSITORY).trim().replace(/\/+$/, '')
+  if (env.GITHUB_REPOSITORY) {
+    const server = String(env.GITHUB_SERVER_URL || 'https://github.com').trim().replace(/\/+$/, '')
+    return server + '/' + String(env.GITHUB_REPOSITORY).trim()
+  }
+  let remote = ''
+  try { remote = git(root, 'remote', 'get-url', 'origin').toString().trim() } catch { remote = '' }
+  const match = /github\.com[/:]([^/\s]+\/[^/\s]+?)(?:\.git)?\/?$/.exec(remote)
+  if (match) return 'https://github.com/' + match[1]
+  throw new Error('无法确定来源仓库：请在带 origin 远端的 git 检出内运行，或设 DSH_SOURCE_REPOSITORY / GITHUB_REPOSITORY')
+}
+
+export function captureProjectInputs(root, commit, sourceRepository = resolveSourceRepository(root)) {
   verifyCommit(root, commit)
-  const report = { schema: 1, sourceRepository: 'https://github.com/kelai141/dsh-mobile-apk', projectCommit: commit, components: {} }
+  const report = { schema: 1, sourceRepository, projectCommit: commit, components: {} }
   for (const directory of COMPONENTS) {
     const files = git(root, 'ls-tree', '-r', '--name-only', '-z', commit, '--', directory).toString().split('\0').filter(Boolean).sort()
     if (!files.includes(`${directory}/package.json`)) throw new Error(`project component missing from commit: ${directory}`)

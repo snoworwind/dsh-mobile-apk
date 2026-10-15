@@ -49,7 +49,7 @@
 
 - 插件仓库不再打 release（避免 tag 与包版本错位混乱）；需单独分发时用 plugins/ tgz；
 - 发布后闭环：下载新资产 → sha256 对照 MANIFEST → 对应平台安装冒烟（x86_64 → MuMu；arm64 → 真机）→ 记录进 notes.md；
-- 错误 release 处置：gh release delete <tag> -R kelai141/dsh-mobile-apk --yes → 修正后重发。
+- 错误 release 处置：gh release delete <tag> -R snoworwind/dsh-mobile-apk --yes → 修正后重发（本 fork 坐标；脚本按 `DSH_REPO_SLUG` > `GITHUB_REPOSITORY` > `git origin` 自行解析，不再写死上游）。
 
 ## 6. 资产命名约定
 

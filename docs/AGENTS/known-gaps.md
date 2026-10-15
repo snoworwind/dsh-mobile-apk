@@ -18,6 +18,8 @@
 | WSL 来源 APK 构建 | 已从已提交源码（`bc6637f`）在隔离检出内产出 arm64 APK，并通过 14 项独立复核（三签含 v1、证书指纹、内嵌快照哈希与语义归一化摘要、引擎 0.2.0-rc.2、LFS 独立性、四份许可全文、无构建机残留）；重建过程中暴露的前提与修正：无 index 的上游检出需显式初始化固定 commit、pnpm 包物化必须先于按物理路径读取的归档门禁、MiMo verifier 分派缺口已修，见坑 323 | 复核面与命令见 [build-and-env.md](build-and-env.md) 来源审计小节；字节级可复现不成立，判据是语义归一化摘要；测试预期修正及全量结果见坑 322，**该产物未做设备验收、未发布**，不构成发布结论 |
 | 外部文件导入来源 | 私有 file URI 与同 UID Provider 的权限代用路径已在源码关闭；外部 content URI 要求系统已授读权限，file URI 限共享存储并检查实际 FD；畸形分享参数被安全拒绝，见坑 321 | WSL 主源码编译及静态检查通过；未做设备验证。正常带授权的系统分享、私有 URI 拒绝、链接替换与 FD 关闭均待设备回归；不提供 URI 读授权的旧文件管理器需改用系统分享/打开入口，系统不能解析的 Provider 或 FD 路径失败关闭 |
 | raw shell 策略边界 | 范围门检查提交文本中的静态命令与显示选择器，不具备完整 shell 沙箱的能力 | 不应将文本扫描视作任意可执行程序行为的安全证明；本批只收紧已定位的绕过路径，运行时效果仍待验收 |
+| **发布链与「APK 只能从源码构建」冲突** | 按用户指示立铁律（见宗旨文档）：本分支任何 APK 必须由来源链产出。实测现状：`release.yml` 仍先拉 `base/*.tar.xz` LFS 底座造快照、再在 runner 内跑 `scripts/build-apk-013.ps1`（其门禁段与产物面无来源链 provenance）；`build-apk.yml`/`build-apk-source.yml` 才是来源链 | 需把发布链接到来源链：快照输入改为 Termux 官方验签仓组装、打包改用来源链编排、发布资产附带来源链 provenance；在此之前**不得**用现有 release 链产出发布候选。改到签名/快照输入面，按 L2 面即时三层验收，属独立改动 |
+| **仓库坐标写死上游（已修）** | 实测：`record-project-components.mjs` 把 provenance 的 `sourceRepository` 写死 `github.com/kelai141/dsh-mobile-apk`（而来源链会调用它两次）；`upload-release.mjs` / `sync-release-notes.mjs` 写死 `OWNER/REPO` 并需对方 PAT；`webpages/` 的 canonical/og/发布 API/下载链接全指向上游 | 已改为运行时解析（`DSH_*` 环境变量 > CI 变量 > `git origin`，取不到即判红）与构建期占位符注入，默认指向本 fork；站点测试同步改为按解析值断言。证据与根因见坑 327 |
 
 ## 本轮仍需收口
 

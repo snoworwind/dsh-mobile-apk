@@ -20,8 +20,12 @@ test('offline seed and refresh round-trip preserve release identity and checksum
     fs.writeFileSync(preload, `
 globalThis.fetch = async url => {
   if (process.env.PAGES_TEST_OFFLINE === '1') throw new Error('controlled offline');
-  if (String(url).includes('api.github.com')) return { ok: true, json: async () => (${JSON.stringify({ tag_name: tag, published_at: '2026-10-14T00:00:00Z', assets })}) };
-  return { ok: true, text: async () => ${JSON.stringify(`${arm}  apk/${asset('arm64')}  100\n${x86}  apk/${asset('x86_64')}  100`)} };
+  // status/url 必须给全：build.mjs 的 fetchText 会校验 res.url 的 host（拒绝 MANIFEST 被重定向到
+  // 非 GitHub 官方主机），缺 url 时 new URL(undefined) 抛 Invalid URL 并被上层吞成
+  // 「MANIFEST 不可用」警告——sha256 会被静默丢弃，正是本用例要抓的那种静默降级。
+  const target = String(url);
+  if (target.includes('api.github.com')) return { ok: true, status: 200, url: target, json: async () => (${JSON.stringify({ tag_name: tag, published_at: '2026-10-14T00:00:00Z', assets })}) };
+  return { ok: true, status: 200, url: target, text: async () => ${JSON.stringify(`${arm}  apk/${asset('arm64')}  100\n${x86}  apk/${asset('x86_64')}  100`)} };
 };`);
     const run = (offline, refresh = false) => {
       const result = spawnSync(process.execPath, ['--import', pathToFileURL(preload).href, path.join(scratch, 'tools/build.mjs'), ...(refresh ? ['--refresh'] : [])], {
@@ -38,7 +42,10 @@ globalThis.fetch = async url => {
     assert.deepEqual(run(false, true).sha256, { arm64: arm, x86_64: x86 });
     const restored = run(true);
     assert.equal(restored.publishedAt, '2026-10-14T00:00:00Z');
-    assert.deepEqual(restored.sha256, { arm64: arm, x86_64: x86 });
+    // 离线档**不得**沿用种子里的哈希：只有取自官方 MANIFEST 的 sha256 才允许进页面
+    // （种子可能来自更早、曾信任第三方镜像的构建，见 build.mjs 的 normalize 注释）。
+    // 页面在这种情况下会明确提示「到 Releases 自行核对」，所以空哈希是正确结果而不是降级失败。
+    assert.deepEqual(restored.sha256, {});
     // Malformed fallback input must fail rather than publish an unidentified release.
     fs.writeFileSync(path.join(scratch, 'data/releases.json'), '{}');
     const bad = spawnSync(process.execPath, ['--import', pathToFileURL(preload).href, path.join(scratch, 'tools/build.mjs')], {

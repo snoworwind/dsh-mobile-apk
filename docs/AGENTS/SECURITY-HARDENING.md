@@ -8,6 +8,19 @@
 
 这是持续加固目标。完成一批修复后，仍需记录剩余风险、检查覆盖和证据缺口；文档中的目标不构成“没有漏洞”或“已经全面验收”的结论。
 
+## 铁律：APK 只能从源码构建
+
+本分支上**任何 APK 都必须由来源链产出**，禁止用 `build-apk-013.ps1`、`build-release.ps1` 或其他本地/协调仓链产出、归集或发布 APK。理由：只有来源链的输入面可从源码复核——它只构建**已提交 HEAD**、在**隔离检出**内执行、**不读 `base/*.tar.xz` LFS 底座**（Termux 基座由官方验签仓库包组装）、不使用协调仓，并把 `project-component-provenance` / `component-source-provenance` 写进产物。
+
+| 项 | 允许（来源链） | 禁止（本分支） |
+|---|---|---|
+| 云端入口 | `.github/workflows/build-apk-source.yml`（`build-apk.yml` 复用的就是它） | `release.yml` 现状，见下方缺口 |
+| 本地入口 | `node scripts/source-build/run-local-source-chain.mjs` | `pwsh -File scripts/build-apk-013.ps1 ...`、`scripts/build-release.ps1` |
+| 底座输入 | Termux 官方签名仓库 + 固定 bootstrap（逐 deb 哈希） | `base/*.tar.xz` LFS 归档 |
+| 产物要求 | 携带来源链 provenance，且 `sourceRepository` 必须等于**本次构建实际所在仓库** | 无 provenance、或 provenance 指向其他仓库的产物 |
+
+**当前缺口（已登记；未补验不得发布）**：`release.yml` 仍走「LFS 底座 + `build-apk-013.ps1`」，与本铁律冲突。把发布链接到来源链要动签名与快照输入面，属独立改动，见 [known-gaps.md](known-gaps.md)。
+
 ## 分支维护方式
 
 本分支作为本 fork 的长期独立安全加固分支维护，**不合并到本 fork 的 `main`，也不以合并到上游 `main` 为交付目标**。

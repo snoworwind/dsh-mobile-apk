@@ -23,9 +23,20 @@
  *    否则真机看到"未能识别设备架构"，而 PC 端反而正常——正是该缺陷的可识别特征。
  */
 
-/** 仓库坐标（与 App 侧 UpdateChecker.REPO 一致）。 */
-export const OWNER = 'kelai141';
-export const REPO = 'dsh-mobile-apk';
+/**
+ * 仓库坐标（唯一真源，浏览器 / Node 构建 / 测试共用）。
+ *
+ * 为什么可覆盖：本仓是安全加固分支的 fork，站点与下载链接必须能指向**部署它的那个仓库**，
+ * 不能把上游坐标写死在源文件里。默认值即本 fork；构建与本地可用环境变量覆盖：
+ *   DSH_REPO_SLUG=<owner>/<repo>                 默认 snoworwind/dsh-mobile-apk
+ *   DSH_SITE_URL=https://<owner>.github.io/<repo>/
+ * 浏览器里没有 process，故用 typeof 守卫；Node 侧（tools/build.mjs、tests）读同一份解析结果。
+ */
+const ENV = (typeof process !== 'undefined' && process.env) ? process.env : {};
+const REPO_SLUG = ENV.DSH_REPO_SLUG || 'snoworwind/dsh-mobile-apk';
+if (!/^[^/\s]+\/[^/\s]+$/.test(REPO_SLUG)) throw new Error('DSH_REPO_SLUG 必须是 <owner>/<repo>');
+export const OWNER = REPO_SLUG.split('/')[0];
+export const REPO = REPO_SLUG.split('/')[1];
 
 export const REPO_URL = 'https://github.com/' + OWNER + '/' + REPO;
 export const RELEASES_URL = REPO_URL + '/releases';
@@ -48,8 +59,8 @@ export const MIRROR_TEMPLATES = [
 /** 受支持的 ABI 家族名。 */
 export const SUPPORTED_ABIS = ['arm64', 'x86_64'];
 
-/** 站点正式地址（canonical / sitemap / JSON-LD 共用；改域名只需改这一处）。 */
-export const SITE_URL = 'https://kelai141.github.io/dsh-mobile-apk/';
+/** 站点正式地址（canonical / sitemap / JSON-LD 共用；改域名只需改这一处，或用 DSH_SITE_URL 覆盖）。 */
+export const SITE_URL = (ENV.DSH_SITE_URL || ('https://' + OWNER.toLowerCase() + '.github.io/' + REPO)).replace(/\/+$/, '') + '/';
 
 /**
  * 健康检查 + 测速靶：**与版本解绑**，且必须是一个**小文件**。

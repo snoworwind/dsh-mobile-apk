@@ -13,7 +13,7 @@
  *      不改写 href 成 blob（大文件走 blob 会占内存，且丢失 Accept-Ranges 续传能力）。
  */
 import {
-  ABI_LABELS, API_LATEST_URL, LATEST_RELEASE_URL, MIRROR_TEMPLATES, SUPPORTED_ABIS,
+  ABI_LABELS, API_LATEST_URL, LATEST_RELEASE_URL, MIRROR_TEMPLATES, RELEASES_URL, SUPPORTED_ABIS,
   assetUrl, canonicalApkName, classifyAbi, formatBytes, pickAsset, probeUrl,
 } from './release.js';
 
@@ -26,7 +26,8 @@ const el = {
   data: document.getElementById('release-data'),
 };
 
-const VERSION_BROWSER = 'https://github.com/kelai141/dsh-mobile-apk/releases';
+// 手动下载兜底指向 release.js 解析出的 Releases 地址（可在构建期用 DSH_REPO_SLUG 覆盖）。
+const VERSION_BROWSER = RELEASES_URL;
 
 function inlineData() {
   try {

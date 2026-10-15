@@ -1995,3 +1995,28 @@ EngineBootContinuationTest用latch驱动真实观察函数：winner持CAS但无�
 **修法**：无需改仓库；这类目录不参与插件注入（注入按 `scripts/plugin-dirs.json` 的 `lib/**` 清单走）。要避免生成，在 WSL 侧显式设 `npm_config_cache=$HOME/.npm`。清理时不要把 `?/D:` 当产物提交。
 
 **复验证据**：`out/source-audit-bc6637f/verify.log` 的 V8 行 `PASS snapshot contains no build-host npm cache or 'D:' stray directories`（对最终 APK 内嵌快照扫描 `.npm-cache` 与 `D:` 计数为 0），以及 `evidence/environment.txt` 里记录的同一份 `git status`。
+
+327. **fork 之后的仓库坐标写死上游：来源报告指错仓库、发布脚本在本 fork 不可用、站点指向上游发布页**
+
+**现象**：三处各自独立暴露，都指向同一个根因。① 来源链产出的 provenance JSON 里 `sourceRepository` 恒为 `https://github.com/kelai141/dsh-mobile-apk`——即使构建发生在本 fork 的提交上；② `node scripts/upload-release.mjs` / `sync-release-notes.mjs` 在本 fork 必然失败：它们写死 `OWNER='kelai141'`、`REPO='dsh-mobile-apk'` 并要求对方仓库的 PAT（前者往对方仓建 release，后者 PATCH 对方仓的 release body）；③ `webpages/` 的 canonical / `og:url` / `og:image` / 发布 API / 下载链接 / `SITE_URL` 全部指向上游 `kelai141.github.io`，其断言测试还把该 URL 写死成期望值。
+
+**真因**：仓库从上游 fork 出来后，坐标只存在于源码字面量里，没有单一解析点。`record-project-components.mjs` 是来源链的组成部分（`build-apk-source.yml` 在输入、输出两处各调一次），因此写死坐标不是「文档瑕疵」，而是**产物来源报告的事实性错误**；以可验证性为宗旨的分支尤其不能接受。
+
+**修法**：坐标全部改为运行时/构建期解析，字面量只留默认值：
+- 脚本侧：`DSH_SOURCE_REPOSITORY` / `DSH_REPO_SLUG` > `GITHUB_SERVER_URL`+`GITHUB_REPOSITORY` > `git remote get-url origin`（正则归一为 `https://github.com/<owner>/<repo>`）；三者都取不到即**判红**，不回落任何写死值（`record-project-components.mjs` 的 `resolveSourceRepository`、两个发布脚本的 `resolveRepo`）。
+- 站点侧：`webpages/src/assets/release.js` 用 `DSH_REPO_SLUG` / `DSH_SITE_URL` 解析出 `OWNER/REPO/SITE_URL/RELEASES_URL`；`index.html` 改用 `__SITE_URL__` / `__REPO_URL__` / `__RELEASES_URL__` / `__LATEST_RELEASE_URL__` 占位符，由 `tools/build.mjs` 注入，并对任何未替换占位符判红；`app.js` 的手动下载兜底改为引用 `RELEASES_URL`（原先另抄了一份上游 URL）。
+- 顺带清掉 `release.js` 里「与 App 侧 UpdateChecker.REPO 一致」的陈旧注释——该常量已随应用内更新移除而消失。
+
+**复验证据**：`node --test scripts/source-build/record-project-components.test.mjs` 8 例（7 通过 / 1 既有 SKIP），其中新增用例断言 env > CI 变量 > git origin 的优先级，并带负控「无来源可解析时必须抛错」；`node --test webpages/tests/*.test.mjs` 39/39 通过（Node 24，与 CI 同版本）；受控负控：把 `__CANONICAL_URL__` 这类未登记占位符塞进模板后 `tools/build.mjs` exit 1 并点名该占位符；真实构建产物的坐标全部为本 fork（`https://snoworwind.github.io/dsh-mobile-apk/`、`https://github.com/snoworwind/dsh-mobile-apk/releases`），残留 `__…__` 计数 0。
+
+328. **`webpages` 测试套件在本分支 HEAD 上就是红的：一处 mock 陈旧、一处断言与刻意实现相反**
+
+**现象**：`node --test webpages/tests/*.test.mjs`（Node 24，CI 同版本）在 HEAD `d7a456f` 上判红两处，且都表现为「构建照跑、结果悄悄变差」。
+
+**真因**（两处独立）：
+① `release-delivery.test.mjs` 的 fetch mock 只返回 `{ ok, json/text }`，缺 `status` 与 `url`；而 `build.mjs` 的 `fetchText` 会校验 `res.url` 的 host（拒绝 MANIFEST 被重定向到非 GitHub 官方主机）。`new URL(undefined)` 抛 `Invalid URL`，被上层 catch 成「MANIFEST 不可用」警告——**sha256 被静默丢弃**，页面退化成「到 Releases 自行核对」。
+② 同一用例还断言「离线（种子）构建必须保留种子里的 sha256」，而实现是刻意的相反口径（`normalize()` 注释：种子可能来自更早、曾信任第三方镜像的构建，只有 `attachSha256` 能从官方 MANIFEST 写入该字段）。测试断言的是已被移除的宽松行为。
+
+**修法**：mock 补 `status: 200` 与 `url: String(url)`（并加注释说明缺 `url` 会重演静默降级）；离线档断言改为 `{}` 并写明「空哈希是正确结果、页面会提示自行核对」。**不放宽实现**——信任种子哈希会削弱「校验值只来自官方 MANIFEST」这条安全属性。
+
+**复验证据**：修前 `webpages/tests/*` 39 例中 1 例失败（在 HEAD 工作树上另跑一次确认与本轮改动无关），修后 39/39 通过；同一 mock 下手工构建日志由「GitHub 官方 MANIFEST 不可用：Invalid URL」变为「sha256 仅取自 GitHub 官方 MANIFEST，命中 2/2」。
