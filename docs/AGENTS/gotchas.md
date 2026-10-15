@@ -1883,3 +1883,23 @@ EngineBootContinuationTest用latch驱动真实观察函数：winner持CAS但无�
 **修法**：Kotlin 与 bridge 共用等价的静态参数还原规则，引用单个参数保留值，包含空白的单个数据参数不拆成策略词，注释与重定向文件名不参与认证。显示参数按命令和位置核对；无法确认的紧凑、等号、uniqueId 及不受支持的拼写在受限范围拒绝。补齐 input 源/动词覆盖、`cmd activity` 启动面；多显示器窗口接口与 instrumentation 在受限范围保守拒绝。无显示选择器的全局子命令不得借用启动命令的显示参数。
 
 **依据与判据**：[AOSP InputShellCommand](https://android.googlesource.com/platform/frameworks/base/+/8417c7bb1cbb/services/core/java/com/android/server/input/InputShellCommand.java)、[ActivityManagerShellCommand](https://android.googlesource.com/platform/frameworks/base/+/master/services/core/java/com/android/server/am/ActivityManagerShellCommand.java)、[WindowManagerShellCommand](https://android.googlesource.com/platform/frameworks/base/+/master/services/core/java/com/android/server/wm/WindowManagerShellCommand.java) 的真实解析路径；静态逐项核对上述拒绝反例与合法目标对照。插件编译通过；测试与设备验收状态同坑 313。
+
+315. **更新 APK 在共享存储上通过哈希校验后，仍可能在等待授权或安装器读取前被替换**
+
+**现象**：更新包原来下载到 `Documents/dshdata/updates`，校验后把同一 `File` 留给 UI 安装或 `readyToInstall` 授权续继。具有相应共享存储写权限的其他应用可以在这段间隔替换文件；此前的 SHA-256 结果不再证明安装器读到的字节。
+
+**真因**：校验与使用跨越线程、用户授权页和进程边界，文件却仍处于可被其他应用修改的位置。原子下载提交只能保护下载未完成的阶段，不能封闭提交之后的替换窗口。
+
+**修法**：下载、复用校验与等待安装全程使用 `filesDir/apk-updates`；安装入口再次要求 canonical 文件为该私有目录的直接普通 `.apk` 子文件，拒绝旧共享路径和逃出目录的符号链接。FileProvider 只新增该子目录映射，交给安装器的单文件 URI 仅授读权限。数据归属见 `PERSISTENT-DATA.md` 的 APK update artifacts 行。[Android 存储安全说明](https://developer.android.com/privacy-and-security/security-tips#data-storage) 支持用应用私有存储保护待使用文件。
+
+**判据与状态**：静态核对 `ApkUpdateController.downloadAndInstall` → `updatesDir` → 哈希校验 → 安装/授权续继仍指向同一私有文件；`EngineAuth.kt`、`EngineProbe.kt`、`UpdateChecker.kt` 已使用 Kotlin 2.0.21 配合依赖接口占位声明联合编译通过。仅证明源文件编译，完整 Android 工程、测试及设备安装流程未验收。
+
+316. **只校验初始 URL 无法限制认证请求的重定向，手工 Cookie 头也不会自动获得浏览器的域隔离**
+
+**现象**：`DownloadSaver` 虽先检查引擎同源，随后携带引擎 Cookie 的 `HttpURLConnection` 仍使用默认自动重定向；其他认证 HTTP 调用同样依赖该默认行为。初始 URL 合法并不保证后续连接仍在引擎源。`EngineAuth.attach` 本身也未拒绝错误目标。
+
+**真因**：Cookie 是通过 `setRequestProperty` 手工设置的普通头。静态检查 [AOSP HttpEngine 的 followUpRequest](https://android.googlesource.com/platform/external/okhttp/+/ba6e9e9/okhttp/src/main/java/com/squareup/okhttp/internal/http/HttpEngine.java) 可见重定向从原请求复制头，跨源只显式移除 Authorization，不能依赖它清除手工 Cookie；[HttpURLConnection 文档](https://developer.android.com/reference/java/net/HttpURLConnection#setInstanceFollowRedirects(boolean)) 说明默认跟随重定向。本轮未做动态泄露验证。
+
+**修法**：两个 `attach` 入口都在读取 Context/缓存 Cookie 前调用 `confineConnection`，要求精确 `http://127.0.0.1:3080` 源且没有 userinfo，再将 `instanceFollowRedirects` 设为 false。未初始化或无 Cookie 时也执行约束，避免 POST 载荷自动转发。调用方看到原始 3xx 状态，不自动追随。
+
+**判据与状态**：静态核对两个入口的约束顺序与全部认证 HTTP 调用点；编译和未验收范围同坑 315。此修复约束 HTTP 请求目标与重定向，不提供 loopback 端口的进程身份认证。

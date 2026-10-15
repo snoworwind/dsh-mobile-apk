@@ -194,10 +194,12 @@ object EngineAuth {
 
   /**
    * Set the Cookie header on an /api connection when a cookie is available.
-   * Uses the context bound by [initContext]; a no-op before that or without
-   * a stored cookie. Callers keep their own Proxy.NO_PROXY and timeouts.
+   * Uses the context bound by [initContext]; skips the header before that or without
+   * a stored cookie. Every connection is confined before looking up credentials;
+   * callers keep their own Proxy.NO_PROXY and timeouts.
    */
   fun attach(conn: HttpURLConnection) {
+    confineConnection(conn)
     val c = ctx() ?: return
     val cookie = cookie(c) ?: return
     conn.setRequestProperty("Cookie", cookie)
@@ -208,8 +210,18 @@ object EngineAuth {
    * depend on initContext ordering.
    */
   fun attach(context: Context, conn: HttpURLConnection) {
+    confineConnection(conn)
     val cookie = cookie(context) ?: return
     conn.setRequestProperty("Cookie", cookie)
+  }
+
+  /** A manually supplied Cookie header must never follow a redirect to another origin. */
+  private fun confineConnection(conn: HttpURLConnection) {
+    if (!EngineProbe.isEngineOrigin(conn.url.toExternalForm())) {
+      throw SecurityException("Engine authentication requires the exact local engine origin")
+    }
+    // Apply even before initContext or when no cookie exists: POST payloads are sensitive too.
+    conn.instanceFollowRedirects = false
   }
 
   /**

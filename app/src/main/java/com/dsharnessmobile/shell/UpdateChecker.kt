@@ -22,7 +22,7 @@ import java.util.UUID
  * - **仅手动**：启动页「检查更新」按钮触发，不自动检查（169MB 下载不做任何自动行为）；
  * - **镜像链**：GitHub latest release 直连 → gh-proxy 风格前缀逐级回退（域名常量可配）；
  * - **同按钮二次确认**：发现新版后同一按钮变为「下载并安装 vX.Y.Z」，再点才开始下载；
- * - 下载落 Documents/dshdata/updates/（FileProvider 既有映射内），.tmp→rename 原子；
+ * - 下载落 filesDir/apk-updates/（应用私有目录），.tmp→rename 原子；
  * - 安装：REQUEST_INSTALL_PACKAGES 未持有 → 先拉「安装未知应用」授权页（launcher 返回后续继）；
  *   镜像只提供 APK 字节；安装前必须以 GitHub 官方 SHA sidecar/MANIFEST 校验 APK。
  * 与引擎快照更新（EngineStartFlow.startUpdateCheck / UpdateManager）完全分离。
@@ -39,6 +39,7 @@ object UpdateChecker {
   private const val MAX_APK_DOWNLOAD_BYTES = 512L * 1024 * 1024
   private const val MAX_RELEASE_JSON_BYTES = 2L * 1024 * 1024
   private const val MAX_CHECKSUM_BYTES = 512L * 1024
+  private const val APK_UPDATE_DIRECTORY = "apk-updates"
 
   /** 镜像链（gh-proxy 风格前缀；直连永远第一。站点失效自动逐级回退）。 */
   private val MIRRORS = listOf(
@@ -48,9 +49,9 @@ object UpdateChecker {
   )
   private const val API = "https://api.github.com"
 
-  /** 更新包落点（已在 file_paths.xml 的 Documents/dshdata 映射内，零新映射）。 */
+  /** Keep verified APK bytes private throughout permission prompts and installer handoff. */
   fun updatesDir(context: Context): File =
-    File(android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOCUMENTS), "dshdata/updates")
+    File(context.filesDir, APK_UPDATE_DIRECTORY)
 
   sealed class CheckResult {
     /** 已是最新（latest.tag == 当前版本）。 */
@@ -553,15 +554,23 @@ object UpdateChecker {
     }
   }
 
-  /** FileProvider URI + ACTION_VIEW 唤起系统安装器（签名不匹配由系统拒绝）。 */
+  /** Hand only private APK files to the installer with a read-only grant; callers must verify the digest first. */
   fun invokeInstaller(activity: android.app.Activity, apk: File): Boolean = try {
-    val uri = FileProvider.getUriForFile(activity, activity.packageName + ".fileprovider", apk)
-    val intent = Intent(Intent.ACTION_VIEW).apply {
-      setDataAndType(uri, "application/vnd.android.package-archive")
-      addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+    // Do not accept legacy shared-storage packages or symlinks outside the private update root.
+    val root = File(activity.filesDir.canonicalFile, APK_UPDATE_DIRECTORY)
+    val privateApk = apk.canonicalFile
+    if (privateApk.parentFile != root || !privateApk.isFile || !privateApk.name.endsWith(".apk")) {
+      LogCollector.log(TAG, "installer invoke rejected: APK is outside the private update directory")
+      false
+    } else {
+      val uri = FileProvider.getUriForFile(activity, activity.packageName + ".fileprovider", privateApk)
+      val intent = Intent(Intent.ACTION_VIEW).apply {
+        setDataAndType(uri, "application/vnd.android.package-archive")
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+      }
+      activity.startActivity(intent)
+      true
     }
-    activity.startActivity(intent)
-    true
   } catch (e: Exception) {
     LogCollector.log(TAG, "installer invoke failed: " + (e.message ?: e.javaClass.simpleName))
     false

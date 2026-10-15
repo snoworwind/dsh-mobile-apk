@@ -148,10 +148,12 @@ sequenceDiagram
 | 高 | K08 | `workspaces`/`currentWorkspace` 跨线程读写，且 `onMain` 只有 finally 没有 catch | `app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt:187-192`、`app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt:821`、`app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt:1661-1673` | 主线程 CME 一次即进程闪退（模型开页与侧栏展开同时发生）；`workspaces` 无上限无 TTL，每个新会话多一个常驻 WebView | 未修（评审 S-8/R1/R2） |
 | 高 | K08 | 浏览器 op 在控制队列线程上自旋等导航：错误页路径必等满 10s 且仍回 `ok` | `app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt:1087`、`app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt:1101-1107` | 一次 `browser_open` 占住整条设备控制队列 10s，无障碍与特权命令全排队 | 未修（S-7/F-6） |
 | 高 | K08 | 浏览器截图只写不删、`health` 恒 `ok`、失败原因串上一轮 `lastError` | `app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt:1565`、`app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt:1581`、`app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt:1589` | 长任务磁盘累积（全页 PNG）；截图失败原因误导 | 未修（S-6/F-7） |
-| 高 | K08 | 「隔离浏览器」没有存储隔离：无 `setDataDirectorySuffix` 与清理 op，且引擎鉴权 cookie 在**进程级** `CookieManager` | `app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:815` | AI 访问过的站点 cookie/localStorage 持久驻留且用户无撤销入口；过滤一旦有缺口即带引擎 cookie 出网 | 未修（S-3/F-9） |
+| 高 | K08 | 浏览器会话存储隔离与清理范围 | `app/src/main/java/com/dsharnessmobile/shell/BrowserHostProfile.kt` | 当前每会话绑定非 Default profile；不支持或绑定失败拒绝创建。清理仅覆盖 Cookie/WebStorage/地理授权，不承诺完整清除 IndexedDB/CacheStorage/worker 注册 | Cookie 隔离源码已修；完整数据清理仍有限制，设备层未验收 |
 | 高 | K06 | 双引号内的动态命令替换曾绕过屏幕范围门 | `app/src/main/java/com/dsharnessmobile/shell/ShellOps.kt`、`plugins/dsh-android-bridge/src/screen-scope.ts` | 引号内动态展开、命令合成与不透明执行器可能改变实际命令/目标屏 | 已修：动态屏幕目标 fail-closed；两侧统一检查不透明执行器，跨语言 fixture 增加反证 |
 | 高 | K06 | 路径脚本与错误显示参数认证可绕过范围门 | `ShellOps.scopeCommandText/hasUncertifiedSelector`、`screen-scope.ts` 同名函数 | 脚本不可见、引用目标被抹掉、注释/重定向捐出参数、Android CLI 别名与位置差异 | 源码已修；两插件编译通过；按用户要求仅做编译和静态检查，设备层未验收。见坑 313/314 |
 | 高 | K05 | 输入广播未限定组件时可能向其他应用泄露 nonce | `plugins/dsh-android-manage/src/index.ts:33` | 同 action 接收器可能取得 auth 并伪造输入 | 源码已修：所有发送与重试显式指定 AdbKeyboardReceiver；设备验收待完成。见坑 312 |
+| 高 | K03 | 校验后的共享存储 APK 可在安装前被替换 | `UpdateChecker.updatesDir/invokeInstaller`、`ApkUpdateController.downloadAndInstall` | 哈希校验之后仍经过 UI 排队/授权页，其他有存储写权限的应用可替换原文件 | 源码已修：全程私有目录，安装入口再次核对 canonical 文件归属；仅编译/静态检查，见坑 315 |
+| 高 | K04 | 认证 HTTP 缺少统一初始源与重定向约束 | `EngineAuth.confineConnection` | 手工 Cookie 头不能依赖浏览器域策略，自动重定向可能把请求送到其他源 | 源码已修：精确引擎源、禁自动重定向；仅编译/静态检查，见坑 316 |
 | 高 | K06 | 特权服务面危险命令黑名单曾可被 `controlExec` 直连绕过 | `plugins/dsh-android-bridge/src/index.ts:1045`、`:1191`、`:1228` | 工具壳拒绝而服务面放行，会让直连插件绕过系统配置/权限写保护 | 已修：服务面 `controlExec`、`execAdbShell`、`execAdbLine` 共用拒绝判据并审计 |
 | 高 | K07 | `touch()` 全仓零调用点，「空闲回收」实为「建屏后 10 分钟必回收」 | `app/src/main/java/com/dsharnessmobile/shell/VdisplayController.kt:84`、`app/src/main/java/com/dsharnessmobile/shell/VdisplayController.kt:60` | 长任务看虚拟屏时中途黑屏 | 未修（F-10/V-R0） |
 | 高 | K07 | `create()` 幂等判定在锁外、`setSurface` 失败被吞、`VdisplayHost.onMain` 无 catch | `app/src/main/java/com/dsharnessmobile/shell/VdisplayController.kt:322`、`app/src/main/java/com/dsharnessmobile/shell/VdisplayController.kt:495`、`app/src/main/java/com/dsharnessmobile/shell/VdisplayHost.kt:207-213` | 并发双建屏；查看器槽位被占但画面黑；主线程异常打穿 | 未修（S-8 同族） |
@@ -440,6 +442,7 @@ sequenceDiagram
 | K03 | 插件注入层 | profiles 的 package.json 与 cordis.patch.yml 决定引擎实际挂载集，工厂 disabled 语义以 FactoryProfilePatch 为权威 | app/src/main/java/com/dsharnessmobile/shell/FactoryProfilePatch.kt:79 |
 | K03 | 交互面 MainActivity | DownloadSaver 由 WebView 下载/外链回调拉起，回执经 window.__dshExportResult 回灌页面 | app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:89 |
 | K03 | EngineAuth | DownloadSaver 下载引擎同源 URL 时附加鉴权并做一次 401 自愈重试 | app/src/main/java/com/dsharnessmobile/shell/DownloadSaver.kt:101 |
+| K03 | APK 更新文件与安装器 | 官方哈希校验、授权续继与安装器使用同一私有目录文件；FileProvider 单文件只读授权 | app/src/main/java/com/dsharnessmobile/shell/UpdateChecker.kt:53、app/src/main/java/com/dsharnessmobile/shell/UpdateChecker.kt:558 |
 | K03 | 开发选项与诊断 | boot-fail.log、update-status.txt 与 diagnostics 镜像目录是本块失败终态的落盘点 | app/src/main/java/com/dsharnessmobile/shell/EngineManager.kt:193 |
 | K03 | 公共导出目录供给 | Documents/dshdata 的创建与**结果记账**（`status|trigger|epochMs|detail` 落在私有目录）；触发点经 onCreate/onResume 与「引擎是否在跑」解耦，且除 OK 外每轮都重试——旧实现只从 startEngine()/shellEnv() 进入，引擎活着早退就永远不再供给（0.14.1 用户反馈：Documents 下一直没有 dshdata）。存储 chip 的判据取该结果，只有 OK 才显示「已就绪」；授权路线按 SDK 分流（API<30 无 All Files Access，改请求运行时 READ/WRITE） | app/src/main/java/com/dsharnessmobile/shell/PublicRepoProvision.kt:1、EngineManager.kt:790、MainActivity.kt:354 |
 | K04 | 引导与启动 | MainActivity/EngineService 是桥与控制承载的唯一安装与起停点（EngineAuth.initContext 必须先于装桥） | app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:160 |
@@ -448,6 +451,7 @@ sequenceDiagram
 | K04 | 插件面 | 控制队列的 exact 路由、令牌校验与 pv/caps 协商在 plugins/dsh-android-bridge/src/control-queue.ts | plugins/dsh-android-bridge/src/control-queue.ts:347 |
 | K04 | 快照与更新 | UndoGate 调急救 CLI 按壳侧 known-good ID 回撤并把现场镜像到共享目录；成功回滚后复位看门狗锁存 | app/src/main/java/com/dsharnessmobile/shell/UndoGate.kt:278-434 |
 | K04 | 日志与诊断 | EngineAuth 只输出脱敏状态行；UndoGate 另立不受 DevLogPrefs 闸门的 undo-gate.log | app/src/main/java/com/dsharnessmobile/shell/UndoGate.kt:136 |
+| K04 | 原生认证 HTTP 连接 | 两个 attach 入口均先约束精确源及重定向，再读取 Context/Cookie；无 Cookie 时也不自动转发 POST | app/src/main/java/com/dsharnessmobile/shell/EngineAuth.kt:219 |
 | K04 | 门禁与测试 | check-bridge-symmetry 守页面/壳两侧方法对称，check-control-ops 守 op 登记面，跨语言 fixture 守协议 V2 | scripts/check-bridge-symmetry.mjs:1 |
 | K04 | 构建与发布 | app/build.gradle.kts 的单测依赖决定 jsString 类缺陷的判据落在哪个 org.json 实现上 | app/build.gradle.kts:127 |
 | K05 | K04 | 控制队列与回填协议：op 名 / args 里的 screenId 与 gen / row 句柄 / caps 与 pv 全由 ControlPoller 与 ControlProtocolV2 编解码，两边 op 集合由 check-control-ops.mjs 六面对齐 | app/src/main/java/com/dsharnessmobile/shell/ControlPoller.kt:158 |
@@ -713,6 +717,7 @@ sequenceDiagram
   - **不变量 2a（超时后不继续安装）**：每个检查/下载操作有代次；超时或 Activity 销毁会递增代次并中断 worker，
     状态更新、下载进度与 UI 安装排队前都必须匹配代次和当前相位。APK 流式下载同时受发布大小与 512 MiB 上限约束，
     每次镜像尝试使用独立临时文件；哈希只从 GitHub 官方 sidecar/MANIFEST 获取，取不到则拒绝安装。
+  - **安装文件归属**：下载与校验 → UI 排队 → `readyToInstall` 授权续继 → 安装器，全程使用 `UpdateChecker.updatesDir` 的应用私有文件；安装交接再次核对 canonical 父目录和普通 APK 文件，只给安装器单文件读授权。见坑 315。
   - **不变量 2b（单一真源：`canStart` 与受理判据必须同表达式）**：`canStart` 直接由 state 派生
     （`snapshotJson` 的 `state == STATE_AVAILABLE`，`:71`），与 `beginDownload()`（`:140`）的受理判据**同一表达式**。
     旧实现把 `canStart` 绑在一个独立的「有没有待装新版」字段上，其语义**弱于**真实受理条件（`state == available` **且** 该字段非空），
@@ -741,6 +746,7 @@ sequenceDiagram
   - 页面 JS 同步调 `window.androidBridge.*`（现状：71 个 `@JavascriptInterface` 注解、70 个唯一方法名（`browserHostShow` 为重载），唯一安装点 `MainActivity.kt:719-799`；2026-10-11 实测修正，旧值 53/52）与 `window.dshBackBridge.*`（`BackGate.kt:132-148`，仅 2 个方法）；另有 `consoleBridge`（`ConsoleActivity.kt:105`）挂在控制台 WebView。
   - `EngineService.onCreate` → `ControlCarrier.ensureStarted`（`EngineService.kt:43`）；无障碍服务连接时同入口（`DeviceControlService.kt:452-453`）。轮询/心跳由此起步。
   - 任一出厂 HTTP 调用方（`EngineProbe.kt:51`、`DownloadSaver.kt:101`、`NotifyBridge.kt:328`、`OverlayPanel.kt:824`、`OverlayService.kt:580`、`MuxClient.kt:91`）在发请求前向 `EngineAuth` 取值。
+  - 原生 HTTP 的两个 `EngineAuth.attach` 入口在读取凭据前调用 `confineConnection`：初始 URL 精确匹配引擎源，禁自动重定向，再附加 Cookie；WS 仍使用固定 mux 端点。此约束不构成端口进程身份认证（坑 316）。
   - 看门狗 tick 的 `undoReady`（`EngineService.kt:134`）与启动流（`EngineStartFlow.kt:349`）触发 `UndoGate`。
 - **运行顺序**：
   1. 引导期（MainActivity.onCreate）：`:160` 先 `EngineAuth.initContext`（顺带 `ShellAppContext.bind`）→ `:204` 建 WebView → `:719`/`:803` 装两条桥 → `:812` 取本地缓存 cookie 注入 CookieManager → 载引擎页；此后页面任何时刻都能同步调桥（JavaBridge 线程）。
