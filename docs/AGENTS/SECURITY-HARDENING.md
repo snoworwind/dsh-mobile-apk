@@ -116,7 +116,7 @@ node scripts/check-release-gates.mjs --list  # 现数门禁集合及「仅构建
 
 | 面 | 当前事实 | 能支持什么结论 |
 |---|---|---|
-| 静态门禁 | 八条本地门禁在 macOS 26.6.2 + Node 20.18.0 下于本尖端实测 exit 0：bridge 对称、Kotlin 注释、control op、op registry 平权、工具名承诺、Manifest 加固、执行地图、维护文档生成块；聚合入口 `check-release-gates.mjs` 静态接线断言同样 exit 0（声明门禁集 35 项，两树同版） | 只支持静态关系成立，不证明运行时行为 |
+| 静态门禁 | 八条本地门禁在 macOS 26.6.2 + Node 20.18.0 下于本尖端实测 exit 0：bridge 对称、Kotlin 注释、control op、op registry 平权、工具名承诺、Manifest 加固、执行地图、维护文档生成块；聚合入口 `check-release-gates.mjs` 同样 exit 0（声明门禁集 35 项）。但它的「两树同版」断言在本机走的是**对端缺席跳过**分支——脚本对跳过也打印 PASS 且 PASS 不打印 detail，**不计为已比对**；`check-patch-mirror.mjs` 的镜像层同理需要协调仓树在场 | 只支持静态关系成立，不证明运行时行为；跨树一致性在本机未取得证据 |
 | Kotlin 全量测试 | 来源链执行 1218 例零失败零跳过（旧测试放行未认证长选项等预期已修正，生产屏幕授权逻辑未放宽，见坑 322）；引擎侧屏幕范围 47 例通过；已登记的 MiMo 精确 verifier 补接分派，并以完整补丁通过、部分补丁拒绝、未知 verifier 拒绝证明判据，见坑 323 | 绑定当时源码与产物，不覆盖设备行为 |
 | 来源审计 APK | 隔离检出从已提交源码（`bc6637f`）产出 arm64 APK，14 项独立复核通过，判据为语义归一化摘要 | 支持产物与源码的对应关系；**未做设备验收、未发布** |
 | Windows 完整编译 | Java 24 下 Gradle 配置阶段仍报 `Type T not present`，未改工程版本规避 | 该环境阻塞未解除，不记通过 |
