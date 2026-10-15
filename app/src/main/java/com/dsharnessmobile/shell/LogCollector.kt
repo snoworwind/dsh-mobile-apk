@@ -457,7 +457,7 @@ object LogCollector {
    * 因此本函数可从任意线程调用且不引入 HTTP。
    *
    * @param source 诊断来源（`shell-stall` / `page-console` / …），进同一行便于分流
-   * @param detail 已序列化的诊断载荷（JSON 或 k=v）；调用方保证不含凭据
+   * @param detail 已序列化的诊断载荷（JSON 或 k=v）；调用方应避免写入凭据，最终写盘前仍会脱敏
    * @param pageSideRuntime 页面侧运行时状态（页面自报时给真值；壳侧取不到时用
    *   [PAGE_RUNTIME_UNAVAILABLE]）。默认 unavailable —— **绝不留空数组**（块L L-2：空数组
    *   正是「诊断看起来正常」误导的根源；「真值是空数组」与「取不到」必须可区分）。
@@ -470,10 +470,10 @@ object LogCollector {
   ) {
     val ctx = context.applicationContext
     val runtime = pageSideRuntime.replace('\n', ' ').replace('\r', ' ')
-    val line = BOOT_DIAG_MARK + " source=" + source +
+    val line = EngineAuth.redact(BOOT_DIAG_MARK + " source=" + source +
       " " + bootSegmentsSnapshot() +
       " pageSideRuntime=" + runtime +
-      " detail=" + detail.replace('\n', ' ').replace('\r', ' ')
+      " detail=" + detail.replace('\n', ' ').replace('\r', ' '))
     try {
       val f = File(ctx.filesDir, BOOT_DIAG_FILE)
       if (f.length() > BOOT_DIAG_MAX_BYTES) {
@@ -483,7 +483,7 @@ object LogCollector {
       }
       f.appendText(line + "\n")
     } catch (t: Throwable) {
-      Log.w(TAG, "boot diag write failed: " + (t.message ?: t.javaClass.simpleName))
+      Log.w(TAG, EngineAuth.redact("boot diag write failed: " + (t.message ?: t.javaClass.simpleName)))
     }
   }
 
@@ -530,8 +530,10 @@ object LogCollector {
       context.applicationContext.filesDir, stage, detail, error, System.currentTimeMillis(),
       embeddedAssetFingerprint(context),
     )
-    // 失败路径必须有 Log.e（用户反馈第 5 项：logcat 里连一行都没有）。
-    Log.e(TAG, "boot failed: stage=" + stage + " detail=" + detail, error)
+    // 失败路径必须有 Log.e（用户反馈第 5 项：logcat 里连一行都没有）。不要把原始 Throwable
+    // 交给 Log.e：Android 会自行打印未脱敏的异常消息与栈；完整栈已在 writeBootFailTo 的私有文件出口脱敏。
+    val errorType = error?.javaClass?.name ?: "none"
+    Log.e(TAG, EngineAuth.redact("boot failed: stage=" + stage + " detail=" + detail + " error=" + errorType))
   }
 
   /**
@@ -758,9 +760,9 @@ object LogCollector {
         try { prev.delete() } catch (_: Throwable) { /* 旧代删不掉不影响本轮 */ }
         try { f.renameTo(prev) } catch (_: Throwable) { /* 轮转失败则继续追加 */ }
       }
-      f.appendText(line + "\n")
+      f.appendText(EngineAuth.redact(line) + "\n")
     } catch (t: Throwable) {
-      Log.w(TAG, "diag write failed (" + name + "): " + (t.message ?: t.javaClass.simpleName))
+      Log.w(TAG, EngineAuth.redact("diag write failed (" + name + "): " + (t.message ?: t.javaClass.simpleName)))
     }
   }
 

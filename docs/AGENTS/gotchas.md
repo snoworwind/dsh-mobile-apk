@@ -1923,3 +1923,13 @@ EngineBootContinuationTest用latch驱动真实观察函数：winner持CAS但无�
 **修法**：只将实际生成区内的 CRLF 归一为 LF，再与预期内容完整比较。生成区唯一性、边界及逐字符内容要求保持原判据，生成器的写入行为不变；不跳过任何文档或生成字段。
 
 **检查状态**：在保留 CRLF 的实际工作区文档上重跑静态门禁通过；脚本 `node --check` 通过，生成区对应文档的 Git 内容差异为空。日志为 `.deploy-tmp/branch-purpose-check-maintenance-docs.log`。按用户限定只做静态检查，未新增或运行测试、自检或合成负控；这不构成完整门禁回归通过的结论。
+
+319. **启动诊断文件与 logcat 会把页面 launch token 原样落出**
+
+**现象**：启动失败时，页面请求 URL（形如 `/?token=...`）及其异常上下文会进入 `boot-diag.log`；`writeBootFail` 还把原始 Throwable 交给 Android `Log.e`，异常消息和栈可能再次带出 token。私有目录权限只能限制其他应用的访问，不能让日志内容在复制、诊断包或 logcat 采集出口变安全。
+
+**真因**：`EngineAuth.redact` 已用于部分诊断副本，但启动诊断和失败终态各自直接写文件；失败路径还把 Throwable 作为单独参数交给 logcat，由系统绕过字符串脱敏自行格式化。
+
+**修法**：`writeBootDiag` 在组装完整单行后脱敏；boot-fail 与显式健康记录在共享有界追加器落盘前再次脱敏；`writeBootFail` 的 logcat 保留脱敏后的 stage/detail/异常类型摘要，不再传入 Throwable。完整异常栈继续保存在应用私有 `boot-fail.log`，并在文件边界脱敏。调用方仍须避免写入其他凭据；当前 `EngineAuth.redact` 只覆盖 URL query 的 `token=` 值，不是通用秘密扫描器。
+
+**检查状态**：`node scripts/check-code-map.mjs` 与 `node scripts/check-kotlin-comments.mjs` 通过；静态核对 `writeBootDiag`、`writeBootFailTo`、`writeBootFailOkTo` 的落盘路径及 logcat 调用，确认其出口均经过脱敏且失败栈不再作为 Throwable 传给 `Log.e`。Windows Java 24 下编译目标在 Gradle 配置阶段报 `Type T not present`；WSL Java 17 重试因未找到 Android SDK 而退出，均未执行 Kotlin 编译。本轮未新增或运行测试、未做设备验收、未构建 APK；日志内的 token 回归仍需在获准测试后验证。

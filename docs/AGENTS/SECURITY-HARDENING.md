@@ -76,6 +76,12 @@ node scripts/check-code-map.mjs
 node scripts/check-maintenance-docs.mjs
 ```
 
+### 追加安全修复（2026-10-15）
+
+修复启动诊断文件及 logcat 中的 launch-token 暴露路径：`writeBootDiag` 在写入前对完整诊断行调用 `EngineAuth.redact`；boot-fail 与显式健康标记经共享有界追加器再次脱敏；`writeBootFail` 的 logcat 记录保留失败阶段、detail 和异常类型，但不再把原始 Throwable 交给 Android 打印未脱敏栈。完整栈仍写入应用私有 `boot-fail.log`，并在落盘边界脱敏。根因、调用链与检查边界见 [gotchas.md 坑 319](gotchas.md)。
+
+本轮源码及静态门禁检查通过。Windows Java 24.0.1 下尝试 `:app:compileDebugKotlin --no-daemon`，在创建 `:app:outgoingVariants` 任务时于 Gradle 配置阶段报 `Type T not present`，Kotlin 编译任务未执行。随后使用 WSL Java 17 与 wrapper JAR 重试，Gradle 因找不到 Android SDK（无 `ANDROID_HOME` / `ANDROID_SDK_ROOT`，且无 `sdk.dir`）停止；常见 SDK 路径也未找到。因此本轮没有 Kotlin 编译证据。未新增或运行测试、未做设备验收、未构建 APK。`EngineAuth.redact` 当前针对 URL query 中的 `token=` 值；这不是对任意格式秘密的通用扫描器，诊断调用方仍应避免传入其他凭据。
+
 ## 维护入口
 
 - [known-gaps.md](known-gaps.md)：当前风险、环境限制和待取得的证据。

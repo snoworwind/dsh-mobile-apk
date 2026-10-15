@@ -186,7 +186,7 @@ class BootFailLogTest {
   @Test
   fun failurePathEmitsLogE() {
     val src = File("src/main/java/com/dsharnessmobile/shell/LogCollector.kt").readText()
-    assertTrue("失败路径必须 Log.e（用户反馈第 5 项）", src.contains("Log.e(TAG, \"boot failed: stage=\""))
+    assertTrue("失败路径必须 Log.e 且不能附带未脱敏 Throwable", src.contains("Log.e(TAG, EngineAuth.redact(\"boot failed: stage=\""))
   }
 
   @Test
