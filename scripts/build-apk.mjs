@@ -2,7 +2,8 @@
 //
 // 对应本地 scripts/build-apk-013.ps1（PowerShell + wsl，仅 Windows）。本脚本是「可移植版」：
 // 在云端的 GHA ubuntu（原生 Linux）跑，也可在本地 Windows 跑（gate 脚本自带平台感知）。
-// 两树逐字节镜像（scripts/build-apk.mjs ⇄ dsh-mobile-apk/scripts/build-apk.mjs，check-patch-mirror 守）。
+// 跨树逐字节镜像（原先 scripts/build-apk.mjs ⇄ dsh-mobile-apk/scripts/build-apk.mjs）已于 2026-10-15
+// 按用户决定退役：本分支只从源码构建、不依赖协调仓，树内副本即权威（AGENTS §4 铁律 6）。
 //
 // 0.13.8-b ST-06 / F-ENV-04 真源化（此前是本链的三处陈旧字面量）：
 //   ① 版本 = app/build.gradle.kts 的 versionName（此前写死 0.13.0 → 产物名与输出目录恒错）；
@@ -264,7 +265,7 @@ try {
     //   · `vendor/**/lib/` 是**入库跟踪**的（.gitignore 显式 `!vendor/...` 例外）→ 原地降级会写脏
     //     工作树，绊停发布链自身的 dirty 门禁，并让「产物可追溯到已提交源码」失效；
     //   · `plugins/*/lib/` 在 .gitignore 内，但原地降级会改写 lib/ 与包内 node_modules 副本 →
-    //     与 apk 仓镜像产生无意义漂移，把 check-patch-mirror 判红（本地链实测踩到）。
+    //     污染本仓注入面与产物可追溯性（跨树镜像比对已退役，此处不再以它为由）。
     // 故：需要产物级降级的 vendor 三源先复制到 work 下的**暂存副本**再降级，并把暂存路径交给
     // combo 预计算与 inject-all（两处必须同一份，否则 combo 键与注入内容不一致）。
     // 我方 3 个带 client bundle 的包已在自己构建源里钉了 chrome87（tsdown.client.ts / build-client.mjs），

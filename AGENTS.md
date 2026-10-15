@@ -131,9 +131,10 @@ adb -s <serial> install -r -t out\v<版本>\dsh-mobile-apk-v<版本>-arm64.apk
 3. **原子化交付 + 分档验证**：一个 PR = 一个逻辑改动，可独立 revert；禁止把「修 bug + 重构 + 顺手优化」混在一个 PR 里。**但「原子 PR」不等于「不验」**——每个 PR 必须携带与其风险类相符的**最廉价充分证据**：L0 文档/注释 → CI 绿即可；L1 门禁/脚本逻辑 → `--self-test` + **一条受控负控**；L2 安全敏感面（快照事务 / 签名 / 门禁自身判据 / 桥协议）→ **即时三层**；L3 UI/UX 与壳侧行为 → **即时模拟器三层**。
    统一全量测试（双 ABI 全链 + 冷启动矩阵 + 真机补充门禁）前移到**发布计划确定时**执行，且它**只做集成验证、替代不了上面每档的证据**。细则见协调仓 `docs/0.14.8-DELIVERY-PLAN-2026-10-14.md` §3。
 4. **默认改动走 PR**：建分支 → 提交（`<type>: <描述>`）→ 推分支 → 开 PR（1-3 标签）→ CI 绿 → 合并 → 删分支。**禁止直接 push `main`**。本分支 `security/hardening` 按用户要求独立维护，采用提交与同名远程推送，保留分支且不合并到 `main`，详见 `docs/AGENTS/SECURITY-HARDENING.md`。其他例外仅限不改仓库内容的外部动作（Release 资产、issue 评论与开关、标签）。
-5. **子仓镜像（幽灵缺陷防线）**：改 `dsh-client-ui-responsive` / `dsh-host-web-compat` / `dsh-shell-termux` / `plugins/dsh-android-*` 的源码或 bump 版本后，**必须 robocopy 镜像到本仓同名目录**（src + package.json + **`lib/` 产物**）。漏了 → 云端自包含构建注入旧副本，**编译通过但功能缺失**。
+5. **子仓副本同步（幽灵缺陷防线）**：改 `dsh-client-ui-responsive` / `dsh-host-web-compat` / `dsh-shell-termux` / `plugins/dsh-android-*` 的源码或 bump 版本后，**必须把源码、`package.json` 与 `lib/` 产物同步进本仓同名目录**（本分支树内副本即权威，不存在需要对端的第二棵树）。漏了 → 构建注入旧副本，**编译通过但功能缺失**。
    - 只同步**镜像清单内的文件**，切勿对 `scripts/` 等目录整体 `/MIR`——会删掉本仓独有的设备脚本（真实事故）。
-6. **补丁镜像面**：`scripts/patches/**`、`scripts/check-patch-mirror.mjs`、`scripts/build-apk-013.ps1` 等是协调仓的**逐字节镜像**，单边演进即拒。补丁改动**先合本仓镜像 PR，再合协调仓权威源 PR**。
+6. **跨树权威已收归本仓（2026-10-15，按用户决定）**：原先声明 `scripts/patches/**`、`scripts/check-patch-mirror.mjs`、`scripts/build-apk-013.ps1` 等是「协调仓的逐字节镜像，单边演进即拒；补丁改动先合本仓镜像 PR、再合协调仓权威源 PR」。本分支既然只从源码构建、且不依赖 kelai141 名下任何仓库（见 `docs/AGENTS/SECURITY-HARDENING.md` 的「独立」口径），**跨树镜像层已从门禁中整体移除**——`check-patch-mirror.mjs` 只保留 registry↔IMPLS 自洽面，`check-release-gates.mjs` 的「两树同版」断言已删除（它原先在对端缺席时打印 PASS 却从未比对）。树内副本即权威，这些文件在本分支按本仓评审与门禁正常演进，不需要对端配合。
+   - 代价已记账：这些文件自此与协调仓**永久分叉**，将来若引入上游改动，这几处必冲突（见 `docs/AGENTS/known-gaps.md`）。
 7. **禁 emoji**：提交信息、PR 标题/描述、文档、标签一律不用。
 8. **工作区卫生**：`.deploy-tmp` 只增不减会拖垮开发机（实测 2026-10-14 达 34.8 GB / 313,393 文件，是开发机第一大空间消耗，文件数本身就在拖慢目录遍历类工具）。每完成一轮交付，在协调仓根跑 `node scripts/clean-deploy-tmp.mjs`（默认 dry-run，`--apply` 执行）。判定口径与保留清单见该脚本头注释；**注册的 git worktree 与近 3 天内活动过的目录一律保留**。
 9. **APK 只能从源码构建（本分支 `security/hardening`）**：本分支上任何 APK 都**必须**由来源链产出（云端 `build-apk-source.yml`，本地 `node scripts/source-build/run-local-source-chain.mjs`），**禁止**用 `build-apk-013.ps1` / `build-release.ps1` 等本地或协调仓链产出、归集或发布 APK。判据、当前缺口与发布链状态见 `docs/AGENTS/SECURITY-HARDENING.md`。
@@ -183,7 +184,7 @@ adb -s <serial> install -r -t out\v<版本>\dsh-mobile-apk-v<版本>-arm64.apk
 | `check-kotlin-comments.mjs` | Kotlin 嵌套块注释 |
 | `check-plugin-tests.mjs` | 每个插件的单测真实跑通（全 skip 判假绿） |
 | `check-tool-surface-budget.mjs` | 模型面 wire 预算（新增工具会撞；近义工具优先复用既有 + 参数） |
-| `check-patch-mirror.mjs` | 双仓镜像逐字节一致 |
+| `check-patch-mirror.mjs` | 补丁 registry↔IMPLS id 双向闭合（**树内自洽**；跨树逐字节镜像层已按 §4 铁律 6 移除） |
 | `check-code-map.mjs` | 执行地图覆盖完整、锚点有效、编号一致（改代码后必跑；`--self-test` 自检） |
 | `check-op-registry-parity.mjs` | 引擎与壳侧两份「会读设备屏的 op」清单逐条相同（漂移 = 缺省 virtual-only 下工具大面积不可用） |
 | `check-tool-name-promises.mjs` | 指引里承诺的 `android_*` 工具名必须有声明位（防「指引指向一条不存在的路」） |

@@ -354,7 +354,7 @@ sequenceDiagram
 - [B01] 2. `scripts/build-apk-013.ps1:206-212` 注释称 vendor 补丁「默认 ensure 语义（缺席即施加）」，实际调用不带 `--apply`/`--scope`，`apply-patches.mjs:1568,1572` 推导为 `mode=check`（已确认）：只校验不施加，补丁必须先打在入库的 `vendor/*/lib/` 里；缺一条即 `Deny-Abi` 拒打包（失败关闭，但排查时按注释预期会找不到「自动施加」这一步）。0.13.7-CERTIFICATION.md:11 亦记 `mode=check`，即注释是旧语义残留。
 - [B01] 3. `scripts/make-snapshot.sh:8` 的 `SNAP_PKG_ROOT` 默认 `/data/user/0/com.dsharnessmobile.shell`（不含 `/files`），`:158` 的 sed 会把 heredoc 兜底 patch 的 `/data/data/com.termux/files/usr` 改写成 `.../com.dsharnessmobile.shell/usr/bin/bash`（已确认，触发条件 = 设备上找不到外部权威 patch，走 `:156` 警告分支）→ 设备侧 assertBash 失败、注入包全不装配。该脚本是备选发布入口的输入端（`build-release.ps1:89-114` 要求设备侧产出 `snapshot/snapshot-*.tar.xz`），且这条入口的快照无软链净化、无归档自检（协调仓 `coord:docs/COMPAT-REVIEW-0.14.0-2026-09-19.md:1337` 记 I-4）。
 - [B01] 4. `scripts/build-apk-013.ps1:141-144` 注释称「本次构建前必须重跑 Kotlin 单测由发布链步骤保证」，但 `build-release.ps1` 全文没有 `testDebugUnitTest`（已确认）：发布链经 `check-release-gates.mjs --run --require` 调用 `check-kotlin-test-count.mjs`（`:104` 条目、通用 argvFor 不带 `--allow-missing`），干净机器上无结果即 `exit 1`。本地链用 `--allow-missing`（ps1:145）所以不红——症状是「本地全绿、发布链在干净机器上红」（协调仓 `coord:docs/COMPAT-REVIEW-0.14.0-2026-09-19.md:1334` 记 I-1，P1）。
-- [B01] 5. 镜像门禁覆盖缺口（已确认读数）：`check-patch-mirror.mjs:109` 的 MIRROR_FILES 只含 registry.json/apply-patches.mjs/README.md，`:160-279` 的 MIRROR_TOP 未列 `scripts/patches/data/compat-map.json`、`scripts/snapshot-config/` 除 engine-overlay.json 外的 6 个数据/模板文件、`scripts/make-snapshot.sh`、`scripts/relocate-snapshot.py`、`scripts/inject-snapshot.py`、`scripts/inject-external-plugins.py`、`scripts/update-snapshot-patch.py`——这些面单边演进不会被拦（当前工作树里它们逐字节一致；`scripts/patches/tests/` 的 3 个文件仅 CRLF 差异，git blob 相同，门禁按 EOL 告警不判红）。
+- [B01] 5. 镜像门禁覆盖缺口（已确认读数）：`check-patch-mirror.mjs:56-72` 的 MIRROR_FILES 只含 registry.json/apply-patches.mjs/README.md，`:56-72` 的 MIRROR_TOP 未列 `scripts/patches/data/compat-map.json`、`scripts/snapshot-config/` 除 engine-overlay.json 外的 6 个数据/模板文件、`scripts/make-snapshot.sh`、`scripts/relocate-snapshot.py`、`scripts/inject-snapshot.py`、`scripts/inject-external-plugins.py`、`scripts/update-snapshot-patch.py`——这些面单边演进不会被拦（当前工作树里它们逐字节一致；`scripts/patches/tests/` 的 3 个文件仅 CRLF 差异，git blob 相同，门禁按 EOL 告警不判红）。
 - [B01] 补充（非可疑，语义澄清）：坑 63 的「只替换已有成员、新增文件丢弃」在主链已被 inject-all.py 修复（`:204-208` 注释 + `:321-338` 补缺循环 + 门禁 `check-inject-completeness.mjs:2`），但 `inject-snapshot.py:106-121`（只在整包缺席时走 need_add）仍是另外一条路径的注入器：`build-release.ps1:109`。（0.14.5：原先还有 apk 仓的独立快照 workflow（`build-snapshot.yml`，注入步），它只注入 3 个包、不做引擎 overlay/引擎补丁/语法降级，故也带坑 63 语义；**该 workflow 已删除**——快照构建入口已收敛为 `build-apk.yml` / `release.yml` 单一链，故其注入器语义不再适用。**2026-10-15：`release.yml` 亦已退役（本分支不出 Release，只允许来源链构建，见 AGENTS §4 铁律 9）**。）
 - [B01] 漂移：`docs/AGENTS/build-and-env.md:32,41-42` 说快照归档/解压用 `xz -T0`/`xz -dT0`，源码 `scripts/build-snapshot-013.mjs:985` 是 `xz -T${XZ_THREADS} -6`、`:120` 是 `xz -dT${XZ_THREADS}`（`scripts/lib/shell.mjs:31` 默认 8，`scripts/check-build-parallel-cap.mjs` 把「吃满全部核心」判红）。
 - [B01] 漂移：`历史 BRIDGE-API 副本（当前契约见§6 K04）` 同一句「瘦身 + xz -T0 归档」与源码 `scripts/build-snapshot-013.mjs:985` 的 `xz -T${XZ_THREADS}` 不符（该文件的构建段落是 build-and-env.md 的拷贝）。
@@ -362,7 +362,7 @@ sequenceDiagram
 - [B01] 漂移：`docs/AGENTS/build-and-env.md:48` 与 `历史 BRIDGE-API 副本（当前契约见§6 K04）` 说「门禁（build-apk-013.ps1 内）：聚合入口 scripts/check-release-gates.mjs」，源码 `scripts/build-apk-013.ps1` 全文无该脚本调用（逐条内联 27 项；聚合入口只由 `scripts/build-release.ps1:56,60,147` 与 CI 调用，本地链里它只出现在 `:43` 的注释）。
 - [B01] 漂移：`docs/AGENTS/RUNTIME-PATCHES.md:56` 说 scope=vendor 补丁「在 build-apk-013.ps1 阶段施加」，源码 `scripts/build-apk-013.ps1:211` 的调用无 `--apply`/`--scope` → `scripts/patches/apply-patches.mjs:1568,1572` 默认 `mode=check`（只校验不施加；`docs/AGENTS/0.13.7-CERTIFICATION.md:11` 也记 mode=check）。
 - [B01] 漂移（**2026-09-25 已修**）：`docs/AGENTS/RUNTIME-PATCHES.md` 原写 engine 补丁「当前全量」14 项；该文件已按现数改为 **15 项**（`scripts/patches/registry.json` 实测 30 条总 / 15 条 engine / 15 条 vendor）。原条目点名的四条缺口（combo-single-lazy-A5、combo-parallel-C3、combo-probe-P1、boot-third-party-isolation-G3）中，**A5 与 C3 已于 0.14.2 追版时按实测撤销**（见 RUNTIME-PATCHES §7.4 与 `scripts/patches/README.md` 撤销段），P1 与 G3 仍在册 ⇒ 清单已与源码同源，此处不再是漂移。
-- [B01] 漂移：`AGENTS.md:21` 说 `vendor/`（marketplace / undo-savepoint / dsh-model-sync），源码实际 `vendor/` 只有 `dsh-undo-savepoint` 与 `dshmarketplace-plugin`（model-sync 已随 0.14.1 整体摘除，见 `scripts/profile-web.cordis.patch.yml:128-138` 与 `scripts/check-patch-mirror.mjs:231-233`）。
+- [B01] 漂移：`AGENTS.md:21` 说 `vendor/`（marketplace / undo-savepoint / dsh-model-sync），源码实际 `vendor/` 只有 `dsh-undo-savepoint` 与 `dshmarketplace-plugin`（model-sync 已随 0.14.1 整体摘除，见 `scripts/profile-web.cordis.patch.yml:128-138`；镜像面清单已于 2026-10-15 移除，此处不再引用它）。
 - [B02] 1. 【已确认，源码可复现】Kotlin 单测数量门禁的「防净零抵消」可被整类删除绕过：A 判据只对现存源码测试类要求有结果（`scripts/check-kotlin-test-count.mjs:129`），B 判据对结果里缺席的类直接 `continue`（`:153`）→ 删掉整个测试文件（例如 29 例的 `SnapshotTransactionTest.kt`）再在别处补足总数即恒绿。影响：一整类防线被无声削掉，而该门禁不在 CI（`ci:false`），只在两条链以 `--allow-missing` 跑。
 - [B02] 2. 【已确认】发布链的「SKIP=0」存在盲区：聚合入口用 `/SKIP=(\d+)/` 统计（`scripts/check-release-gates.mjs:246`），而 `scripts/check-boot-budget.mjs` 真检缺席时打印的是 `SKIP(#1)(real-data)`（`:681`）并立刻 `selfTest()` 退出（`:684`）——该 SKIP 既不入合计、在 `--require` 档下也不判红；唯一能判红的 `--require-real` 零调用点（仅注释提到）。影响：无设备产物时发布链可打印 SKIP=0 全绿，冷启动预算真判据从未执行。
 - [B02] 3. 【已确认，apk 树结构性必红】`plugins/dsh-android-vdisplay/test/tools-callable.test.mjs:122`（另 `:144`/`:161`/`:174`）用 `../../../dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/VdisplayController.kt` 读壳侧源码——该相对路径只在协调仓布局成立；apk 自包含树里 4 个用例 `readFileSync` 抛错。而 `scripts/check-plugin-tests.mjs` 在 `GATES` 里 `ci:true`，apk 仓 `.github/workflows/pr-gate.yml:64` 会跑它。影响：apk 仓 CI 与 apk 自包含构建结构性变红（对应协调仓评审 S-11 第二项 / §4.4-V-M4，本轮工作树仍未修）。
@@ -541,7 +541,7 @@ sequenceDiagram
 | B01 | 门禁块 | 27 项门禁集在 check-release-gates.mjs 唯一声明，本地链逐条内联、发布链走聚合入口 --run --require | scripts/check-release-gates.mjs:28-104,136-140 |
 | B01 | 壳侧快照解压 | 归档软链与权限判据必须对齐设备侧 SnapshotExtractor 的沙箱边界，构建期净化是为了不让设备静默丢弃条目 | scripts/build-snapshot-013.mjs:933-966,1029 |
 | B01 | 插件源码与 vendor 固化面 | 注入内容取自 plugin-dirs.json 指向的插件目录与 vendor 固化副本，补丁由 apply-patches.mjs 施加 | scripts/plugin-dirs.json:1,scripts/patches/apply-patches.mjs:1583-1589 |
-| B01 | 协同仓权威源 | scripts/patches/**、build-apk-013.ps1、build-snapshot-013.mjs、inject-all.py 等双仓逐字节镜像，单边演进即拒 | scripts/check-patch-mirror.mjs:109,160-279 |
+| B01 | 树内副本即权威 | 2026-10-15 起 `scripts/patches/**`、`build-apk-013.ps1`、`build-snapshot-013.mjs`、`inject-all.py` 等**不再做双仓逐字节比对**：本分支只从源码构建、不依赖协调仓，原「单边演进即拒」纪律随镜像层一并移除；补丁面只由本仓自洽判据守 | scripts/check-patch-mirror.mjs:56-72 |
 | B01 | 发布链 build-release.ps1 | 复用同一门禁集与指纹对账，输入走设备侧 make-snapshot.sh 产出的 snapshot/snapshot-*.tar.xz | scripts/build-release.ps1:56-61,89-114,147 |
 | B01 | CI 与云端构建链 | 云端 build-apk.mjs 与本地链门禁集差集必须为 0。0.14.5：原先并列的 apk 仓独立快照 workflow `build-snapshot.yml`（走 inject-snapshot.py 三包注入、无引擎 overlay/补丁/语法降级）已删除，快照构建入口收敛为单一链 | scripts/check-release-gates.mjs:191-212 |
 | B01 | 来源审计 ARM64 构建 | 官方639ed015/0.2.0-rc.2源码构建CLI/Web/第一方包；Cordis按目标官方源码、不回退旧版本；bootstrap/InRelease/deb认证、native来源审计与overlay pin恢复。PTC与MiMo多文件 exact verifier及全部pnpm同包副本同步；MiMo复用已登记planner并要求before==after，部分补丁和未知verifier仍拒绝；最终snapshot检查复用同一判据，普通post-apply复用runner --check | .github/workflows/build-apk-source.yml:134,scripts/patches/registry.json:211,scripts/patches/apply-patches.mjs:122,scripts/source-build/reconcile-engine-patch-copies.mjs:80,scripts/source-build/check-dsh-source-snapshot.mjs:25 |
@@ -648,7 +648,7 @@ sequenceDiagram
 | 点工具行文件链接弹「无法打开该文件」或点击无反应 | S01 | 会话身份/端点：CDP 读 `document.documentElement.getAttribute('data-dsh-session-id')`；页面 console 的 `[dsh-open-path]` 警告与底部提示条；端点返回体里的 `error` 取值 `session-unknown` / `not-found-in-session` / `not-found`（`dsh-host-web-compat/lib/index.js:895-940`）。 |
 | 目录选择器连弹多次或选完无反应 | S01 | poll 一次性投递与 token：`adb logcat` 看 SAF 与 `dsh-log`；grep `takePoll`（同一 requestId 只投一次）、`x-dsh-pick-token`；返回 `403 forbidden` 即 `DSH_PICK_TOKEN` 与页面 `getPickToken()` 不一致（`EngineManager.kt:1463`）。 |
 | 返回键直接退出应用或层数不降 | S01 | `adb logcat -d | grep dsh-back`（`BackGate.TAG`）；CDP 读 `window.__dshBackDepth` / `__dshBackKinds`；层判据 grep `RIGHT_FULLSCREEN_SELECTOR`（`data-sidebar-right-open` 是权威 open 信号）、`data-sidebar-right-expand`。 |
-| 打包刚起步就红在「补丁镜像不一致」：跑 `node scripts/check-patch-mirror.mjs`；对端探测顺序与镜像面清单见该脚本 `:14-16,109,160-279`（脚本自身也在镜像面内）。 | B01 | （待补） |
+| 打包刚起步就红在「补丁自洽不一致」：跑 `node scripts/check-patch-mirror.mjs`（现行只判 registry↔IMPLS id 双向闭合，见 `:56-72`）；跨树镜像比对已于 2026-10-15 按用户决定移除，不会再因对端漂移判红。 | B01 | （待补） |
 | 设备装上后引擎起不来、日志 `Cannot find module` / `ERR_MODULE_NOT_FOUND`：注入丢件，跑 `node scripts/check-inject-completeness.mjs .deploy-tmp\build-\13-「abi」\snap-final2.tar.xz`，并在构建日志 grep `[fill]` `[prune]` `[add]`（inject-all.py:336-358）。 | B01 | （待补） |
 | 快照「看起来没更新」：比对 `.deploy-tmp\snapshot-013\「abi」\snapshot.tar.xz` 的 mtime 与同级 snapshot.sha256 内容；跑 `node scripts/check-snapshot-builder-output.mjs`（坑 151：产出面被删会静默复用陈旧 tar）。 | B01 | （待补） |
 | 老 WebView 白屏无报错：`node scripts/check-browser-syntax-floor.mjs --scan 「注入后 tar」`；降级落点在 build-snapshot-013.mjs:366-413（快照段）与 build-apk-013.ps1:229-264（注入段，vendor 走暂存副本）。 | B01 | （待补） |
@@ -657,7 +657,7 @@ sequenceDiagram
 | 1. PR 卡在 `static` 作业某一步 | B02 | 读该步名对应脚本，本地复现：`git status` → `node scripts/check-release-gates.mjs`（先看接线断言）→ `node scripts/check-gate-skips.mjs --list`（看声明/接线/SKIP 审计三张表）。 |
 | 2. 「本地全绿、云端建不出」 | B02 | `node scripts/check-release-gates.mjs` 的 `两份编排器门禁集差集 = 0` 一行；再 grep `GATE_SCRIPTS`（`scripts/build-apk.mjs:61`）与 `scripts/build-apk-013.ps1` 的 `node (Join-Path $Root "scripts\check-` 行。 |
 | 3. 「门禁说 PASSED 但问题还在」 | B02 | 先在输出里找 `SKIP(` 与 `SKIP=`：SKIP 不为 0 表示该判据本轮没真跑（`SKIP(#n)` 行会写落点）；再确认跑的是真检档还是 `--self-test`（CI 里 `scripts/check-browser-syntax-floor.mjs` 只有自证）。 |
-| 4. 「改了门禁脚本却没生效」 | B02 | `node scripts/check-patch-mirror.mjs`（两仓逐字节 + `MIRROR_TOP` 清单），注意它只对 `content` 差异判红、行尾差异只 WARN（`scripts/check-patch-mirror.mjs:339`）。 |
+| 4. 「改了门禁脚本却没生效」 | B02 | `node scripts/check-patch-mirror.mjs`——**现行只做树内自洽**（registry↔IMPLS id 双向闭合）；原先的跨树逐字节与 `MIRROR_TOP` 清单已于 2026-10-15 按用户决定移除，故本项现在只能发现「登记与实现不一致」，不再能发现跨仓副本落后。 |
 | 5. 「发布链以 SKIP=0 通过但真检没跑」 | B02 | 在 `check-release-gates.mjs --run` 输出里逐门禁找 `SKIP(#`；聚合入口只认 `SKIP=`（`scripts/check-release-gates.mjs:246`），`scripts/check-boot-budget.mjs:681` 那种带 `#` 的 SKIP 不进合计；设备真检必须显式跑 `node scripts/check-boot-budget.mjs --require-real`（当前零调用点）。 |
 | 1. 一批桥断言同时读成 `undefined` / `false`（`verify-webview-015` 的 `:21-23` 与 `:60-76` 整批连红） | B03 | 九成是连错 target 不是回归。查 `adb shell "cat /proc/net/unix | grep webview_devtools"`、`adb forward --list`、`curl -s http://127.0.0.1:29225/json/list`；主页面 target 的 `url` 应是引擎 Web UI，隔离浏览器页是 `https://example.com/` 之类。grep `webview_devtools_remote_`。 |
 | 2. `verify-state-sync` 的重启类用例（ST-02 / ST-10 / ST-11）恒报「未收敛」，其余全绿 | B03 | 先看命令行是不是带了 `--ws`（`:244` 短路重解析，force-stop 后旧 ws 必然连不上，却被渲染成业务未收敛）。 |
@@ -808,7 +808,7 @@ flowchart TD
   - 工作线程 `dsh-a11y-heartbeat`：每 2s 写 `controlHeartbeat`（`ControlPoller.kt:74-85`，仅当 `ControlCarrier.a11y != null`）。
   - ADB 键盘：`onReceive` 在应用主线程 → `AdbKeyboardService.handle → commitText` 直调 `currentInputConnection`（`AdbKeyboardService.kt:60`），不经过控制队列，也不经过无障碍。
 - **耦合**（点名符号）：
-  - 引擎侧（K04）：`ControlProtocolV2.SUPPORTED_OPS`（`ControlProtocolV2.kt:46`）/`PV`/`Row`/`F_*` 与 `ControlPoller.envelope` 的 `caps`（`:170`）；`scripts/check-control-ops.mjs` 按行首引号解析 `handle` 分支名，所以 browser*/vd*/sh* 分支必须逐条留在 `handle` 里（:634-664）——**但它们运行时不可达**（`ControlCarrier` 已先分流），读代码时不要以为这些 op 在无障碍侧执行。
+  - 引擎侧（K04）：`ControlProtocolV2.SUPPORTED_OPS`（`ControlProtocolV2.kt:46`）/`PV`/`Row`/`F_*` 与 `ControlPoller.envelope` 的 `caps`（`:56-72`）；`scripts/check-control-ops.mjs` 按行首引号解析 `handle` 分支名，所以 browser*/vd*/sh* 分支必须逐条留在 `handle` 里（:634-664）——**但它们运行时不可达**（`ControlCarrier` 已先分流），读代码时不要以为这些 op 在无障碍侧执行。
   - K06：`vd*`（:652-657）与 `sh*`（:661-664）在 handle 里只有一行转发（`VdisplayOps.handle` / `ShellOps.handle`），执行与授权全在 K06；`ControlCarrier.SHIZUKU_CACHE_MS`（`ControlCarrier.kt:47`）只回 `caps.shizuku`。
   - 偏好键：`dsh-adb.xml`（`PREFS` :42）的 `a11yEnabled`/`controlToken`/`controlHeartbeat`（:246-258，token 18 字节 base64url，:235）；屏幕范围 `dsh_screen_scope`/`scope`（`ScreenScope.kt:49`，K05 只读：:672、:703，写面在设置页 `MainActivity.kt:772`）。
   - 路径：截图落 `filesDir/home/tmp/dsh-tmp`（:770），与引擎 `TMPDIR`（`EngineManager.kt:1442`）/`DSH_FILES_DIR`（:1439）同源；`pruneShots` 只认同目录下 `shot-` 前缀（:1175）；`AdbKeyboardService.nonceFile` = `filesDir/adb-keyboard-nonce`（`AdbKeyboardService.kt:122`，引擎 `adbKeyboardAuthArg` 读同一文件，`index.ts:42`）。
@@ -1228,7 +1228,7 @@ flowchart TD
 - **入口/触发**：
   - 装配期（一次性）：`apply`（`plugins/dsh-android-manage/src/index.ts:2286`）取 `ctx.androidPrivilege`（`inject` 声明在 `:53`，要求 android-bridge 先装配），调用 `tools(ctx, face)`（`:105`）并把返回的 14 个工具逐个 `ctx.tools.register`（`:2295`）。服务缺失时退化为 fail-closed 桩（`:2291`）并 warn（`:2289`）。
   - 运行期（每次调用）：模型发起一次 tool call → 该工具的 `execute(args, exec)`；`exec.agent.session` 是档位判定的会话来源。
-  - 内部触发：截图内联取 `ctx.get('attachments')`/`ctx.get('llm')`（`:339`/`:347`）；明细落盘写 `TMPDIR/dsh-tmp/`（`:906`）；审计写 `files/audit/audit.ndjson`（`:152`）。
+  - 内部触发：截图内联取 `ctx.get('attachments')`/`ctx.get('llm')`（`:56-72`/`:56-72`）；明细落盘写 `TMPDIR/dsh-tmp/`（`:906`）；审计写 `files/audit/audit.ndjson`（`:152`）。
 - **运行顺序**：
   1. **门（每个工具的第一步，唯一必经点）**：`guard(action, 完整 args, exec)`（`:133`）三件事串联——`bindSession`（`:137`，把会话绑到当前异步上下文，供 bridge 服务面复查档位）→ 屏幕范围门（`:138`，仅 `SCREEN_ACTIONS` 的 10 个 action；一律用异步 `screenAccessResolved`，同步面拿不到 vdInfo 的动态 displayId）→ `gateFor(session)` 档位门 + `audit`（`:151`）。任一不过即原样回引导文案，不再往下走。
   2. **通道分叉**：按工具的 `controlDecision(op).backend`（`:982`）与自身策略三选一——无障碍队列（`a11yExec` → `controlExec`，`:1071`）、特权 shell（`execAdbShell`/`execAdbLine`）、坐标或广播兜底（`vdInput`、ADBKeyboard 广播）。ADB 专属工具在动手前先问一次 `adbChannelOnly`（`:1003`，用 `forceBackend:'adb'` 探针，只有明确的 `deny` 才拒）。
@@ -1264,7 +1264,7 @@ flowchart TD
   - 壳侧 op 字符串（写死，改名即断）：`snapshot` `click` `longClick` `setText` `scroll` `global` `screenshot` `state` `nodeText` `webSnapshot` `webAction`（无障碍承载，DeviceControlService 的 `A11Y_OPS`/`REAL_SCREEN_OPS`）+ `vdInfo` `vdInput` `vdLaunchApp`（VdisplayOps）；ADB 面 `execAdbShell`→`shExec`、`execAdbLine`→`shExec`/`shPull`。
   - 环境变量与路径：`DSH_FILES_DIR` + `adb-keyboard-nonce`（`:39-43`，壳侧 `app/src/main/java/com/dsharnessmobile/shell/AdbKeyboardService.kt:166` 写、`app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:255` 幂等补建）；`TMPDIR` + `dsh-tmp/`（`:446`），前缀 `dsh-shot-`（保留 20）/`dsh-ui-`（10）/`ui-detail-`（20）。
   - 输入法实体与广播：硬编码 `com.dsharnessmobile.shell/.AdbKeyboardService`（`:1874`、`:2119`），广播 action `ADB_INPUT_TEXT`/`ADB_CLEAR_TEXT` + `--es msg`/`--es auth`（`:1889`）。
-  - 引擎服务面：`ctx.get('attachments')`（`:339`）、`ctx.get('llm').resolveModelInfo`（`:352`）供截图内联一次性读图；`ctx.tools.register`（`:2295`）；日志 tag `ctx.logger('dsh-android-manage')`（`:2289`，仅服务缺失时 warn）。
+  - 引擎服务面：`ctx.get('attachments')`（`:56-72`）、`ctx.get('llm').resolveModelInfo`（`:352`）供截图内联一次性读图；`ctx.tools.register`（`:2295`）；日志 tag `ctx.logger('dsh-android-manage')`（`:2289`，仅服务缺失时 warn）。
   - 跨块文案/入口：工具描述把模型引向 `android_vdisplay_input`/`android_vdisplay_status`/`android_vdisplay_create`（`:1268`、`:1511`；其中 `android_vdisplay_input` 在 0.14.1 之前**并不存在**，是「指引指向不存在的路」，本轮已补实现）与 `android_web_dump`（`:1339`）；`android_screen_list` 的别名枚举真源是壳侧 `vdInfo` 注册表，不硬编码 virtual-1（`:248`）。
   - 偏好与门禁：屏幕范围偏好 `ScreenScopePrefs`（壳侧 XML → `currentScreenScope()`，默认 `virtual-only`）由 `guard` 每次调用现读；审计落 `files/audit/audit.ndjson`（bridge 与壳侧 ControlAudit 同路径同格式）。
 - **关键坐标**：
@@ -1435,7 +1435,7 @@ flowchart TD
   - 工具链**单一来源** = `dsh-shell-termux` 根导出 `PROBE_BINARIES` / `REQUIRED_TOOLCHAIN` / `TOOLCHAIN_REPRESENTATIVE`（`dsh-shell-termux/src/index.ts:42/39/45`），linux-env 只消费（`plugins/dsh-android-linux-env/src/index.ts:30`），其 `package.json` 依赖 `file:../../dsh-shell-termux`。
   - 授权档位权威 = `ctx.androidPrivilege.status().tier`（bridge `AndroidPrivilegeService.status`，`plugins/dsh-android-bridge/src/index.ts:569`），linux-env 只在服务缺席时回落 `deployedAdbTier()`（env 快照，恒 T0）；档位实时值来自 `sandboxPolicy.resolve({session})`（`plugins/dsh-android-linux-env/src/index.ts:72`）。
   - settings 面：读必须 `.find((d) => d.ns === 'llm-pi-ai')`（坑 48，`plugins/dsh-model-capability/src/settings-config.ts:50`、`plugins/dsh-model-capability/src/index.ts:417/429`）；写是 `settings.mutate('llm-pi-ai', [{ op: 'set', path: ['providers', route, 'models'] }], descriptor.revision)` + `SETTINGS_CONFLICT` 单次重试（`plugins/dsh-model-capability/src/settings-writer.ts:239`）。
-  - 目录快照 `plugins/dsh-model-capability/lib/catalog-snapshot.json`（由 `scripts/build-snapshot-013.mjs:456` 按本次 ABI 引擎树生成，`scripts/check-patch-mirror.mjs` 豁免该文件）→ `lookupCatalog`。
+  - 目录快照 `plugins/dsh-model-capability/lib/catalog-snapshot.json`（由 `scripts/build-snapshot-013.mjs:456` 按本次 ABI 引擎树生成，原先由 check-patch-mirror 的镜像面豁免该文件；镜像层已于 2026-10-15 移除，该豁免概念随之失效）→ `lookupCatalog`。
   - 装配集：`scripts/profile-web.cordis.patch.yml` 三条 `insert`（android-linux-env / android-file-open / model-capability）+ `scripts/plugin-dirs.json`。
   - 运行时缓存读写的路径面：`$DSH_HOME`（壳侧注入点 `EngineManager.kt:1314`）、`$DSH_FILES_DIR`（`EngineManager.kt:1316`）、当前代 `engine.log`（壳侧 `EngineAuth.tokenFromLog` 的唯一输入）。
 - **关键坐标**：
@@ -1666,10 +1666,10 @@ flowchart TD
   - 注入集与 patch 挂载集双向一致，注入成员集合与源包逐项一致且 lib 内相对 import 可解析（`check-patch-mounts.mjs`、`check-inject-completeness.mjs:98-115`）——违反的症状是设备侧 `ERR_MODULE_NOT_FOUND`、引擎启动即死。
   - 归档里不得有指向旧 Termux 前缀的绝对软链（build-snapshot-013.mjs:1029 判 0），权限只能由 inject-all.py 重打包按内容归一（ELF/shebang=0700、数据=0600，`:210-214`）——WSL 9p 下 chmod 无效，所以「归档前 chmod」是无效步骤。
   - 产物 tar 与声明 sha256 逐字节一致（ps1:384 `--require`）；发布快照资产必须与 APK 内嵌快照同源（check-snapshot-asset.ps1:26），禁止手工从 `.deploy-tmp/snapshot-013/` 拷发布资产。
-  - 双仓逐字节镜像：`scripts/patches/**`（registry.json / apply-patches.mjs / README.md / tests 共有文件）、`scripts/build-apk-013.ps1`、`scripts/build-snapshot-013.mjs`、`scripts/inject-all.py`、`scripts/plugin-dirs.json`、`scripts/profile-web.cordis.patch.yml`、`scripts/lib/shell.mjs`、`scripts/snapshot-config/engine-overlay.json` 等（check-patch-mirror.mjs:109,160-279）；补丁改动先合 apk 镜像 PR 再合协调仓权威源。
+  - 双仓逐字节镜像（**已退役，2026-10-15**）：原先涵盖 `scripts/patches/**`、`scripts/build-apk-013.ps1`、`scripts/build-snapshot-013.mjs`、`scripts/inject-all.py`、`scripts/plugin-dirs.json`、`scripts/profile-web.cordis.patch.yml`、`scripts/lib/shell.mjs`、`scripts/snapshot-config/engine-overlay.json` 等；现由树内副本自洽 + 各自门禁保障，不做跨树比对（AGENTS §4 铁律 9）。
   - `-Fast` 与发布档的差异只有两处：`OnlyAbi` 缺省 x86_64（ps1:16）与 `DSH_INJECT_PRESET=1`（ps1:17）；门禁集不缩、产物体积更大、禁作发布资产。`-SkipInject` 是另一条 dev 档：跳过注入与文件模式门禁（只告警，ps1:326-335），直接打包 build-snapshot 原始产物。
 - **症状 → 排查**：
-  - 打包刚起步就红在「补丁镜像不一致」：跑 `node scripts/check-patch-mirror.mjs`；对端探测顺序与镜像面清单见该脚本 `:14-16,109,160-279`（脚本自身也在镜像面内）。
+  - 打包刚起步就红在「补丁镜像不一致」：跑 `node scripts/check-patch-mirror.mjs`；对端探测顺序与镜像面清单见该脚本 `:56-72`（脚本自身也在镜像面内）。
   - 设备装上后引擎起不来、日志 `Cannot find module` / `ERR_MODULE_NOT_FOUND`：注入丢件，跑 `node scripts/check-inject-completeness.mjs .deploy-tmp\build-\13-「abi」\snap-final2.tar.xz`，并在构建日志 grep `[fill]` `[prune]` `[add]`（inject-all.py:336-358）。
   - 快照「看起来没更新」：比对 `.deploy-tmp\snapshot-013\「abi」\snapshot.tar.xz` 的 mtime 与同级 snapshot.sha256 内容；跑 `node scripts/check-snapshot-builder-output.mjs`（坑 151：产出面被删会静默复用陈旧 tar）。
   - 老 WebView 白屏无报错：`node scripts/check-browser-syntax-floor.mjs --scan 「注入后 tar」`；降级落点在 build-snapshot-013.mjs:366-413（快照段）与 build-apk-013.ps1:229-264（注入段，vendor 走暂存副本）。
@@ -1680,7 +1680,7 @@ flowchart TD
   2. `scripts/build-apk-013.ps1:206-212` 注释称 vendor 补丁「默认 ensure 语义（缺席即施加）」，实际调用不带 `--apply`/`--scope`，`apply-patches.mjs:1568,1572` 推导为 `mode=check`（已确认）：只校验不施加，补丁必须先打在入库的 `vendor/*/lib/` 里；缺一条即 `Deny-Abi` 拒打包（失败关闭，但排查时按注释预期会找不到「自动施加」这一步）。0.13.7-CERTIFICATION.md:11 亦记 `mode=check`，即注释是旧语义残留。
   3. `scripts/make-snapshot.sh:8` 的 `SNAP_PKG_ROOT` 默认 `/data/user/0/com.dsharnessmobile.shell`（不含 `/files`），`:158` 的 sed 会把 heredoc 兜底 patch 的 `/data/data/com.termux/files/usr` 改写成 `.../com.dsharnessmobile.shell/usr/bin/bash`（已确认，触发条件 = 设备上找不到外部权威 patch，走 `:156` 警告分支）→ 设备侧 assertBash 失败、注入包全不装配。该脚本是备选发布入口的输入端（`build-release.ps1:89-114` 要求设备侧产出 `snapshot/snapshot-*.tar.xz`），且这条入口的快照无软链净化、无归档自检（协调仓 `coord:docs/COMPAT-REVIEW-0.14.0-2026-09-19.md:1337` 记 I-4）。
   4. `scripts/build-apk-013.ps1:141-144` 注释称「本次构建前必须重跑 Kotlin 单测由发布链步骤保证」，但 `build-release.ps1` 全文没有 `testDebugUnitTest`（已确认）：发布链经 `check-release-gates.mjs --run --require` 调用 `check-kotlin-test-count.mjs`（`:104` 条目、通用 argvFor 不带 `--allow-missing`），干净机器上无结果即 `exit 1`。本地链用 `--allow-missing`（ps1:145）所以不红——症状是「本地全绿、发布链在干净机器上红」（协调仓 `coord:docs/COMPAT-REVIEW-0.14.0-2026-09-19.md:1334` 记 I-1，P1）。
-  5. 镜像门禁覆盖缺口（已确认读数）：`check-patch-mirror.mjs:109` 的 MIRROR_FILES 只含 registry.json/apply-patches.mjs/README.md，`:160-279` 的 MIRROR_TOP 未列 `scripts/patches/data/compat-map.json`、`scripts/snapshot-config/` 除 engine-overlay.json 外的 6 个数据/模板文件、`scripts/make-snapshot.sh`、`scripts/relocate-snapshot.py`、`scripts/inject-snapshot.py`、`scripts/inject-external-plugins.py`、`scripts/update-snapshot-patch.py`——这些面单边演进不会被拦（当前工作树里它们逐字节一致；`scripts/patches/tests/` 的 3 个文件仅 CRLF 差异，git blob 相同，门禁按 EOL 告警不判红）。
+  5. 镜像门禁覆盖缺口（已确认读数）：`check-patch-mirror.mjs:56-72` 的 MIRROR_FILES 只含 registry.json/apply-patches.mjs/README.md，`:56-72` 的 MIRROR_TOP 未列 `scripts/patches/data/compat-map.json`、`scripts/snapshot-config/` 除 engine-overlay.json 外的 6 个数据/模板文件、`scripts/make-snapshot.sh`、`scripts/relocate-snapshot.py`、`scripts/inject-snapshot.py`、`scripts/inject-external-plugins.py`、`scripts/update-snapshot-patch.py`——这些面单边演进不会被拦（当前工作树里它们逐字节一致；`scripts/patches/tests/` 的 3 个文件仅 CRLF 差异，git blob 相同，门禁按 EOL 告警不判红）。
   - 补充（非可疑，语义澄清）：坑 63 的「只替换已有成员、新增文件丢弃」在**主链已被 inject-all.py 修复**（`:204-208` 注释 + `:321-338` 补缺循环 + 门禁 `check-inject-completeness.mjs:2`），但 `inject-snapshot.py:106-121`（只在整包缺席时走 need_add）仍是另外一条路径的注入器：`build-release.ps1:109`。（0.14.5：原先还有 apk 仓的独立快照 workflow（`build-snapshot.yml`，注入步），它只注入 3 个包、不做引擎 overlay/引擎补丁/语法降级，故也带坑 63 语义；**该 workflow 已删除**——快照构建入口已收敛为 `build-apk.yml` / `release.yml` 单一链，故其注入器语义不再适用。**2026-10-15：`release.yml` 亦已退役（本分支不出 Release，只允许来源链构建，见 AGENTS §4 铁律 9）**。）
 
 漂移：`docs/AGENTS/build-and-env.md:32,41-42` 说快照归档/解压用 `xz -T0`/`xz -dT0`，源码 `scripts/build-snapshot-013.mjs:985` 是 `xz -T${XZ_THREADS} -6`、`:120` 是 `xz -dT${XZ_THREADS}`（`scripts/lib/shell.mjs:31` 默认 8，`scripts/check-build-parallel-cap.mjs` 把「吃满全部核心」判红）。
@@ -1689,7 +1689,7 @@ flowchart TD
 漂移：`docs/AGENTS/build-and-env.md:48` 与 `历史 BRIDGE-API 副本（当前契约见§6 K04）` 说「门禁（build-apk-013.ps1 内）：聚合入口 scripts/check-release-gates.mjs」，源码 `scripts/build-apk-013.ps1` 全文无该脚本调用（逐条内联 27 项；聚合入口只由 `scripts/build-release.ps1:56,60,147` 与 CI 调用，本地链里它只出现在 `:43` 的注释）。
 漂移：`docs/AGENTS/RUNTIME-PATCHES.md:56` 说 scope=vendor 补丁「在 build-apk-013.ps1 阶段施加」，源码 `scripts/build-apk-013.ps1:211` 的调用无 `--apply`/`--scope` → `scripts/patches/apply-patches.mjs:1568,1572` 默认 `mode=check`（只校验不施加；`docs/AGENTS/0.13.7-CERTIFICATION.md:11` 也记 mode=check）。
 漂移（**2026-09-25 已修**）：`docs/AGENTS/RUNTIME-PATCHES.md` 原写 engine 补丁「当前全量」14 项；该文件已按现数改为 **15 项**（`scripts/patches/registry.json` 实测 30 条总 / 15 条 engine / 15 条 vendor）。原条目点名的四条缺口（combo-single-lazy-A5、combo-parallel-C3、combo-probe-P1、boot-third-party-isolation-G3）中，**A5 与 C3 已于 0.14.2 追版时按实测撤销**（见 RUNTIME-PATCHES §7.4 与 `scripts/patches/README.md` 撤销段），P1 与 G3 仍在册 ⇒ 清单已与源码同源，此处不再是漂移。
-漂移：`AGENTS.md:21` 说 `vendor/`（marketplace / undo-savepoint / dsh-model-sync），源码实际 `vendor/` 只有 `dsh-undo-savepoint` 与 `dshmarketplace-plugin`（model-sync 已随 0.14.1 整体摘除，见 `scripts/profile-web.cordis.patch.yml:128-138` 与 `scripts/check-patch-mirror.mjs:231-233`）。
+漂移：`AGENTS.md:21` 说 `vendor/`（marketplace / undo-savepoint / dsh-model-sync），源码实际 `vendor/` 只有 `dsh-undo-savepoint` 与 `dshmarketplace-plugin`（model-sync 已随 0.14.1 整体摘除，见 `scripts/profile-web.cordis.patch.yml:128-138`；镜像面清单已于 2026-10-15 移除，此处不再引用它）。
 
 ```mermaid
 flowchart TD
@@ -1770,7 +1770,7 @@ flowchart LR
   3. pr-gate `static`【GitHub runner 的 bash 步骤，串行】→ `npm install/npm run build`【子进程】→ `node scripts/check-plugin-tests.mjs`【该门禁再 `spawnSync` 每个插件的 `node --test` 或 `npx vitest`】（`scripts/check-plugin-tests.mjs:54`）。CI 的 `static` 与 `compile` 两个作业并行，互不阻塞。
 - **耦合**（点名符号）：
   - **唯一声明处**：`GATES` / `CI_GATES` / `ALL_GATES`（`scripts/check-release-gates.mjs:28`/`:106`/`:107`）与云端链的 `GATE_SCRIPTS`（`scripts/build-apk.mjs:61`）；`CI_GATES` 决定两仓 CI 必须出现的门禁名，`ALL_GATES` 决定两条链与发布链。
-  - **注入集单一常量**：`scripts/plugin-dirs.json` 的 `dirs`/`externals` 被 `scripts/build-apk-013.ps1:174`、`scripts/build-apk.mjs`、`scripts/check-release-gates.mjs:164`、`scripts/check-patch-mirror.mjs:170` 共同消费；`scripts/release-plugin-src-gaps.json` 只承载 `$pluginSrcs ⊇ dirs` 的显式差集理由。
+  - **注入集单一常量**：`scripts/plugin-dirs.json` 的 `dirs`/`externals` 被 `scripts/build-apk-013.ps1:174`、`scripts/build-apk.mjs`、`scripts/check-release-gates.mjs:164` 共同消费（`check-patch-mirror.mjs` 自 2026-10-15 起不再读它）；`scripts/release-plugin-src-gaps.json` 只承载 `$pluginSrcs ⊇ dirs` 的显式差集理由。
   - **台账（谁读谁写）**：`scripts/kotlin-test-baseline.json`（`scripts/check-kotlin-test-count.mjs` 读、`--update-baseline` 只许升档写）、`scripts/bridge-symmetry-baseline.json`（`scripts/check-bridge-symmetry.mjs` 只许减少）、`scripts/tool-surface-budget.json`（`scripts/check-tool-surface-budget.mjs` 取 +2% 阈值）、`scripts/contract.json` 与 `scripts/contract-pin-gaps.json`（`scripts/check-contract.mjs`）、`scripts/state-registry.json`（`scripts/check-state-registry.mjs` 逐条核对 evidence）、`scripts/api-route-auth-policy.json`（`scripts/check-api-route-auth.mjs`）、`scripts/control-ops-pending.json` 与 `scripts/control-ops-known-gaps.json`（`scripts/check-control-ops.mjs`）、`scripts/perf-instrumentation-gaps.json`（`scripts/check-perf-instrumentation.mjs`，gaps 为空是合法终态）、`scripts/third-party-licenses.json`（`scripts/check-third-party.mjs`）。
   - **跨块符号**：`ProcIo.readBounded`（`scripts/check-bounded-io.mjs` 守的调用面）、`AndroidBridge.kt` 的 `@JavascriptInterface` 与 `dsh-client-ui-responsive/src/client/android-bridge.ts` 的 `interface AndroidShellBridge`（`scripts/check-bridge-symmetry.mjs` 的 `baseline.surfaces`）、`DeviceControlService.kt` 的 `handle` when 分支 + `ControlProtocolV2.kt` 的 `SUPPORTED_OPS`（`scripts/check-control-ops.mjs` 的六处之一）、`assets/snapshot.sha256` 与 `assets/patched/*`（指纹与运行时资产两门禁的事实面）、`files/boot-segments.log`（`scripts/check-boot-budget.mjs` 的真数据输入）。
   - **反假绿自证符号**：`--self-test`、`SKIP(#n)`、`SKIP=`、`--require`、`--allow-missing`、`--require-real`、`--require-peer`、`--snapshot`。
@@ -1793,7 +1793,7 @@ flowchart LR
   1. PR 卡在 `static` 作业某一步 → 读该步名对应脚本，本地复现：`git status` → `node scripts/check-release-gates.mjs`（先看接线断言）→ `node scripts/check-gate-skips.mjs --list`（看声明/接线/SKIP 审计三张表）。
   2. 「本地全绿、云端建不出」→ `node scripts/check-release-gates.mjs` 的 `两份编排器门禁集差集 = 0` 一行；再 grep `GATE_SCRIPTS`（`scripts/build-apk.mjs:61`）与 `scripts/build-apk-013.ps1` 的 `node (Join-Path $Root "scripts\check-` 行。
   3. 「门禁说 PASSED 但问题还在」→ 先在输出里找 `SKIP(` 与 `SKIP=`：SKIP 不为 0 表示该判据本轮没真跑（`SKIP(#n)` 行会写落点）；再确认跑的是真检档还是 `--self-test`（CI 里 `scripts/check-browser-syntax-floor.mjs` 只有自证）。
-  4. 「改了门禁脚本却没生效」→ `node scripts/check-patch-mirror.mjs`（两仓逐字节 + `MIRROR_TOP` 清单），注意它只对 `content` 差异判红、行尾差异只 WARN（`scripts/check-patch-mirror.mjs:339`）。
+  4. 「改了门禁脚本却没生效」→ `node scripts/check-patch-mirror.mjs`（两仓逐字节 + `MIRROR_TOP` 清单），注意它只对 `content` 差异判红、行尾差异只 WARN（`scripts/check-patch-mirror.mjs:56-72`）。
   5. 「发布链以 SKIP=0 通过但真检没跑」→ 在 `check-release-gates.mjs --run` 输出里逐门禁找 `SKIP(#`；聚合入口只认 `SKIP=`（`scripts/check-release-gates.mjs:246`），`scripts/check-boot-budget.mjs:681` 那种带 `#` 的 SKIP 不进合计；设备真检必须显式跑 `node scripts/check-boot-budget.mjs --require-real`（当前零调用点）。
 - **可疑点**：
   1. 【已确认，源码可复现】Kotlin 单测数量门禁的「防净零抵消」可被**整类删除**绕过：A 判据只对**现存源码测试类**要求有结果（`scripts/check-kotlin-test-count.mjs:129`），B 判据对结果里缺席的类直接 `continue`（`:153`）→ 删掉整个测试文件（例如 29 例的 `SnapshotTransactionTest.kt`）再在别处补足总数即恒绿。影响：一整类防线被无声削掉，而该门禁不在 CI（`ci:false`），只在两条链以 `--allow-missing` 跑。
@@ -1806,7 +1806,7 @@ flowchart LR
 
 | 门禁脚本 | 守什么不变量 | 触发点 | 失败时的典型真因 | 需要快照或设备 |
 |---|---|---|---|---|
-| check-patch-mirror.mjs | 双仓镜像面逐字节（patches/** + 门禁脚本自身 + 注入集目录）+ registry↔IMPLS id 集合一致 | CI（apk 侧只 `--self`）/链/发布 | 改了协调仓忘了镜像到 apk 仓；apk 副本落后 | 否 |
+| check-patch-mirror.mjs | registry↔IMPLS 补丁 id 双向闭合（树内自洽面）；跨树逐字节镜像已于 2026-10-15 按用户决定移除 | CI（apk 侧 `--self`）/两条链 | 「登记了没实现 / 实现了没登记」；跨仓副本落后这一类风险随镜像纪律一并退役 | 否 |
 | check-manifest-hardening.mjs | manifest XML 语义：唯一 application、allowBackup=false、无 cleartext、NSC exclude 在场、接收器来源校验 | CI/链 | 加固项被删或改成全域明文 | 否 |
 | check-bounded-io.mjs | 壳侧子进程与连接流输出必须走 `ProcIo.readBounded` | CI/链 | 新写的流读取绕过有界读（超时失效/死锁） | 否 |
 | check-api-route-auth.mjs | mobile-owned `/api` exact/prefix 路由必须有登记行 + 本地 auth guard（公开白名单需理由） | CI（源码档）/链与发布（`--snapshot` 注入后 tar） | 新路由未登记，或注册本身不鉴权 → 绕过 browser auth | 注入后档需快照 |
@@ -1845,7 +1845,7 @@ flowchart LR
 **A. pr-gate `static` 作业（`.github/workflows/pr-gate.yml:11-111`，串行 16 步）**
 1. 冲突标记扫描（`app/src` 的 kt/java/xml/html/js/yml）。
 2. 敏感信息扫描（`sk-`/`ghp_`/`AKIA`/`xox` 四类正则）。
-3. `check-patch-mirror.mjs --self` + 三份补丁回归测试（`scripts/patches/tests/{spj-migration-link-f5,atomic-stale-lock,publish-exclusive-reclaim}.test.mjs`）——**不读对端树**，跨仓一致性显式让给协调仓 CI 的 `--require-peer`。
+3. `check-patch-mirror.mjs --self` + 三份补丁回归测试（`scripts/patches/tests/{spj-migration-link-f5,atomic-stale-lock,publish-exclusive-reclaim}.test.mjs`）——只做树内自洽；跨仓一致性判据已于 2026-10-15 随镜像层移除（本分支不依赖协调仓）。
 4. `npm install && npm run build`（`plugins/dsh-android-manage`）→ `check-protocol-v2.mjs`（npm）。
 5. `npm install && npm run build`（同上，重复一次）→ `check-tool-output-schema.mjs`（npm）。
 6. `check-control-ops.mjs`（无前置）。
@@ -1889,12 +1889,12 @@ flowchart LR
 6. `check-snapshot-secrets.mjs`（两个 ABI，无 `--require`）→ MANIFEST + notes。
 
 - **门禁存在但从未被调用**：
-  - `scripts/check-code-map.mjs`——33 个 `check-*.mjs` 里**唯一零外部调用点**：不在 `GATES`、不在两条链、不在两仓 CI、不在 `MIRROR_TOP`（`scripts/check-patch-mirror.mjs:160`），且只存在于 apk 仓（协调仓 `scripts/` 无同名文件）；文档 `docs/AGENTS/EXECUTION-MAP.md` 未写时它会 `exit 2`。
+  - `scripts/check-code-map.mjs`——33 个 `check-*.mjs` 里**唯一零外部调用点**：不在 `GATES`、不在两条链、不在两仓 CI、不在 `MIRROR_TOP`（该清单与镜像层已于 2026-10-15 按用户决定移除），且只存在于 apk 仓（协调仓 `scripts/` 无同名文件）；文档 `docs/AGENTS/EXECUTION-MAP.md` 未写时它会 `exit 2`。
   - `scripts/check-snapshot-secrets.ps1`——旧 PowerShell 实现，已被 `.mjs` 取代，零调用点（其旧缺陷正是「归档不可读时静默继续」）。
   - `scripts/tests/boot-pending.test.mjs`、`scripts/tests/pi-toolcall.test.mjs`——零调用点。
   - `scripts/patches/tests/` 的 16 个补丁回归测试里，只有 3 个被 pr-gate 硬编码（`.github/workflows/pr-gate.yml:41-43`），第 4 个经 `scripts/check-runtime-assets.mjs:96` 的行为回归间接执行，其余 12 个无执行路径（与评审 I-6 同族）。
   - 旗标模式零调用点：`--require-real`、`--pull`（`scripts/check-boot-budget.mjs`）、`--list`（`scripts/check-build-parallel-cap.mjs` / `scripts/check-bridge-symmetry.mjs` / `scripts/check-state-registry.mjs` / `scripts/check-code-map.mjs`）；`--as-shipped` 无显式调用方，但其行为已折进 `scripts/check-browser-syntax-floor.mjs` 的默认真实产物反向对照（`scripts/check-browser-syntax-floor.mjs:658-670`）。
-  - 半接线：apk 侧 `check-patch-mirror.mjs --self` 会打印 `CHECK-PATCH-MIRROR PASSED（SKIP=0）`（`scripts/check-patch-mirror.mjs:347`），但 `--self` 分支连镜像层的 SKIP 计数都不写 → 看起来「SKIP=0 全绿」，实际跨仓比对根本没跑（靠协调仓 CI 的 `--require-peer`）。
+  - ~~半接线~~（2026-10-15 已消解）：原先 apk 侧 `check-patch-mirror.mjs --self` 打印 `SKIP=0` 却从未做跨仓比对（靠协调仓 CI 的 `--require-peer`）；现镜像层整体移除，`--self` 与默认调用等价，输出 `SKIP=0` 名副其实——判据只覆盖树内自洽。
 - **假绿机制（只看文本在场或判据可绕过）**：
   1. `scripts/check-release-gates.mjs:152` 的接线断言是 `text.includes(<门禁文件名>)`——门禁名出现在**注释**里即算「已接线」；`scripts/check-gate-skips.mjs:40`/`:49` 同样按正则扫文本（`{ script: '...'` 与 `["'/\\]check-*.mjs`）。
   2. 聚合入口的 SKIP 统计只认 `SKIP=`（`scripts/check-release-gates.mjs:246`），漏掉 `SKIP(#n)` 形态 → 见可疑点 2。
@@ -1906,8 +1906,8 @@ flowchart LR
 - **门禁自身的自检（`--self-test`）覆盖**：33 个 `check-*.mjs` 中 **11 个**真支持 `--self-test`（`scripts/check-api-route-auth.mjs` / `scripts/check-boot-budget.mjs` / `scripts/check-browser-syntax-floor.mjs` / `scripts/check-build-chain-abort.mjs` / `scripts/check-build-parallel-cap.mjs` / `scripts/check-code-map.mjs` / `scripts/check-combo-cache.mjs` / `scripts/check-kotlin-comments.mjs` / `scripts/check-kotlin-test-count.mjs` / `scripts/check-snapshot-builder-output.mjs` / `scripts/check-strip-noop.mjs`），其中 `scripts/check-browser-syntax-floor.mjs:535` 是六向自证（反向必红 / 正向必绿 / 载荷不触发 / 工具链在场 / marker 保全 / 两链接线反回归），`scripts/check-code-map.mjs` 是 8 用例判别力自证。`scripts/check-release-gates.mjs` 与 `scripts/check-perf-instrumentation.mjs` **只在自己的注释里提到** `--self-test`（后者是去跑依赖脚本 `scripts/perf/count-compose.mjs --self-test`），本身没有自证模式——即这两条门禁的判别力无自证。CI 里只有一处显式自证调用（`scripts/check-browser-syntax-floor.mjs --self-test`），其余自证模式零调用点，靠人工跑。
 
 - 漂移：`历史 BRIDGE-API 副本（当前契约见§6 K04）` 说聚合入口「`--list` 现数，当前 17 项」，源码 `scripts/check-release-gates.mjs:28`（`GATES` 数组）是 27 项（同仓 `docs/AGENTS/build-and-env.md:48` 写的是 27 项，两份文档自相矛盾）。
-- 漂移：5 个门禁脚本的两仓副本行尾不同（协调仓 CRLF、apk 仓 LF），`cmp` 字节不等、归一化后内容一致：`scripts/check-boot-budget.mjs`、`scripts/check-browser-syntax-floor.mjs`、`scripts/check-build-parallel-cap.mjs`、`scripts/check-snapshot-builder-output.mjs`、`scripts/check-tool-output-schema.mjs`；镜像门禁只按「仅行尾差异」告警放行（`scripts/check-patch-mirror.mjs:339`）——「逐字节镜像」在行尾层不成立。
-- 漂移：`scripts/check-code-map.mjs` 只在 apk 仓存在（协调仓 `scripts/` 无此文件），且未被列进 `scripts/check-patch-mirror.mjs:160` 起的 `MIRROR_TOP` → 这条新门禁自身没有镜像守护。
+- 漂移：5 个门禁脚本的两仓副本行尾不同（协调仓 CRLF、apk 仓 LF），`cmp` 字节不等、归一化后内容一致：`scripts/check-boot-budget.mjs`、`scripts/check-browser-syntax-floor.mjs`、`scripts/check-build-parallel-cap.mjs`、`scripts/check-snapshot-builder-output.mjs`、`scripts/check-tool-output-schema.mjs`；当时镜像门禁只按「仅行尾差异」告警放行——「逐字节镜像」在行尾层并不成立（**2026-10-15：镜像层已整体移除，本项随之失效**）。
+- 漂移：`scripts/check-code-map.mjs` 只在 apk 仓存在（协调仓 `scripts/` 无此文件），且原先未被列进 `MIRROR_TOP` → 当时这条门禁自身没有镜像守护（**2026-10-15：`MIRROR_TOP` 与整个镜像层已按用户决定移除，本项随之失效**）。
 
 ```mermaid
 flowchart TD
@@ -2338,7 +2338,7 @@ app/src/main/java/com/dsharnessmobile/shell/LogSanitizer.kt
 - [B01] 漂移：`docs/AGENTS/build-and-env.md:48` 与 `历史 BRIDGE-API 副本（当前契约见§6 K04）` 说「门禁（build-apk-013.ps1 内）：聚合入口 scripts/check-release-gates.mjs」，源码 `scripts/build-apk-013.ps1` 全文无该脚本调用（逐条内联 27 项；聚合入口只由 `scripts/build-release.ps1:56,60,147` 与 CI 调用，本地链里它只出现在 `:43` 的注释）。
 - [B01] 漂移：`docs/AGENTS/RUNTIME-PATCHES.md:56` 说 scope=vendor 补丁「在 build-apk-013.ps1 阶段施加」，源码 `scripts/build-apk-013.ps1:211` 的调用无 `--apply`/`--scope` → `scripts/patches/apply-patches.mjs:1568,1572` 默认 `mode=check`（只校验不施加；`docs/AGENTS/0.13.7-CERTIFICATION.md:11` 也记 mode=check）。
 - [B01] 漂移（**2026-09-25 已修**）：`docs/AGENTS/RUNTIME-PATCHES.md` 原写 engine 补丁「当前全量」14 项；该文件已按现数改为 **15 项**（`scripts/patches/registry.json` 实测 30 条总 / 15 条 engine / 15 条 vendor）。原条目点名的四条缺口（combo-single-lazy-A5、combo-parallel-C3、combo-probe-P1、boot-third-party-isolation-G3）中，**A5 与 C3 已于 0.14.2 追版时按实测撤销**（见 RUNTIME-PATCHES §7.4 与 `scripts/patches/README.md` 撤销段），P1 与 G3 仍在册 ⇒ 清单已与源码同源，此处不再是漂移。
-- [B01] 漂移：`AGENTS.md:21` 说 `vendor/`（marketplace / undo-savepoint / dsh-model-sync），源码实际 `vendor/` 只有 `dsh-undo-savepoint` 与 `dshmarketplace-plugin`（model-sync 已随 0.14.1 整体摘除，见 `scripts/profile-web.cordis.patch.yml:128-138` 与 `scripts/check-patch-mirror.mjs:231-233`）。
+- [B01] 漂移：`AGENTS.md:21` 说 `vendor/`（marketplace / undo-savepoint / dsh-model-sync），源码实际 `vendor/` 只有 `dsh-undo-savepoint` 与 `dshmarketplace-plugin`（model-sync 已随 0.14.1 整体摘除，见 `scripts/profile-web.cordis.patch.yml:128-138`；镜像面清单已于 2026-10-15 移除，此处不再引用它）。
 - [B02] 漂移：`历史 BRIDGE-API 副本（当前契约见§6 K04）` 说聚合入口「`--list` 现数，当前 17 项」，源码 `scripts/check-release-gates.mjs:28`（`GATES` 数组）是 27 项（同仓 `docs/AGENTS/build-and-env.md:48` 写的是 27 项，两份文档自相矛盾）。
-- [B02] 漂移：5 个门禁脚本的两仓副本行尾不同（协调仓 CRLF、apk 仓 LF），`cmp` 字节不等、归一化后内容一致：`scripts/check-boot-budget.mjs`、`scripts/check-browser-syntax-floor.mjs`、`scripts/check-build-parallel-cap.mjs`、`scripts/check-snapshot-builder-output.mjs`、`scripts/check-tool-output-schema.mjs`；镜像门禁只按「仅行尾差异」告警放行（`scripts/check-patch-mirror.mjs:339`）——「逐字节镜像」在行尾层不成立。
-- [B02] 漂移：`scripts/check-code-map.mjs` 只在 apk 仓存在（协调仓 `scripts/` 无此文件），且未被列进 `scripts/check-patch-mirror.mjs:160` 起的 `MIRROR_TOP` → 这条新门禁自身没有镜像守护。
+- [B02] 漂移：5 个门禁脚本的两仓副本行尾不同（协调仓 CRLF、apk 仓 LF），`cmp` 字节不等、归一化后内容一致：`scripts/check-boot-budget.mjs`、`scripts/check-browser-syntax-floor.mjs`、`scripts/check-build-parallel-cap.mjs`、`scripts/check-snapshot-builder-output.mjs`、`scripts/check-tool-output-schema.mjs`；当时镜像门禁只按「仅行尾差异」告警放行——「逐字节镜像」在行尾层并不成立（**2026-10-15：镜像层已整体移除，本项随之失效**）。
+- [B02] 漂移：`scripts/check-code-map.mjs` 只在 apk 仓存在（协调仓 `scripts/` 无此文件），且原先未被列进 `MIRROR_TOP` → 当时这条门禁自身没有镜像守护（**2026-10-15：`MIRROR_TOP` 与整个镜像层已按用户决定移除，本项随之失效**）。

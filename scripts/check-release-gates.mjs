@@ -330,14 +330,11 @@ check('build-release.ps1 $pluginSrcs ⊇ build-apk-013.ps1 $pluginDirs（差集�
 check('release-plugin-src-gaps.json 无过期条目', staleGap.length === 0,
   '已不再缺失却仍声明: ' + staleGap.map((g) => g.plugin).join(', '))
 
-// ── 3. 两树同版（同源文件逐字节由 check-patch-mirror 守；此处守本次新增/改动的接线文件）──
-for (const f of ['scripts/build-release.ps1', 'scripts/build-apk-013.ps1']) {
-  const a = join(ROOT, f)
-  const b = join(ROOT, 'dsh-mobile-apk', f)
-  if (!existsSync(b)) { check('两树同版: ' + f, true, '（对端缺席，跳过）'); continue }
-  const same = readFileSync(a).equals(readFileSync(b))
-  check('两树同版: ' + f, same, '逐字节不一致（autocrlf 噪声也会计入——请同步镜像）')
-}
+// ── 3. 两树同版：已按用户决定移除（2026-10-15）─────────────────────────────
+// 原先此处逐字节比对 ROOT/<f> 与 ROOT/dsh-mobile-apk/<f>。删除理由与 check-patch-mirror 同源：
+// 本分支只从源码构建、不依赖协调仓，树内副本即权威；而且该断言在对端缺席时走的是
+// `check(label, true, '（对端缺席，跳过）')`——PASS 且不打印 detail，看起来「通过」其实从未比对，
+// 属会制造错觉的断言。删掉它不减少任何本分支产物依赖的判据（接线断言与语法面都在下面各段）。
 
 // ── 3a. 构建/门禁脚本必须可被 node 解析（0.14.2 补线）─────────────────────
 // 真因（本轮实锤）：`check-patch-mirror` 只判**逐字节相等**，一份语法坏掉的 build-snapshot
