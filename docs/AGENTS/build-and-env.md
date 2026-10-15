@@ -67,7 +67,7 @@ cd ..\plugins\dsh-android-<pkg> && npm run build
 
 **维护文档对账**：Gradle 版本/依赖与活动补丁清单由 `node scripts/check-maintenance-docs.mjs --write` 生成；改声明或 registry 后更新生成区并运行不带 `--write` 的检查。该检查属于维护一致性检查，可按输入路径在 PR 中显示结果，不作为 APK 功能与数据安全门禁的替代。
 
-**Release 快照契约**：`.github/workflows/release.yml` 始终先构建本次运行的 arm64/x86_64 快照，release job 依赖 snapshot job 成功，再下载同一 run 的快照与 lock provenance。已移除无快照来源的 `skip_snapshot_rebuild` 调试输入；失败后可用 GitHub Actions 的重跑失败 job 复用同一 run 中保留的 artifact，artifact 过期则重新构建本次运行。不得用另一 commit 的快照填充发布输入。
+**Release 快照契约（该链已退役，2026-10-15）**：原 `.github/workflows/release.yml` 始终先构建本次运行的 arm64/x86_64 快照，release job 依赖 snapshot job 成功，再下载同一 run 的快照与 lock provenance（曾移除无快照来源的 `skip_snapshot_rebuild` 调试输入；失败后可用重跑失败 job 复用同一 run 的 artifact；不得用另一 commit 的快照填充发布输入）。**该 workflow 已按用户决定整体删除**：本分支不出 Release，只允许来源链构建，见 [RELEASE.md](../RELEASE.md) §5、[AGENTS.md](../../AGENTS.md) §4 铁律 9 与 [known-gaps.md](known-gaps.md)。此段只作历史契约留档——若将来要恢复发布能力，必须在来源链上重建，**不得复活这条本地/协调仓链**。
 
 **CI 插件复用**：APK `pr-gate.yml` 从 `scripts/plugin-dirs.json` 选择 termux 与 Android 插件，按顺序只准备一次已解析 lock、`npm ci` 和构建产物；协议、插件测试、output schema 和 wire 预算共用这些产物。`@deepseek-ai/dsh-tools` 是 manage 的固定 devDependency，不再额外解析安装。常规 `build-apk.yml` 与来源链也从清单按顺序选择带 build script 的包，各准备并构建一次；来源审计和常规 build 互斥，`abi` 输入决定常规矩阵。Release job 只准备依赖，`build-apk-013.ps1` 统一构建，后续 `npm pack` 复用同一批 `lib/`，不再次安装或构建。
 
@@ -88,19 +88,18 @@ available for offline mode`，22s 即 break），且该行把 gradle 输出重�
 **快照构建入口已收敛为单一链（0.14.5，删除已死的并行 workflow）**：apk 仓原有的 `.github/workflows/build-snapshot.yml`
 已删除，连同只服务它的 `docs/ci-snapshot-build.md` 与 `scripts/upload-snapshot-input.mjs`。四路证据：
 ① 它的输入是 draft release tag `snapshot-input` 的资产，由 `upload-snapshot-input.mjs` 上传，而**全仓没有任何 workflow 调用该上传脚本**（输入源在 CI 里无人维护）；
-② 它的触发 `push: branches: ['release/*']` 指向 v0.12.4/v0.12.5 时代的分支——`release.yml` 只建 draft Release，**此后不再创建 `release/*` 分支**，该触发已死；
+② 它的触发 `push: branches: ['release/*']` 指向 v0.12.4/v0.12.5 时代的分支——当时只有 `release.yml` 建 draft Release、此后不再创建 `release/*` 分支，该触发已死（`release.yml` 本身也已于 2026-10-15 退役，见本节上方的 Release 快照契约留档）；
 ③ 功能被 `build-apk.yml` 覆盖且后者更完整——它只走 `inject-snapshot.py` 的**三包注入**，不做引擎 overlay / 引擎补丁 / 语法降级（EXECUTION-MAP 曾自记「仍带坑 63 语义」）；
 ④ 它**绕过**共享终端组装引擎 `build-apk-engine.mjs`，直接调 Gradle `:app:assembleDebug`。
-⇒ 属 §14「测试和 Release 使用不同构建逻辑」「重复而没有新增信息的过度防御」。现在快照构建只有两条活链：
-`build-apk.yml`（自包含，源重建）与 `release.yml`（发布，Build Once → 同 artifact 提升）。
-**将来若需要快照专用产物，走这两条，不要再新建第三条。**
-**LFS 底座按需拉取**：`build-apk.yml` 与 `release.yml` 的快照 job 使用 `lfs: false`，缓存未命中时只拉当前 ABI 的 `base-usr` 和共用 `base-dsh`；缓存键取当前 pointer 文件哈希。Release 的 APK job 消费上游 job 的 snapshot artifact，不拉底座。`require-lfs-materialized.mjs` 拒绝用 pointer 文本冒充归档。
+⇒ 属 §14「测试和 Release 使用不同构建逻辑」「重复而没有新增信息的过度防御」。当时的结论是「快照构建只有两条活链：`build-apk.yml`（自包含，源重建）与 `release.yml`（发布，Build Once → 同 artifact 提升）」；**2026-10-15 后 `release.yml` 也已退役**，活链只剩 `build-apk.yml` / 它复用的 `build-apk-source.yml`（来源链，当前 arm64）与本地来源链 `scripts/source-build/run-local-source-chain.mjs`。
+**本分支只允许来源链构建（AGENTS §4 铁律 9）；将来若需要快照专用产物，走来源链，不要再新建第三条发布链。**
+**LFS 底座按需拉取**：`build-apk.yml` 的快照 job 使用 `lfs: false`，缓存未命中时只拉当前 ABI 的 `base-usr` 和共用 `base-dsh`；缓存键取当前 pointer 文件哈希。（原先 `release.yml` 的 APK job 消费上游 job 的 snapshot artifact、不拉底座，该链已退役。）`require-lfs-materialized.mjs` 拒绝用 pointer 文本冒充归档。
 旧版文档把 `lfs: true` 说成 `git lfs fetch --all` 并据历史对象估算下载量，此结论已于 2026-10-07 撤回：checkout v4 实际执行 `git lfs fetch origin <ref>`，普通 Git 的 `fetch-depth: 0` 不证明历史 LFS 全量下载。依据：[官方 command manager](https://github.com/actions/checkout/blob/v4/src/git-command-manager.ts#L352-L357)、[官方调用点](https://github.com/actions/checkout/blob/v4/src/git-source-provider.ts#L186-L193)。当前优化减少无用 ABI 与重复 job 的下载；实际流量收益应以 runner 日志核实。
 **云端构建（0.13.0 起，宿主=本仓库，自包含）**：`.github/workflows/build-apk.yml`（`workflow_dispatch` 手动，matrix arm64/x86_64）托管整套构建链并只操作本仓库——快照从源重建（`base/` 底座归档为输入，Git LFS）、按统一清单准备并构建插件、注入/门禁/gradle 全部云端完成，仅 `upload-artifact` 供本地下载 debug，不出 Release；**不依赖协调库**（私库，GITHUB_TOKEN 无法签出）。`build-apk.mjs` 以 `DSH_APK_DIR=$GITHUB_WORKSPACE` 指向本仓库（gradle 在此）。本地仍在协调库根跑 `pwsh scripts\build-apk-013.ps1`（`scripts/` 前缀）。
 
 `build-apk.yml` 的 ABI 与 suffix 先经环境变量传递，不直接插入 shell 源码；校验步骤仅接受 `arm64|x86_64` 与总长不超过 32 字符的 `-[A-Za-z0-9][A-Za-z0-9._+-]{0,30}` suffix。构建命令与 artifact 名统一使用已校验值，防止 `workflow_dispatch` 自由文本改变 runner shell 命令或 artifact 路径。
 
-**CI 权限与正式发布**：构建/PR workflow 的 `GITHUB_TOKEN` 明确只读，checkout 禁止持久化凭据；`release.yml` 的快照构建、APK 构建、测试和签名核验均在只读 job 完成并上传 `release-v<version>` artifact。独立 `publish` job 只下载同一 artifact 并创建 draft Release / 上传资产，写权限仅授予该 job。发布阶段不重新构建或重签资产。PR 与来源构建 workflow 的源码 Node 测试使用 `node --test scripts/source-build/*.test.mjs`，新增测试自动进入该测试集。
+**CI 权限与正式发布**：构建/PR workflow 的 `GITHUB_TOKEN` 明确只读，checkout 禁止持久化凭据。原 `release.yml` 的快照构建、APK 构建、测试和签名核验均在只读 job 完成、上传 `release-v<version>` artifact，再由独立 `publish` job 只下载同一 artifact 创建 draft Release / 上传资产，写权限仅授予该 job、发布阶段不重新构建或重签资产——**该链已按用户决定整体退役（本分支不出 Release）**；这条权限纪律仍然适用：任何将来在来源链上重建的发布面，都必须沿用「只读构建 + 独立写权限提升 job + 不重构建不重签」。PR 与来源构建 workflow 的源码 Node 测试使用 `node --test scripts/source-build/*.test.mjs`，新增测试自动进入该测试集。
 
 **APK 三方案签名核验**：最终 APK 必须通过 `scripts/check-apk-signatures.mjs`，并断言 JAR/v1、APK v2、APK v3 均为 true。核验命令显式传 `apksigner verify --min-sdk-version 18`：APK 的 `minSdk=26`，而默认核验会按 26 判断老系统兼容性，可能把只供旧系统使用的 v1 SHA-256 签名报告为 false；API 18 起支持此 v1 摘要算法。此参数只选择核验兼容性下限，不改 APK 内容或签名。仍要求 apksigner 返回码为 0，并保留原始输出、scheme 判定与退出码。
 

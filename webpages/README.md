@@ -139,7 +139,7 @@ Publication refresh uses the `release: published` event after a draft becomes pu
 
 ## 命名门禁（本目录最有价值的一条判据）
 
-`tests/release-url.test.mjs` **直接读发布链源码**（`.github/workflows/release.yml` 与
+`tests/release-url.test.mjs` **直接读构建链源码**（`scripts/build-apk-013.ps1` 的 `--artifact-name`），与站点的资产名形态逐字比对；另有一条政策判据：本分支不出 Release，`.github/workflows/release.yml` 若被加回即判红（含受控负控）。
 `scripts/build-apk-013.ps1` 的 `--artifact-name`），与站点的资产名形态逐字比对：**发布链改名即判红**。
 
 真因：arm64 资产名在线发布史上翻转过（`v0.14.2-fx-2` 及更早是 `-arm64-v8a.apk`，`v0.14.2-fx-3` 起是

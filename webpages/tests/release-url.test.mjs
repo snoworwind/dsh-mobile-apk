@@ -6,9 +6,12 @@
  *   （docs/AGENTS/gotchas.md 坑 172）。网页若按字符串臆造资产名，会重演同一缺陷，
  *   而且症状更隐蔽：页面照样显示、按钮照样可点，只是下载 404。
  *
- *   所以本测试**直接读发布链源码**（.github/workflows/release.yml 与
- *   scripts/build-apk-013.ps1 的 --artifact-name），与站点的资产名形态逐字比对——
- *   **发布链改名即判红**，不靠人记得同步。
+ *   所以本测试**直接读构建链源码**（`scripts/build-apk-013.ps1` 的 --artifact-name）与站点的
+ *   资产名形态逐字比对，**构建链改名即判红**，不靠人记得同步。
+ *
+ *   2026-10-15 按用户决定：本分支**不出 Release**（`.github/workflows/release.yml` 已删除），
+ *   原先「读 release.yml 归集口径」的用例改为**政策判据 + 受控负控**——发布链若被重新加回，
+ *   本测试必须判红，逼着改政策的人先读 docs/RELEASE.md §5 与 known-gaps。
  *
  * 运行：node --test webpages/tests/release-url.test.mjs
  */
@@ -16,6 +19,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -40,10 +44,29 @@ test('资产名形态与 build-apk-013.ps1 的 --artifact-name 逐字一致', ()
   assert.equal(canonicalApkName('vX', 'Y'), shape, '站点资产名形态与发布链产物名不一致');
 });
 
-test('release.yml 归集口径未变（变了必须重核本门禁）', () => {
-  const yml = readRepo('.github/workflows/release.yml');
-  const pattern = ['out/v', String.fromCharCode(36), '{ver}', '/*.apk'].join('');
-  assert.ok(yml.includes(pattern), 'release.yml 的 APK 归集方式变了，需重新核对本测试');
+/**
+ * 本分支的政策判据：不出 Release。
+ *
+ * 为什么用「文件是否在场」当判据：发布链的存在本身就是政策事实——它决定本分支能不能产出
+ * Release 资产。删掉它是有意为之（见 docs/RELEASE.md §5 与 known-gaps「无发布能力」条目），
+ * 若有人悄悄加回，站点会重新指向一个本分支不打算维护的发布面。
+ */
+const releaseWorkflowExists = (root) => fs.existsSync(path.join(root, '.github/workflows/release.yml'));
+
+test('本分支不出 Release：发布链已退役（含受控负控）', () => {
+  // 受控负控：探测函数必须能认出「在场」的发布链，否则下面的缺席断言是空断言。
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'release-policy-'));
+  try {
+    fs.mkdirSync(path.join(scratch, '.github/workflows'), { recursive: true });
+    fs.writeFileSync(path.join(scratch, '.github/workflows/release.yml'), '# stub\n');
+    assert.equal(releaseWorkflowExists(scratch), true, '负控失效：探测函数认不出在场的发布链');
+  } finally {
+    fs.rmSync(scratch, { recursive: true, force: true });
+  }
+  assert.equal(releaseWorkflowExists(repoRoot), false,
+    'release.yml 又出现了：本分支按用户决定不出 Release；确要恢复请先改政策（docs/RELEASE.md §5、docs/AGENTS/known-gaps.md）');
+  assert.ok(fs.existsSync(path.join(repoRoot, '.github/workflows/build-apk-source.yml')),
+    '来源链 workflow 缺失：本分支只允许从源码构建（AGENTS.md §4 铁律 9）');
 });
 
 test('门禁自身具备判红能力（受控负控）', () => {

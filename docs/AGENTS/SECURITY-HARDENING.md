@@ -14,14 +14,14 @@
 
 | 项 | 允许（来源链） | 禁止（本分支） |
 |---|---|---|
-| 云端入口 | `.github/workflows/build-apk-source.yml`（`build-apk.yml` 复用的就是它） | `release.yml` 现状，见下方缺口 |
+| 云端入口 | `.github/workflows/build-apk-source.yml`（`build-apk.yml` 复用的就是它） | 任何 Release 发布链：`release.yml` 已按用户决定删除，**不得复活** |
 | 本地入口 | `node scripts/source-build/run-local-source-chain.mjs` | `pwsh -File scripts/build-apk-013.ps1 ...`、`scripts/build-release.ps1` |
 | 底座输入 | Termux 官方签名仓库 + 固定 bootstrap（逐 deb 哈希） | `base/*.tar.xz` LFS 归档 |
 | 产物要求 | 携带来源链 provenance，且 `sourceRepository` 必须等于**本次构建实际所在仓库** | 无 provenance、或 provenance 指向其他仓库的产物 |
 
-**当前缺口（已登记；未补验不得发布）**：`release.yml` 仍走「LFS 底座 + `build-apk-013.ps1`」，与本铁律冲突。把发布链接到来源链要动签名与快照输入面，属独立改动，见 [known-gaps.md](known-gaps.md)。
+**发布面：按用户决定不建**（2026-10-15）。`release.yml` 与两个手工发布脚本已删除，本分支**不产出 GitHub Release**；需要分发时只能用来源链产物（APK + provenance 证据包 + 哈希）直接交付。恢复发布能力必须先改本条政策，并在来源链上重建发布面（双 ABI + 资产集 + 只读构建/独立写权限提升），见 [known-gaps.md](known-gaps.md)。
 
-**「独立」的含义（避免歧义）**：本分支的构建、验证都不需要 kelai141 名下任何仓库——来源链只取 `deepseek-ai/deepseek-harness`、Termux 官方签名仓、npm registry 与 Android SDK；`scripts/patches/**` 与各子仓副本在本分支内即为权威，协调仓的逐字节镜像比对属于对端 CI 的自守面，**不是本分支产物的判据**。手工发布脚本（`upload-release.mjs` / `sync-release-notes.mjs`）已按用户指示删除；`release.yml` 与它依赖的本地/协调仓链在发布面切到来源链之前不得使用。仍然保留、且**不构成依赖**的只有归属与出处类内容：`LICENSE` 的版权声明、`CODEOWNERS`、各 `package.json` 的 `repository` 字段、README 的生态链接，以及 `gotchas.md` / `changelog-archive.md` 的历史条目——这些记录的是事实来源，**不得改写成「我们的」**。
+**「独立」的含义（避免歧义）**：本分支的构建、验证都不需要 kelai141 名下任何仓库——来源链只取 `deepseek-ai/deepseek-harness`、Termux 官方签名仓、npm registry 与 Android SDK；`scripts/patches/**` 与各子仓副本在本分支内即为权威，协调仓的逐字节镜像比对属于对端 CI 的自守面，**不是本分支产物的判据**。手工发布脚本（`upload-release.mjs` / `sync-release-notes.mjs`）与 `.github/workflows/release.yml` 均已删除，本分支不出 Release；残留的本地/协调仓链脚本在双仓镜像面内、单边不可删，但已被铁律禁用，属死字节、不构成依赖。仍然保留、且**不构成依赖**的只有归属与出处类内容：`LICENSE` 的版权声明、`CODEOWNERS`、各 `package.json` 的 `repository` 字段、README 的生态链接，以及 `gotchas.md` / `changelog-archive.md` 的历史条目——这些记录的是事实来源，**不得改写成「我们的」**。
 
 ## 分支维护方式
 

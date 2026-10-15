@@ -33,9 +33,9 @@ DeepSeek Harness 的**安卓壳应用**（包名 `com.dsharnessmobile.shell`）�
 # 【本分支例外】security/hardening 禁止用下面两条本地/协调仓链产出任何 APK，只允许来源链构建（见 §4 铁律 9）。
 pwsh -File scripts\build-apk-013.ps1 -Suffix ""   # 双 ABI 全链，门禁失败即拒打包
 pwsh -File scripts\build-apk-013.ps1 -Fast         # dev 档：单 ABI x86_64 + preset 1（禁发布）
-# 发布包不经本地：由 GitHub Action 一键链产出（workflow_dispatch 传 version + notes）——
-# gh workflow run release -R snoworwind/dsh-mobile-apk -F version=<版本> -F notes=@release/v<版本>/notes.md
-# （本 fork 坐标；上游为 kelai141/dsh-mobile-apk。发布链切到来源链前，见 §4 铁律 9 的缺口登记。）
+# 发布包不经本地，也没有 Release 入口：本分支不出 Release（release.yml 已按用户决定删除），
+# 只允许来源链构建（build-apk-source.yml / run-local-source-chain.mjs），产物加 provenance 直接交付。
+# 详见 §4 铁律 9 与 docs/RELEASE.md §5。
 
 # 装机（<serial> 用 adb devices 查；arm64 真机必须用 arm64 产物）
 adb -s <serial> install -r -t out\v<版本>\dsh-mobile-apk-v<版本>-arm64.apk

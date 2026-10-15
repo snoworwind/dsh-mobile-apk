@@ -698,7 +698,8 @@ jobs:
           # 冒充通过（上游 0.14.2-fx-2 的 G.0 ⑤ 正是这条结构性脱节：CI 只跑 compileDebugKotlin、
           # 从不跑 Kotlin 单测也从不调该计数门禁，于是「测试类被删」时 CI 仍绿）。
           # 修法随上游合并而来时去掉了 --allow-missing，故**调用方必须先产出结果**；本地链与
-          # 发布链（release.yml）都已在 APK 步之前跑本步，来源链此前漏了它，实测必死在该门禁上。
+          # 原发布链（release.yml，已于 2026-10-15 按用户决定退役）都已在 APK 步之前跑本步，
+          # 来源链此前漏了它，实测必死在该门禁上。本分支现在只有来源链，故本步是唯一入口。
           # 结果目录 app/build/test-results/testDebugUnitTest 会被后续门禁就地读取并比对基线。
           chmod +x gradlew
           ./gradlew :app:testDebugUnitTest --no-daemon --console=plain
