@@ -1830,7 +1830,7 @@ EngineBootContinuationTest用latch驱动真实观察函数：winner持CAS但无�
 
 **真因**：把 shell 参数视为整段字符串而不是词法参数；并把命令替换的执行副作用当成完整语义，忽略其输出仍参与命令词/屏幕目标解析。
 
-**修法**：Kotlin 与 bridge 侧按 shell 规则提取 `-c` 后第一个参数，再扫描载荷；重定向与位置参数不参与载荷提取。若 `$()` / 反引号会影响命令词、解释器载荷或屏幕命令目标，则标记不可解析并 fail-closed；不透明执行器在两档范围都拒绝。新增跨语言 fixture，权威源在 `plugins/dsh-android-bridge/test/fixtures/screen-scope-cases.json`，壳侧副本由 `node scripts/gen-screen-scope-fixture.mjs` 生成。
+**修法**：Kotlin 与 bridge 侧按 shell 规则提取 `-c` 后第一个参数，再扫描载荷；重定向与位置参数不参与载荷提取。若 `$()` / 反引号会影响命令词、解释器载荷或屏幕命令目标，则标记不可解析并 fail-closed；不透明执行器在两档范围都拒绝。展开队列达到上限后若仍有未检查段也拒绝。新增跨语言 fixture，权威源在 `plugins/dsh-android-bridge/test/fixtures/screen-scope-cases.json`，壳侧副本由 `node scripts/gen-screen-scope-fixture.mjs` 生成。
 
 **判据**：范围判据必须拒绝真实屏 `-d 0` 的 `sh -c` 重定向形式；合法虚拟屏目标即使带 `-c` 位置参数仍放行；动态输出影响屏幕目标时为 `deny-unparsed`。本轮按仓库要求更新执行地图，并跑代码地图静态门禁；设备层验收仍需按 §2.1 完成。
 

@@ -499,6 +499,7 @@ internal object ShellOps {
       scan(inner, 1)
       for (k in before until segments.size) pending.addLast(segments[k])
     }
+    if (pending.isNotEmpty()) unparsed = true
     if (segments.any { segment ->
         val bare = stripQuotedText(segment).trimStart()
         OPAQUE_EXECUTION.containsMatchIn(bare) ||

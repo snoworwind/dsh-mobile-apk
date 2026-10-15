@@ -351,6 +351,7 @@ export function splitCommandSegments(command: string): CommandSegments {
     scan(inner, 1)
     pending.push(...segments.slice(before))
   }
+  if (pending.length > 0) unparsed = true
   if (segments.some((segment) => {
     const bare = stripQuotedText(segment).trimStart()
     return OPAQUE_EXECUTION.test(bare) || (SHELL_INTERPRETER.test(bare) && !SHELL_C_PAYLOAD.test(segment))

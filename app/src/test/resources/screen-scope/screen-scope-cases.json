@@ -394,6 +394,16 @@
       ],
       "expect": "deny-unparsed",
       "why": "看不懂的命令不放行：解析失败必须是显式拒绝态，而不是「没命中命令词 ⇒ 放行」。"
+    },
+    {
+      "name": "超过 16 次嵌套展开预算必须 fail-closed",
+      "command": "sh -c 'echo ok'; sh -c 'echo ok'; sh -c 'echo ok'; sh -c 'echo ok'; sh -c 'echo ok'; sh -c 'echo ok'; sh -c 'echo ok'; sh -c 'echo ok'; sh -c 'echo ok'; sh -c 'echo ok'; sh -c 'echo ok'; sh -c 'echo ok'; sh -c 'echo ok'; sh -c 'echo ok'; sh -c 'echo ok'; sh -c 'echo ok'; sh -c 'screencap -p -d 0 /sdcard/real.png'",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-unparsed",
+      "why": "展开队列达到上限时仍有待扫描命令段，不能把未检查尾部误当作安全；真实屏命令位于第 17 个 shell 段。"
     }
   ]
 }
