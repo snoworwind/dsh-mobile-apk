@@ -16,4 +16,9 @@
   <files-path name="internal_workspaces" path="home/.dsh/workspaces/" />
   <files-path name="internal_tmp" path="home/tmp/" />
   <files-path name="internal_usr_bin" path="usr/bin/" />
+  <!-- 0.14.6 功能 B：启动页「分享诊断包」的 ZIP 只落在 cacheDir/log-share/，
+       因此这里只加**最窄**的一条映射（单目录、不休 ≤ 既有任何一条的宽度）。
+       不映射 cacheDir 整体——那是给下载/图片缓存等无关内容开口子。
+       ZIP 内容本身由 LogShare 白名单 + LogSanitizer 单出口脱敏把关。 -->
+  <cache-path name="log_share" path="log-share/" />
 </paths>

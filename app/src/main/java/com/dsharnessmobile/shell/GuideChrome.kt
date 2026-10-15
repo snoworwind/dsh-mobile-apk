@@ -30,6 +30,7 @@ internal class GuideChrome(
   val logSummary: TextView,
   val logSection: View,
   val copyLog: TextView,
+  val shareLog: TextView,
   val primaryButton: Button,
   val consoleButton: Button,
   val updateButton: Button,
@@ -44,6 +45,7 @@ internal class GuideCallbacks(
   val onCheckUpdate: () -> Unit,
   val onGrantStorage: () -> Unit,
   val onCopyLog: () -> Unit,
+  val onShareLog: () -> Unit,
 )
 
 internal fun buildGuideChrome(activity: ComponentActivity, callbacks: GuideCallbacks): GuideChrome {
@@ -58,10 +60,7 @@ internal fun buildGuideChrome(activity: ComponentActivity, callbacks: GuideCallb
 
   val root = LinearLayout(activity).apply {
     orientation = LinearLayout.VERTICAL
-    background = android.graphics.drawable.GradientDrawable(
-      android.graphics.drawable.GradientDrawable.Orientation.TOP_BOTTOM,
-      intArrayOf(color(R.color.ds_glow), color(R.color.ds_bg), color(R.color.ds_bg)),
-    )
+    setBackgroundColor(color(R.color.ds_bg))
     visibility = View.GONE
   }
 
@@ -73,24 +72,18 @@ internal fun buildGuideChrome(activity: ComponentActivity, callbacks: GuideCallb
   val iconPlate = FrameLayout(activity).apply {
     layoutParams = LinearLayout.LayoutParams(dpix(R.dimen.ds_logo_shell), dpix(R.dimen.ds_logo_shell))
     background = DsUi.roundRect(
-      color(R.color.ds_accent_soft),
+      color(R.color.ds_surface),
       dim(R.dimen.ds_radius_icon),
-      color(R.color.ds_accent),
+      color(R.color.ds_hairline),
       hairline,
     )
+    addView(ImageView(activity).apply {
+      setImageResource(R.mipmap.ic_launcher)
+      layoutParams = FrameLayout.LayoutParams(
+        dpix(R.dimen.ds_logo_size), dpix(R.dimen.ds_logo_size), Gravity.CENTER,
+      )
+    })
   }
-  val iconInner = FrameLayout(activity).apply {
-    val size = dpix(R.dimen.ds_logo_size) + dp(6f)
-    layoutParams = FrameLayout.LayoutParams(size, size, Gravity.CENTER)
-    background = DsUi.roundRect(color(R.color.ds_surface), dim(R.dimen.ds_radius_sm))
-  }
-  iconInner.addView(ImageView(activity).apply {
-    setImageResource(R.mipmap.ic_launcher)
-    layoutParams = FrameLayout.LayoutParams(
-      dpix(R.dimen.ds_logo_size), dpix(R.dimen.ds_logo_size), Gravity.CENTER,
-    )
-  })
-  iconPlate.addView(iconInner)
 
   val titleCol = LinearLayout(activity).apply {
     orientation = LinearLayout.VERTICAL
@@ -107,7 +100,7 @@ internal fun buildGuideChrome(activity: ComponentActivity, callbacks: GuideCallb
   })
   titleCol.addView(TextView(activity).apply {
     text = activity.getString(R.string.ds_brand_subtitle)
-    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+    setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
     setTextColor(color(R.color.ds_text_secondary))
     setPadding(0, dp(2f), 0, 0)
   })
@@ -116,7 +109,7 @@ internal fun buildGuideChrome(activity: ComponentActivity, callbacks: GuideCallb
   // 这里补一行**事实陈述**（不是营销文案）：能力面 + 权限面各一句。
   titleCol.addView(TextView(activity).apply {
     text = activity.getString(R.string.ds_brand_explain)
-    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
     setTextColor(color(R.color.ds_text_tertiary))
     setLineSpacing(0f, 1.25f)
     setPadding(0, dp(4f), 0, 0)
@@ -126,7 +119,12 @@ internal fun buildGuideChrome(activity: ComponentActivity, callbacks: GuideCallb
     setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
     setTextColor(color(R.color.ds_text_tertiary))
     typeface = typeMedium()
-    background = DsUi.roundRect(color(R.color.ds_chip), dim(R.dimen.ds_radius_pill))
+    background = DsUi.roundRect(
+      android.graphics.Color.TRANSPARENT,
+      dim(R.dimen.ds_radius_pill),
+      color(R.color.ds_hairline),
+      hairline,
+    )
     setPadding(dp(10f), dp(5f), dp(10f), dp(5f))
     // S1-14：长版本号（v0.13.7fx-1、带后缀的验收包 v0.14.1-SN-1-13）此前**无 ellipsize**，
     // 在窄屏上会把左侧标题挤成两行。单行 + 省略号 + 宽度上限（屏幕 34%），标题优先。
@@ -149,14 +147,14 @@ internal fun buildGuideChrome(activity: ComponentActivity, callbacks: GuideCallb
   brandBlock.addView(versionLabel)
   content.addView(brandBlock)
 
-  // —— Status card (double-bezel) ——
-  val shell = LinearLayout(activity).apply {
+  // —— Status card ——
+  val card = LinearLayout(activity).apply {
     orientation = LinearLayout.VERTICAL
-    setPadding(dp(2f), dp(2f), dp(2f), dp(2f))
+    setPadding(dpix(R.dimen.ds_space_24), dp(24f), dpix(R.dimen.ds_space_24), dp(24f))
     background = DsUi.roundRect(
-      color(R.color.ds_shell),
-      dim(R.dimen.ds_radius_shell),
-      color(R.color.ds_border),
+      color(R.color.ds_surface),
+      dim(R.dimen.ds_radius_card),
+      color(R.color.ds_hairline),
       hairline,
     )
     val lp = LinearLayout.LayoutParams(
@@ -164,16 +162,6 @@ internal fun buildGuideChrome(activity: ComponentActivity, callbacks: GuideCallb
     )
     lp.bottomMargin = dpix(R.dimen.ds_space_16)
     layoutParams = lp
-  }
-  val card = LinearLayout(activity).apply {
-    orientation = LinearLayout.VERTICAL
-    setPadding(dpix(R.dimen.ds_space_24), dp(22f), dpix(R.dimen.ds_space_24), dp(22f))
-    background = DsUi.roundRect(
-      color(R.color.ds_surface),
-      dim(R.dimen.ds_radius_card),
-      color(R.color.ds_hairline),
-      hairline,
-    )
   }
 
   val statusDot = View(activity).apply {
@@ -184,9 +172,10 @@ internal fun buildGuideChrome(activity: ComponentActivity, callbacks: GuideCallb
     background = DsUi.oval(color(R.color.ds_text_tertiary))
   }
   val engineStatus = TextView(activity).apply {
-    setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
+    setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f)
     setTextColor(color(R.color.ds_text_primary))
     typeface = typeMedium()
+    letterSpacing = -0.01f
     setLineSpacing(0f, 1.2f)
     layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
   }
@@ -199,7 +188,7 @@ internal fun buildGuideChrome(activity: ComponentActivity, callbacks: GuideCallb
   card.addView(statusRow)
 
   val statusHint = TextView(activity).apply {
-    setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+    setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
     setTextColor(color(R.color.ds_text_secondary))
     setLineSpacing(0f, 1.35f)
     setPadding(dp(16f), dpix(R.dimen.ds_space_8), 0, 0)
@@ -242,7 +231,7 @@ internal fun buildGuideChrome(activity: ComponentActivity, callbacks: GuideCallb
   card.addView(progressBar)
 
   val progressText = TextView(activity).apply {
-    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+    setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
     setTextColor(color(R.color.ds_text_secondary))
     setPadding(0, dpix(R.dimen.ds_space_8), 0, 0)
     visibility = View.GONE
@@ -287,9 +276,40 @@ internal fun buildGuideChrome(activity: ComponentActivity, callbacks: GuideCallb
     letterSpacing = 0.04f
     layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
   })
+  // 功能 B（0.14.6）：故障时的「分享诊断包」快捷入口。与「复制」同一观感（强调色小字 +
+  // 按压反馈），不新增区块、不加二次确认（B7）。
+  //
+  // **为什么单独挂在 card 上、而不是塞进 logSection 的 logHeader**（B3 的关键，实测抓出的缺陷）：
+  // logSection 的可见性由 showGuide() 按「engine.log 有没有尾部摘要」决定，缺失即整段 GONE。
+  // 而「引擎起不来、engine.log 根本没生成」恰恰是最需要诊断包的现场——那时入口会被父节点
+  // 一起藏掉，等于功能不存在。故本控件自成一行、直接挂在 card 末尾，可见性只由渲染层的证据
+  // 判据决定，不受日志摘要是否存在影响。
+  //
+  // 为什么构建期**默认 GONE**、由渲染层按证据点亮：不是每次启动都出过故障，常态不该多一个
+  // 入口；而判据（boot-fail/boot-diag/Error 相位）来自文件与相位，构建期拿不到（B1/B3）。
+  val shareLog = TextView(activity).apply {
+    text = activity.getString(R.string.ds_share_log)
+    setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+    setTextColor(color(R.color.ds_accent))
+    typeface = typeMedium()
+    // 自成一行、左对齐卡片内容（旧形态在 logHeader 里靠右，现在没有右侧邻居了）；
+    // 垂直方向留内边距保证可点面积。
+    setPadding(0, dp(6f), 0, dp(6f))
+    isClickable = true
+    isFocusable = true
+    setOnClickListener { callbacks.onShareLog() }
+    DsUi.bindPressScale(this, 0.97f)
+    visibility = View.GONE
+    // 自身带内边距与外边距——不依赖任何容器提供留白，因为父节点（card）不随本控件隐藏。
+    val lp = LinearLayout.LayoutParams(
+      ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+    )
+    lp.topMargin = dpix(R.dimen.ds_space_16)
+    layoutParams = lp
+  }
   val copyLog = TextView(activity).apply {
     text = activity.getString(R.string.ds_copy_log)
-    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+    setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
     setTextColor(color(R.color.ds_accent))
     typeface = typeMedium()
     setPadding(dp(8f), dp(4f), 0, dp(4f))
@@ -325,8 +345,10 @@ internal fun buildGuideChrome(activity: ComponentActivity, callbacks: GuideCallb
     addView(logSummary)
   }
   card.addView(logSection)
-  shell.addView(card)
-  content.addView(shell)
+  // 分享入口直接挂 card（不挂 logSection）——见 shareLog 处的说明：日志摘要缺失时
+  // logSection 整段隐藏，而那种失败恰恰最需要诊断包（B3）。
+  card.addView(shareLog)
+  content.addView(card)
 
   val scroll = ScrollView(activity).apply {
     isFillViewport = true
@@ -346,7 +368,7 @@ internal fun buildGuideChrome(activity: ComponentActivity, callbacks: GuideCallb
   fun makePrimary(): Button = Button(activity).apply {
     text = activity.getString(R.string.ds_start_engine)
     isAllCaps = false
-    setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+    setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
     setTextColor(color(R.color.ds_text_on_accent))
     typeface = typeMedium()
     stateListAnimator = null
@@ -364,13 +386,16 @@ internal fun buildGuideChrome(activity: ComponentActivity, callbacks: GuideCallb
   fun makeSecondary(label: String, onClick: () -> Unit): Button = Button(activity).apply {
     text = label
     isAllCaps = false
-    setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+    setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
     setTextColor(color(R.color.ds_text_primary))
     typeface = typeMedium()
     stateListAnimator = null
     background = DsUi.ripple(
-      DsUi.roundRect(color(R.color.ds_surface_muted), dim(R.dimen.ds_radius_pill)),
-      color(R.color.ds_chip),
+      DsUi.roundRect(
+        color(R.color.ds_surface), dim(R.dimen.ds_radius_pill),
+        color(R.color.ds_hairline), hairline,
+      ),
+      color(R.color.ds_accent_soft),
     )
     DsUi.bindPressScale(this, 0.97f)
     setOnClickListener { onClick() }
@@ -435,7 +460,7 @@ internal fun buildGuideChrome(activity: ComponentActivity, callbacks: GuideCallb
   return GuideChrome(
     root = root,
     brandBlock = brandBlock,
-    cardBlock = shell,
+    cardBlock = card,
     actionBlock = actionBlock,
     engineStatus = engineStatus,
     statusHint = statusHint,
@@ -446,6 +471,7 @@ internal fun buildGuideChrome(activity: ComponentActivity, callbacks: GuideCallb
     logSummary = logSummary,
     logSection = logSection,
     copyLog = copyLog,
+    shareLog = shareLog,
     primaryButton = primaryButton,
     consoleButton = consoleButton,
     updateButton = updateButton,

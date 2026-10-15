@@ -9,6 +9,74 @@ import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
 import org.apache.commons.compress.compressors.xz.XZCompressorInputStream
 
 /**
+ * 内嵌快照**资产字节**的对账策略（0.14.7 / task-9）。
+ *
+ * 为什么单列一个对象：既有链路里 `assets/snapshot.sha256` 只是**声明值**，它被拿去和 live/已提交的
+ * `.snapshot-fingerprint` 比较（ShellState 那一侧的新鲜度判据），而真正被解码的
+ * `assets/snapshot.tar.xz` **从不做摘要校验**——Android AssetManager 读 STORED 项也不校 zip CRC。
+ * 于是资产字节坏掉时（安装介质损坏、ROM 优化器重写 APK 等），用户能拿到的唯一线索是解码器内部的
+ * `org.tukaani.xz.CorruptedInputException: Compressed data is corrupt`：
+ * 它只说「输入坏了」，**不说「哪一段不一致、期望什么、实际什么」**。
+ *
+ * 本对象提供**解码之前**的流式摘要对账，使失败能自证。它刻意不假设任何具体损坏原因——
+ * 真机（华为 SCA-AL00）未连接，无法比对 base.apk，本项**不声称**已找到 asset 为何损坏。
+ *
+ * 成本纪律：固定 64KB 缓冲的**流式**读，不整读入内存（快照 194MB），也不解码（比解码便宜一个数量级）。
+ */
+internal object SnapshotBundledAsset {
+
+  /** 内嵌资产字节与安装包内声明值不一致（被改写/截断）。 */
+  const val CODE_CORRUPT = "snapshot-bundled-asset-corrupt"
+
+  /** 内嵌资产连打开/读取都失败（缺席、权限、AssetManager 异常）。与「摘要不一致」分开归类。 */
+  const val CODE_UNREADABLE = "snapshot-bundled-asset-unreadable"
+
+  /** 解压完成但 staged 运行时缺件（校验支的失败，此前也是"只 return false"的静默支）。 */
+  const val CODE_STAGE_INCOMPLETE = "snapshot-stage-incomplete"
+
+  /** 流式 SHA-256（十六进制小写）+ 读到的字节数。 */
+  data class Digest(val hex: String, val bytes: Long)
+
+  /**
+   * 对流做一次**顺序** SHA-256（不解码、不缓存整个流）。
+   *
+   * @param open 打开输入流的实现（单测注入内存流，生产注入 AssetManager 流）。
+   */
+  fun digest(open: () -> InputStream, bufferSize: Int = 64 * 1024): Digest {
+    val md = java.security.MessageDigest.getInstance("SHA-256")
+    var bytes = 0L
+    open().use { input ->
+      val buf = ByteArray(bufferSize)
+      while (true) {
+        val n = input.read(buf)
+        if (n < 0) break
+        if (n > 0) {
+          md.update(buf, 0, n)
+          bytes += n
+        }
+      }
+    }
+    return Digest(md.digest().joinToString("") { "%02x".format(it) }, bytes)
+  }
+
+  /**
+   * 纯判据：实际摘要 vs 声明摘要。
+   *
+   * @param declared 归一化后的声明值；null/空 = 声明不可用（已由 SnapshotFingerprintPolicy 归类，此处不重复判）。
+   * @return null = 通过；非 null = (errorCode, 可落盘的一行 detail)。
+   */
+  fun verdict(declared: String?, actual: Digest): Pair<String, String>? {
+    if (declared.isNullOrEmpty()) return null
+    if (declared == actual.hex) return null
+    return CODE_CORRUPT to (
+      "内嵌运行时快照资产与安装包内声明值不一致（assets/snapshot.tar.xz 字节被改写/截断）："
+        + "expected=" + declared + " actual=" + actual.hex + " bytes=" + actual.bytes
+        + "。本次解码未开始即被拦下，现有用户数据未改动；请重新安装完整安装包。"
+      )
+  }
+}
+
+/**
  * Shared snapshot extraction: xz tar → dest with owner-only permissions
  * (dsh's credentials provider fails loud on world-readable secrets) and
  * symlink preservation. Used by both the bundled snapshot (assets) and the
@@ -59,8 +127,51 @@ object SnapshotExtractor {
     runtimeRoot: File = dest,
     limits: Limits = Limits.DEFAULT,
   ) {
+    // D-3（0.14.7 / task-9）：tar/xz 必须在**任何**退出路径上关闭。
+    // 旧实现把 `tar.close()` 放在函数体末尾（无 try/finally）：中途抛异常（超限判据、路径解算失败、
+    // 写盘 EACCES、**解码器抛 CorruptedInputException**）时两条流都不关 —— 而这条路径正是真机
+    // 启动失败时走的那条（真机 logcat 实证：XZCompressorInputStream.read 抛 CorruptedInputException）。
+    // 不关流的后果不是「泄漏一点点」：xz 解码器持有 native 级缓冲，且调用方在刷新事务里会立刻重试，
+    // 每次启动都叠一次。
     val xz = XZCompressorInputStream(input)
     val tar = TarArchiveInputStream(xz)
+    var primary: Throwable? = null
+    try {
+      extractEntries(tar, dest, totalBytes, onProgress, runtimeRoot, limits)
+    } catch (t: Throwable) {
+      primary = t
+      throw t
+    } finally {
+      // 关闭顺序与打开顺序相反（tar 先关：它可能从 xz 读尾部）。**任一 close 抛异常都不得掩盖
+      // 正在传播的真因**——与 kotlin use{} 的语义对齐（close 异常进 addSuppressed）：
+      // 真机现场的真因是 CorruptedInputException，若被一个 close 异常顶掉，本次修复就白做了。
+      closeKeepingPrimary(tar, primary)
+      closeKeepingPrimary(xz, primary)
+    }
+  }
+
+  /** 关闭 [closeable]；失败时若有正在传播的 [primary] 就挂成 suppressed，否则如实抛出。 */
+  private fun closeKeepingPrimary(closeable: java.io.Closeable, primary: Throwable?) {
+    try {
+      closeable.close()
+    } catch (closeError: Throwable) {
+      if (primary != null) primary.addSuppressed(closeError) else throw closeError
+    }
+  }
+
+  /**
+   * 解压主体（D-3 拆出：让 [extract] 的 try/finally 只负责关闭，主体保持线性易读）。
+   *
+   * 行为与拆分前逐行相同 —— 本函数**不关闭**任何流，由 [extract] 的 finally 统一负责。
+   */
+  private fun extractEntries(
+    tar: TarArchiveInputStream,
+    dest: File,
+    totalBytes: Long,
+    onProgress: (Long, Long) -> Unit,
+    runtimeRoot: File,
+    limits: Limits,
+  ) {
     val destCanon = dest.canonicalPath
     val runtimeCanon = try {
       runtimeRoot.canonicalPath
@@ -143,7 +254,6 @@ object SnapshotExtractor {
       if (done % (1024 * 1024) < entry.size) onProgress(done, totalBytes)
       entry = tar.nextEntry
     }
-    tar.close()
   }
 
   /**

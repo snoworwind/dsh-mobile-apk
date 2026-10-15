@@ -18,6 +18,96 @@
 import type { ReasoningEfforts } from './capability-probe.js'
 import { canonicalJson } from './signature.js'
 
+
+// ── 输入模态：白名单来自**设置 schema 本身**（0.14.6 A 轨修复，2026-10-11）────────────────
+//
+// 为什么需要它（设备实锤）：pi-ai 的 models[].input 是 z.array(z.union(MODALITIES))，而出货
+// dsh-llm-pi-ai 里 MODALITIES = Object.keys({ text: true, image: true }) —— **只接受 text/image**。
+// 本插件的能力来源却可能声明 audio/pdf（models.dev 数据里确有，例 empiriolabs 的 mimo-v2-5 是
+// ["text","image","audio"]）。一旦把 audio 写进 settings，schemastery 直接抛
+//   $.providers.<r>.models[0].input[2] expected "text" | "image" but got "audio"
+// 而**写回是一次 mutate，校验失败 = 整条被拒** —— 于是同一模型的 reasoningEfforts 也一起写不进去
+// （连坐）。设备上 8 次历史 REJECTED 即此，且其中正包含功能 A 的主目标「思考档位」。
+//
+// 为什么从 schema 反推而不是写死 ['text','image']：写死就是**第二份常量**，pi-ai 升级
+// （比如将来加了 pdf）时两边会静默漂移。这里从**运行期拿到的同一个 schema** 读合法枚举，
+// 因此永远与写回校验器一致；结构不认识时返回 undefined 并**保守放行**，不凭空裁掉新模态。
+//
+// 提取路径（实测出货 schema.toJSON()）：
+//   schema JSON = { uid, refs: { <id>: <node> } }
+//   字段表节点形如 { dict: { name: <refId>, input: <refId>, ... } }
+//   input 的 <refId> 指向 { type:'array', inner: <unionRefId> }
+//   unionRef = { type:'union', list: [<constRefId>...] }，成员形如 { type:'const', value:'text' }
+/** schema.toJSON() 的最小结构（只声明我们读取的部分）。 */
+export interface SchemaJsonLike {
+  refs?: Record<string, unknown>
+}
+
+function nodeOf(refs: Record<string, unknown>, id: unknown): Record<string, unknown> | undefined {
+  if (typeof id !== 'number') return undefined
+  const node = refs[String(id)]
+  return node && typeof node === 'object' ? node as Record<string, unknown> : undefined
+}
+
+/**
+ * 从 schema JSON 里读 `models[].input` 允许的字面量集合。
+ *
+ * 找不到时返回 `undefined`（而不是猜测一个默认值）——调用方据此退回「不过滤」并记录诊断，
+ * 这样 pi-ai 换结构时行为可见，而不是静默按一份陈旧白名单裁掉合法值。
+ */
+export function allowedInputModalities(schemaJson: unknown): string[] | undefined {
+  const refs = (schemaJson as SchemaJsonLike | undefined)?.refs
+  if (!refs || typeof refs !== 'object') return undefined
+
+  // 1) 按**字段名** input 定位字段引用（不写死 refId，结构变动也能跟上）。
+  let inputRef: unknown
+  for (const node of Object.values(refs)) {
+    if (!node || typeof node !== 'object') continue
+    const dict = (node as Record<string, unknown>).dict
+    if (!dict || typeof dict !== 'object') continue
+    const candidate = (dict as Record<string, unknown>).input
+    if (typeof candidate === 'number') { inputRef = candidate; break }
+  }
+  const arrayNode = nodeOf(refs, inputRef)
+  if (arrayNode?.type !== 'array') return undefined
+
+  // 2) 数组元素：union 的成员，或单个 const。
+  const innerNode = nodeOf(refs, arrayNode.inner)
+  const memberIds = innerNode?.type === 'union' && Array.isArray(innerNode.list)
+    ? innerNode.list
+    : [arrayNode.inner]
+
+  const values: string[] = []
+  for (const memberId of memberIds) {
+    const member = nodeOf(refs, memberId)
+    if (member?.type === 'const' && typeof member.value === 'string') values.push(member.value)
+  }
+  return values.length > 0 ? values : undefined
+}
+
+/** 过滤结果：保留值与丢弃值（丢弃的要能解释，不能静默）。 */
+export interface ModalityFilterResult {
+  /** 过滤后仍被 schema 接受的模态（顺序保持输入序）。 */
+  kept: string[]
+  /** 被 schema 拒绝而丢弃的模态。 */
+  dropped: string[]
+}
+
+/**
+ * 把候选模态裁到 schema 接受的范围。
+ *
+ * `allowed` 缺席（schema 结构不认识）时**原样保留**：宁可让写回按原有方式失败并被诊断记录，
+ * 也不要凭空裁掉可能有合法的新模态。
+ */
+export function filterInputModalities(candidates: readonly string[], allowed: readonly string[] | undefined): ModalityFilterResult {
+  if (allowed === undefined) return { kept: [...candidates], dropped: [] }
+  const ok = new Set(allowed)
+  const kept: string[] = []
+  const dropped: string[] = []
+  for (const item of candidates) (ok.has(item) ? kept : dropped).push(item)
+  return { kept, dropped }
+}
+
 export interface ModelPatch {
   id: string
   reasoningEfforts?: ReasoningEfforts
@@ -70,6 +160,8 @@ export interface PlanResult {
   skipped: string[]
   /** Machine-readable counterpart of [changes]. */
   written: WrittenField[]
+  /** 被 schema 拒绝而丢弃的输入模态（有值时调用方应记诊断，不做静默降级）。 */
+  droppedModalities: Array<{ id: string; dropped: string[] }>
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -114,14 +206,28 @@ function canWrite(
  * Builds the write-back plan. [patches] are applied in order; the first patch for
  * a given id wins for a field that is still missing after earlier patches.
  */
-export function planModelPatch(rawModels: unknown, patches: ModelPatch[], stamps?: StampStore): PlanResult {
+export function planModelPatch(
+  rawModels: unknown,
+  patches: ModelPatch[],
+  stamps?: StampStore,
+  /**
+   * schema 实际接受的输入模态（见 input-modalities.ts）。缺席 = 不做裁切（结构不认识时保守放行）。
+   *
+   * 为什么必须在**写回计划**这一处收口：写回是一次 mutate，schema 校验失败会**整条被拒**，
+   * 于是同一个模型的 reasoningEfforts 也写不进去（连坐）。设备实锤：含 audio 的声明导致
+   * 8 次 write-back REJECTED，其中就包括功能 A 的主目标「思考档位」。
+   */
+  allowedInput?: readonly string[],
+): PlanResult {
   const models = Array.isArray(rawModels) ? [...rawModels] : []
   const changes: string[] = []
   const skipped: string[] = []
   const written: WrittenField[] = []
+  /** 被 schema 拒绝而丢弃的模态（供调用方记诊断日志，避免静默降级）。 */
+  const droppedModalities: Array<{ id: string; dropped: string[] }> = []
   if (models.length === 0) {
     for (const patch of patches) skipped.push(`${patch.id}: 路由未声明该模型（不凭空创建条目）`)
-    return { models, changes, skipped, written }
+    return { models, changes, skipped, written, droppedModalities: [] }
   }
 
   for (const patch of patches) {
@@ -139,24 +245,61 @@ export function planModelPatch(rawModels: unknown, patches: ModelPatch[], stamps
     const next: Record<string, unknown> = { ...entry }
     const tag = patch.source ? ` (${patch.source})` : ''
     const source = patch.source ?? ''
+    let changed = false
+
+    // 既有条目的 input 同样要裁：写回是**整条 models 数组一次 mutate**，schema 校验失败会整条被拒，
+    // 于是本次要写的 reasoningEfforts 也一起写不进去（连坐）。
+    //
+    // 为什么这一支不能少（设备实锤 2026-10-15）：补全器自己会把 models.dev 查到的 input 写进条目
+    // （models.dev 里 mimo-v2.5 = ["text","image","audio"]），而 schemastery 的 input 只接受 text|image。
+    // 于是一条自写的 audio 从此卡死该模型的所有后续补齐——31 次 runAutoPass 全部
+    // wrote=false reason=mutate-rejected，报错恒为 models[0].input[2] expected "text" | "image" but got "audio"，
+    // 而「思考档位」这条主目标一次都没写进去。
+    //
+    // 与下方补丁路径的裁切同源同函数；schema 结构不认识时 filterInputModalities 原样保留（不凭空裁）。
+    if (Array.isArray(next.input)) {
+      const existing = next.input.filter((item): item is string => typeof item === 'string')
+      const { kept, dropped } = filterInputModalities(existing, allowedInput)
+      if (dropped.length > 0) {
+        skipped.push(`${patch.id}: 既有声明的模态 ${dropped.join('/')} 不被设置 schema 接受（已丢弃；其余字段照常写入）`)
+        droppedModalities.push({ id: patch.id, dropped })
+        next.input = kept
+        changed = true
+        changes.push(`${patch.id}: 裁掉既有非法模态 ${dropped.join('/')}`)
+      }
+    }
 
     if (patch.reasoningEfforts && canWrite(stamps, patch.id, 'reasoningEfforts', next.reasoningEfforts, patch.reasoningEfforts)) {
       next.reasoningEfforts = patch.reasoningEfforts
+      changed = true
       changes.push(`${patch.id}: 补 reasoningEfforts=${Object.keys(patch.reasoningEfforts).join('/')}${tag}`)
       written.push({ id: patch.id, field: 'reasoningEfforts', value: patch.reasoningEfforts })
     }
-    if (patch.input && patch.input.length > 0 && canWrite(stamps, patch.id, 'input', next.input, patch.input)) {
-      next.input = patch.input
-      changes.push(`${patch.id}: 补 input=${patch.input.join('/')}${tag}`)
-      written.push({ id: patch.id, field: 'input', value: patch.input })
+    if (patch.input && patch.input.length > 0) {
+      // 裁到 schema 接受的范围：被拒的模态既不写入，也不连坐其它字段。
+      const { kept, dropped } = filterInputModalities(patch.input, allowedInput)
+      if (dropped.length > 0) {
+        // 不静默：被丢弃的模态记进 skipped（**不能**进 changes —— changes 是「本次要写」的判据，
+        // 塞进去会让「只被丢弃、无任何写入」的情形触发一次空 mutate）。
+        skipped.push(`${patch.id}: 模态 ${dropped.join('/')} 不被设置 schema 接受（已丢弃；其余字段照常写入）`)
+        droppedModalities.push({ id: patch.id, dropped })
+      }
+      if (kept.length > 0 && canWrite(stamps, patch.id, 'input', next.input, kept)) {
+        next.input = kept
+        changed = true
+        changes.push(`${patch.id}: 补 input=${kept.join('/')}${tag}`)
+        written.push({ id: patch.id, field: 'input', value: kept })
+      }
     }
     if (typeof patch.contextWindow === 'number' && canWrite(stamps, patch.id, 'contextWindow', next.contextWindow, patch.contextWindow)) {
       next.contextWindow = patch.contextWindow
+      changed = true
       changes.push(`${patch.id}: 补 contextWindow=${patch.contextWindow}${tag}`)
       written.push({ id: patch.id, field: 'contextWindow', value: patch.contextWindow })
     }
     if (typeof patch.maxTokens === 'number' && canWrite(stamps, patch.id, 'maxTokens', next.maxTokens, patch.maxTokens)) {
       next.maxTokens = patch.maxTokens
+      changed = true
       changes.push(`${patch.id}: 补 maxTokens=${patch.maxTokens}${tag}`)
       written.push({ id: patch.id, field: 'maxTokens', value: patch.maxTokens })
     }
@@ -173,15 +316,20 @@ export function planModelPatch(rawModels: unknown, patches: ModelPatch[], stamps
       }
       if (added.length > 0) {
         next.compat = existingCompat
+        changed = true
         changes.push(`${patch.id}: 补 compat.${added.join(',')}${tag}`)
         for (const [field, value] of addedEntries) written.push({ id: patch.id, field, value })
       }
     }
 
-    if (changes.length > 0 || next !== entry) models[index] = next
+    // Commit only this patch's actual field writes. Comparing object identity is
+    // always true here because `next` is a fresh shallow copy; using the global
+    // `changes` list also lets an earlier model patch rewrite a later no-op entry.
+    // Both cases can silently normalize user-authored string model entries.
+    if (changed) models[index] = next
   }
 
-  return { models, changes, skipped, written }
+  return { models, changes, skipped, written, droppedModalities }
 }
 
 /** 写回尝试上限（首尝试 + 至多 2 次重试）。有界：不得无界循环。 */
@@ -212,6 +360,8 @@ export interface SettingsDescriptorLike {
   ns: string
   value: unknown
   revision: number
+  /** 上游 describe 一并给出的 schema JSON（settings/index.ts:444），模态白名单的真源。 */
+  schema?: unknown
 }
 
 export interface SettingsWriteLike {
@@ -272,7 +422,15 @@ export async function applyModelPatch(
       ? descriptorOverride
       : settings.describe({ namespaces: ['llm-pi-ai'] }).find((d) => d.ns === 'llm-pi-ai')
     if (!descriptor) return { wrote: false, reason: 'namespace-absent', changes: [], skipped: [] }
-    const plan = planModelPatch(modelsOf(descriptor, route), patches, stamps)
+    // 模态白名单从**本次描述符带的 schema** 反推（唯一真源，与写回校验器同源）。
+    const allowedInput = allowedInputModalities(descriptor.schema)
+    const plan = planModelPatch(modelsOf(descriptor, route), patches, stamps, allowedInput)
+    if (plan.droppedModalities.length > 0) {
+      // 不静默降级：哪些模态被 schema 拒、为什么，都留痕（A5 如实精神）。
+      for (const item of plan.droppedModalities) {
+        logger?.info?.(route + ': ' + item.id + ' input 丢弃不被 schema 接受的模态=' + item.dropped.join('/') + '（其余字段照常写入）')
+      }
+    }
     if (plan.changes.length === 0) {
       return { wrote: false, reason: 'no-change', changes: [], skipped: plan.skipped, written: [] }
     }

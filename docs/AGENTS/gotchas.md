@@ -1061,7 +1061,7 @@
 
 202. **来源链现场生成一次性签名证书，等于重新引入 e65818a 修掉的缺陷（2026-09-27，签名专项核查）**：
     **现象**：来源审计构建的 APK 签名证书与仓库内置 `keystore/debug.keystore` 不同（实测 `64:FA:4B:7E…` vs `1D:DE:9D:98…`），且两次来源构建的证书互不相同（上一版 0.1.5-rc.1 的产物是 `4642e0dc…`）。后果：产物既不能 `install -r` 覆盖已有安装（必须先卸载，卸载清数据又触发快照全量重解压），两个版本的来源包之间也互相覆盖不了。
-    **真因**：workflow 的签名步骤先 `rm -f keystore/debug.keystore` 再用 keytool 现场生成一张 `CN=DSH Source Build,OU=Ephemeral` 的证书，`repoDebug` signingConfig 于是签的是这张一次性证书。而项目规范恰恰相反且是有来历的——commit `e65818a`（2026-08-20，在 upstream/main 上）：「ci: 内置 debug.keystore 固定签名（否则每次构建新密钥，用户无法覆盖安装升级）」；`gotchas` 坑 10 / `DEPENDENCIES.md` / `design.md` 三处都写着「debug.keystore 固定，否则覆盖安装失败」；`build-snapshot.yml` 就是把仓库 keystore 拷进 `ANDROID_USER_HOME` 以保证 CI 与历史发布同签名。**用一次性证书区分「审计产物 ≠ 发布」这个目的，已由 `-source` 版本后缀与独立 artifact 名达成，用换签名来达成的代价是产物直接不可用。**
+    **真因**：workflow 的签名步骤先 `rm -f keystore/debug.keystore` 再用 keytool 现场生成一张 `CN=DSH Source Build,OU=Ephemeral` 的证书，`repoDebug` signingConfig 于是签的是这张一次性证书。而项目规范恰恰相反且是有来历的——commit `e65818a`（2026-08-20，在 upstream/main 上）：「ci: 内置 debug.keystore 固定签名（否则每次构建新密钥，用户无法覆盖安装升级）」；`gotchas` 坑 10 / `DEPENDENCIES.md` / `design.md` 三处都写着「debug.keystore 固定，否则覆盖安装失败」；（历史）当时的独立快照 workflow `build-snapshot.yml` 就是把仓库 keystore 拷进 `ANDROID_USER_HOME` 以保证 CI 与历史发布同签名；该 workflow 已于 0.14.5 删除（快照构建入口收敛为 `build-apk.yml` / `release.yml`），但这条规范本身不变。**用一次性证书区分「审计产物 ≠ 发布」这个目的，已由 `-source` 版本后缀与独立 artifact 名达成，用换签名来达成的代价是产物直接不可用。**
     **修法**：删除该步骤的 `rm` + `keytool -genkeypair`，直接使用入库的 keystore；新增产出侧断言——构建后用 apksigner 读 APK 的 `Signer #1 certificate SHA-256 digest`，必须等于固定指纹 `1dde9d980f62b715f29c20b421063f1d3d796085adf7de7e9907dd16d845bcbd`，否则拒出包并把该指纹写入 provenance。**判据放在产出侧而不是输入侧**：只有产出能证伪「keystore 文件在、构建却用了别的密钥」，同时也挡回「再现场生成一次性证书」那种改法。
     **顺带排除的陷阱**：`keytool -list -v` 的输出**不可作为机器判据**——它随 JVM 语言变化（本机 JDK 24 直接输出德语），且在这份 keystore 上会抛 `IllegalFormatConversionException: d != java.lang.String`（`printX509Cert`/`withWeakConstraint`）。故输入侧只查文件在场，指纹一律从 apksigner 读（输出稳定、不本地化）。
     **复验证据**：正证——用入库 keystore 签出的 APK 经 apksigner 读到的指纹 `1dde9d98…45bcbd` 与断言常量逐字相等；反证——本次 run 36296811274 的产物（一次性证书 `64fa4b7e…`）与旧版产物（`4642e0dc…`）代入同一断言均判红。
@@ -1352,5 +1352,474 @@
 241. **通道判据的权限面假阴性被当成「通道不存在」⇒ 误清隔离；且「通道不可用」不等于「旧特权任务已结束」（2026-10-02 review 复审第 1、2 点）**：
     **现象**：两件事一起出现——①本机（Shizuku 服务端 v13.6、服务端以 uid 0 在跑）上，真实存在的 root 通道被判成「不存在」，残留维护租约随之被**自动清掉**，隔离失效；②反向也被判错：租约明明已把特权工作派发出去，只要此刻通道看起来不可用，就被当成「那条工作已经结束」放行清除。
     **真因**：①旧判据把客户端权限面当成通道证据——`status.granted == false` 时**根本没尝试绑定**就直接返回「通道不存在」；而该机 `checkSelfPermission()` 有假阴性、`getUid()` 撤权后仍返回 0（坑 240 已实测），所以这条信号在两侧都会错，结论却是**肯定式**的 ABSENT ⇒ 不可逆处置做在了不可信信号上。②`RootMaintenanceLease` 的 `synchronized` 只覆盖**本进程**，它证明不了外部 su 子进程或 Shizuku UserService 已退出；「通道不可用」判的是**当下**，不能推出「已派发的那次工作已结束」。
-    **修法**：①判据改为**真绑定实证**：唯一入口 `ShizukuTransport.probeRootChannel`（原始信号经可注入的 `RootProbeEnv`，生产实现 `SystemRootProbeEnv`）——su 已授权 ⇒ AVAILABLE；ping 明确 false ⇒ 服务端不在；ping 抛异常 ⇒ 不判断；其余**真去绑定 UserService**（`ensureBound(..., requestPermission = false, ignoreGranted = true)`，不弹框、绕过不可靠的客户端权限预检）。纯函数 `decideNoRootChannel` **只认三类证明**（绑上且非 root uid / 未装 Shizuku 且无 su 二进制 / 服务端明确不在或协议明确不支持）⇒ ABSENT；**权限面被拒（`BindOutcome.DENIED`）只算 UNKNOWN**，其余也一律 UNKNOWN 保留隔离。②租约新增**派发证据**：`markDispatched(context, transport)` 与 `dispatched(context)`——su 在 `RootAccess.execPrivileged` 派发前写 `"su"`，Shizuku 在 `RpcLease.beforeRpc` 拿到租约后写 `"shizuku"`（写不进即置结果不明）。自动清算走纯函数 `autoClearAllowed`，四条件缺一不可（通道 ABSENT **且** `dispatched=false` **且** `unknown=false`（租约结果可信）**且** 无在飞维护），锁内再复核对 `!RootMaintenanceLease.dispatched(app)` 与 `!RootMaintenanceLease.unknown(app)`；已派发的一律只能由用户在明示「终止无法证明」后走 `forceClearMaintenanceLease` 清除（只在确有在飞维护时拒绝，清除后如实回 `terminationUnproven=true` 并写审计）——**用户确认不等于终止证明**。③审计留痕 `files/lease-clear-probe.log`（有界 8 KiB）每次判定记 `state/serverUid/decisive/forced/dispatched/allowed/detail`，`detail` 是原始信号（`installed=… suBinary=… ping=… bind=NOT_ATTEMPTED|BOUND|DENIED|… uid=…`），让「压根没尝试绑定」一眼可见。
+    **修法**：①判据改为**真绑定实证**：唯一入口 `ShizukuTransport.probeRootChannel`（原始信号经可注入的 `RootProbeEnv`，生产实现 `SystemRootProbeEnv`）——su 已授权 ⇒ AVAILABLE；ping 明确 false ⇒ 服务端不在；ping 抛异常 ⇒ 不判断；其余**真去绑定 UserService**（`ensureBound(..., requestPermission = false, ignoreGranted = true)`，不弹框、绕过不可靠的客户端权限预检）。纯函数 `decideNoRootChannel` **只认三类证明**（绑上且非 root uid / 未装 Shizuku 且无 su 二进制 / 服务端明确不在或协议明确不支持）⇒ ABSENT；**权限面被拒（`BindOutcome.DENIED`）只算 UNKNOWN**，其余也一律 UNKNOWN 保留隔离。②租约新增**派发证据**：`markDispatched(context, transport)` 与 `dispatched(context)`——su 在 `RootAccess.execPrivileged` 派发前写 `"su"`，Shizuku 在 `RpcLease.beforeRpc` 拿到租约后写 `"shizuku"`（写不进即置结果不明）。自动清算走纯函数 `autoClearAllowed`，四条件缺一不可（通道 ABSENT **且** `dispatched=false` **且** `unknown=false`（租约结果可信）**且** 无在飞维护）——「没有派发证据」≠「证明没有派发」（`markDispatched` 落盘失败只置 `unknown`、`restore()` 恢复别的进程留下的租约也一律置 `unknown`，此时 `dispatched=false` 可能正意味着「证据没落盘」⇒ 一律不清）；同理 `markDispatched` 落盘失败时**两条派发路径都拒绝派发**（`root-lease-evidence-unavailable`）。锁内再复核对 `!RootMaintenanceLease.dispatched(app)` 与 `!RootMaintenanceLease.unknown(app)`；已派发**或状态不可信**的一律只能由用户在明示「终止无法证明」后走 `forceClearMaintenanceLease` 清除（锁外先给话术、**锁内**再复核 `!RootExecutionFence.maintenanceActive`，`guard` 无默认值，不带复核的调用编译期就不可能；清除后如实回 `terminationUnproven = dispatched || leaseUnknown` 并写审计）——**用户确认不等于终止证明**。③审计留痕 `files/lease-clear-probe.log`（有界 8 KiB）每次判定记 `state/serverUid/decisive/forced/dispatched/leaseUnknown/allowed/detail`，`detail` 是原始信号（`installed=… suBinary=… ping=… bind=NOT_ATTEMPTED|BOUND|DENIED|… uid=…`），让「压根没尝试绑定」一眼可见。
     **复验**：`RootChannelDecisionTest` 真值表（含权限面被拒/绑定未发生一律 UNKNOWN 的反证）与 `RootProbeEnv` 注入式离线用例；`OwnershipLeaseSettlementFixtureTest` 覆盖清算前提与派发证据接线。真机/模拟器上「已授权但自检报 denied」的机器不得再清租约、「已派发」租约不得被自动清算，两条外验待补。
+
+242. **入口临界区里做「真绑定探测」会把状态查询挡住最长 15s（2026-10-03，issue #319；#314 复审 D 项；方案与用例来自 PR #322 @Ni-ShuWu）**：
+    **现象**：存在残留租约时，`RootOwnershipJobs.start()` 的入口清算（`clearLeaseWhenNoRootChannel` → `probeRootChannel`，真绑定预算 `BIND_TOTAL_MS = 15_000`）会让同一把锁上的 `RootOwnershipJobs.state()`（被 `AndroidBridge.rootAccessState()` / `RootGrant.state()` 频繁轮询）**被挡最长约 15 秒** ⇒ 前台 root 状态查询假死（真机观测到的「t = 15s」）。
+    **真因**：锁职能混用——`lock` 同时守「状态字段」与「入口清算（含 binder 往返）」✗ ⇒ 一次 binder 交互把读路径一起堵死。
+    **修法（拆锁，且不削弱原子性）**：状态锁 `lock` 只守字段（`state()` 只取它）；新增 `entryLock` 串行化「清算探测 → 复核 → 置 `running`」；`running` 的置位/复位仍落在状态锁内（可见性不丢）；**清算的原子性仍由租约锁内的 `guard` 保证**（探测在哪个锁外执行不影响那一条）。
+    **复验**：`OwnershipLeaseSettlementFixtureTest.rootStatusReadIsNotBlockedByTheEntryProbe`（逐块扫描：探测不得落在任何 `synchronized(lock)` 区间内，且 `state()` 不得出现 `entryLock`）＋既有入口临界区顺序用例；全量 Kotlin **999** 例通过。
+
+243. **快照面板修复把布局树当成 DOM 树，测试又省略同一层包装节点（2026-10-03，issue #288）**：
+    **现象**：华为 SGT-AL10 的会话顶部灰圆入口打开快照管理，0.14.2/0.14.3 均被会话代码块盖住；0.14.3 已包含抬升补丁仍不生效。
+    **真因**：公开 0.14.3 ARM64 APK 的 renderer 给每个 `renderSlot` 常驻包 `div[data-slot]`、`display:contents`。该样式只消除布局盒，**不消除 DOM 节点**；旧 observer 却要求 header 的直接父节点是 `div[data-phase]`，配套 CSS 又用 `div[data-phase] > header`，两处均不匹配。单测手写 header 直接插根节点，省略真实包装层，故同一个错误假设能全绿通过。面板还直接挂在 header actions 内；旧内核的 `container-type:inline-size` 隐含 layout containment，标题行成为 fixed 包含块和堆叠上下文，单纯抬 z-index 仍会留下只有标题行高度的遮罩。
+    **修法**：`SnapshotPanelsObserver` 严格认领 `conversation.header` / `conversation.session.header` / `conversation.session.header.actions` 三层插槽，抬升真实 header；仅给承载该面板的直接 titleRow 租赁解除包含的 class（`container-type:normal; contain:none`）。两个 class 按元素共享租约，关闭、移除、重分类和模块重载均释放本实例所有权；不搬 React 节点，不改正文 query container。测试 fixture 使用完整 renderer 包装链，并覆盖重分类、titleRow 替换、diff 与租约恢复。
+    **复验证据**：公开 APK 解包确认补丁确实入包；修前真实 wrapper + 旧包含约束模拟下，窄/宽两方向 9/9 控件被盖，正常坐标点击计数 0，直接 DOM `.click()` 却计数 1。修后隔离浏览器六组（现代/旧包含约束模拟/无 container-type × 窄/宽）均验证面板和 diff 可点击、四角遮罩属于面板、完整视口尺寸、缩短视口模拟键盘及关闭后恢复；UI 全量 457 例（其中 snapshot 26 例）、typecheck/build 通过。判别力反证：同一探针在公开 0.14.3 的**原样**入包 bundle 上判红（旧包只有 header 抬升，既无 `dsh-mobile-snapshot-title-row-uncontained`，也没有带 `data-slot` 的代码级选择器），说明「补丁在包里」不能只看 `dsh-mobile-snapshot-header-raised` 这个名字。临时证据在 `.deploy-tmp/issue-288-investigation/`。本轮用户明确选择交付 APK 与离线证据，**没有设备三层验收结论**；旧包含约束模拟不冒充华为内核实测。
+
+244. **模板字面量里的「未知转义」会吞掉反斜杠 ⇒ 页面侧 failedIds 恒空（2026-10-05 真机实锤，已修）**：
+    **现象**：客户端插件装配失败后，真机 boot-diag 里的契约行恒为 `failedIds=- / failedCount=0`——页面明明渲染了失败条目 `@dsh-android/dsh-client-bad-probe`，壳侧却点不出任何 id，外科拔除因此永远走不到（只剩整份回滚或如实拒绝）。
+    **真因**：`BOOT_WATCHDOG_SCRIPT` 是**模板字面量**；模板体内的单反斜杠 `\s` 属于 JS 的**未知转义**，求值时反斜杠被**丢掉**，页面实收的是 `/s+/g` 与 `/^[@A-Za-z0-9][@A-Za-z0-9._/-]*$/` 这类退化正则。于是 id 归一化变成「把 s 折叠成空格」，判定形状变成「不许出现字母 s」——`@dsh-android/dsh-client-bad-probe` 被改写成 `@dh-android/dh-client-bad-probe`，`ID_SHAPE` 全不匹配，候选集空 ⇒ `failedIds=-`。**这一族还有前科**：同一模板里单反斜杠 `\n` 曾在模块求值时变成真换行，把字符串字面量劈成两行、注入脚本整块 SyntaxError（`dsh-host-web-compat/lib/index.js:113-116` 已记）。
+    **更关键的一层（为什么单测全绿而真机红）**：原有 `watchdogBody()` 用手写的解码表把源码文本「解一层转义」，而手写表对**未知转义**的处理是**保留**反斜杠，JS 模板求值却是**丢掉**——即测试复现的字节比页面实际收到的更宽容，测的根本不是页面拿到的那份脚本。任何靠手写表复现模板求值的测试都有同一个盲区。
+    **修法**：① 源码内一律写双反斜杠（`\\s` 等），让求值后页面拿到 `\s`；② 测试改用 `new Function(模板串片段 + '; return BOOT_WATCHDOG_SCRIPT')` 让**引擎自己的语义**求值取页面真实字节（`dsh-host-web-compat/scripts/boot-watchdog.test.mjs:25-37`），不再维护手写解码表。
+    **复验证据**：真机 boot-diag 行 `failedIds=@dsh-android/dsh-client-bad-probe / failedCount=1`（修前为 `-` / `0`）；页面侧回归用例 `dsh-host-web-compat/scripts/boot-watchdog.test.mjs:845-863`（从 DOM 读出真实 id，取到空数组即转义退化）；负向对照：把任一处改回单反斜杠 ⇒ 3 条测试判红。设备侧三层判据见 `scripts/verify-client-plugin-fail-recovery.mjs` 判据 1、5。
+
+245. **publishReady 旧判据把「失败页」当「已就绪」⇒ stall 诊断永不触发 + 重试预算被每拍清零（2026-10-05 设备实测，已修）**：
+    **现象**：客户端插件失败后页面停在上游 "Failed to load plugins"，而壳侧同时看到两条互相矛盾的证据——① 块L 的 shell-stall 诊断（页面 40s 未就绪）**从不出现**；② 页面的 `[dsh-boot-ready]` 早在约 500ms 就发了。设备实测（`boot-diag.log`）：`page-ready` 的 `waitedMs` 仅 **1122~1371ms**，而真首帧远晚于此。
+    **真因**：上游 `BootPage` **构造即在 `#root` 下挂 `[data-dsh-boot]`**，而旧的 `rendered()` 只判「`#root` 有子节点」（`dsh-host-web-compat/lib/index.js:146-155`）⇒ 启动页/失败页都满足。于是 `publishReady()` 在启动页在场时就发了就绪行。两个连带后果：① 壳侧 L-1 把该 epoch 标成「已就绪」并**停止** stall 计时 ⇒ 40s 浮层诊断实际永不触发（双重静音）；② `pageRecovery.pageReady()` 每次被调用都**清零 `loadErrorRetryUsed`** ⇒ 重试预算形同不存在。
+    **修法**：就绪判据改为 `rendered() && !bootPagePresent()`，其中 `bootPagePresent()` = `#root` 内仍有 `[data-dsh-boot]`（`dsh-host-web-compat/lib/index.js:286-292`，调用点 `:335`）。`pendingBoot()` 保留（`if(rendered())return false` 仍成立），所以失败页**刻意不**触发 40s 浮层——失败页有自己的出口：契约行 → 壳侧回引导页。
+    **副作用（壳侧据此复核 stall 计时窗口）**：健康启动的 ready 时间点从约 500ms **后移**到真首帧之后，壳侧 stall 计时窗口不再被过早的 ready 提前终止。
+    **壳侧配套约束（同一个真因的直接推论）**：正因为旧 ready 会被反复发出并**清零重试预算**，壳侧**不得复用 `enginePageFailed` + `claimLoadErrorRetry()`** 来处理这条失败（两者叠加会形成重载环：失败页 → 重试预算被清零 → 又能自动重载 → 又失败）。故客户端插件失败走**独立的 `clientPluginTreeFailed` latch**（`EngineStartFlow.kt:301`、`:317`），并在 `showWeb()`（`MainActivity.kt:252`）、`engineMonitorRunnable`（`EngineStartFlow.kt:52`）、`freezeRunnable`（`EngineStartFlow.kt:118`）三处让路——坏页面不再被前台监控或冻结看门狗弹回。
+    **复验证据**：页面侧正反用例（失败页发 fail 行且不发 ready / 健康渲染发 ready 且不发 fail / 失败页不得被判 pending）在 `dsh-host-web-compat/scripts/boot-watchdog.test.mjs:552-790`；设备侧判据 3、4、6 见 `scripts/verify-client-plugin-fail-recovery.mjs`（引导页可见 dump + 文档导航次数 == 1 的有界性反证 + 健康启动回归）。
+
+246. **`gh workflow run -f` 不展开 @file ⇒ 发布说明资产变成字面路径（2026-10-05 发 0.14.4 实锤）**：
+    **现象**：用 `gh workflow run release -R kelai141/dsh-mobile-apk -f version=0.14.4 -f notes=@release/v0.14.4/notes.md` 派发 0.14.4 发布，**发布链成功、12 件资产齐全、CI 全绿**，但产出的 notes.md 资产与 Release body 的内容是 **26 字节的字面字符串** `@release/v0.14.4/notes.md`，而不是 **7767 字节**的发布说明正文。对照 v0.14.3 的 notes 正文以 `# v0.14.3 发布说明 …` 开头，可知**不是历史惯例，是本轮引入的回归**。
+    **真因**：`gh` 的 `-f/--raw-field` 与 `-F/--field` **语义不同**——`-F` 会展开 `@file`（gh 的 @ 语法），`-f` 是 **raw**，把值**原样当字符串**传递、**不展开** `@`。`gh workflow run --help` 明文写着这一条（`-F, --field … respecting @ syntax` vs `-f, --raw-field …`；gh 版本 2.101.0），但按既有命令字面照抄就会踩中。**为什么危险**：所有自动门禁全绿——发布链 exit 0、资产数量与大小正常、签名断言通过、MANIFEST 生成成功、双 ABI 快照与 APK 都在——**没有任何一条门禁校验「notes 资产的内容是否像一份发布说明」**，属「门禁全绿但产物是坏的」形态，只能靠发布后人工核对资产内容发现。
+    **修法**：改用 `gh workflow run … -F notes=@release/v<版本>/notes.md`（`-F` 才展开 @file）；并在发布后**下载 notes.md 资产核对首行**是否为 `# v<版本> 发布说明`。**建议（只登记，未开 issue）**：① 把「下载 notes.md 资产并核对首行」列入**发布后动作清单**——发布链自身不校验 notes 内容，这是当前唯一防线；② 可另立 issue 提出「发布链加一条 notes 非空/首行断言」的门禁改进（开不开由 Lead/用户决定）。
+    **复验证据**：已**删除坏 draft**，改用 `-F` 重派（run **37281961398**），核对 notes 资产为 **7767 字节正文**（Lead 已执行）；本条待核结论以该次 run 的资产首行为准。
+
+
+
+247. **WebView provider 包版本不等于 Chromium 版本，语法门诊断会假报不兼容（2026-10-05 源码核实，#312 关联）**：
+    **现象**：华为 `com.huawei.webview` 的 provider `versionName` 可为 `14.0.0.370`，旧诊断直接解析首段 `14` 并与 Chromium 94 比较，于是 `syntax_floor_ok=false`；这个字段没有测到实际 JS 引擎版本，升级后「重新连接中」消失也不能证明厂商版本 15 就等于 Chromium 115。
+    **修法**：provider 包名/版本单独记录；Chromium 版本从实际 WebView User-Agent 的 `Chrome/<四段版本>` 读取。读不到时 `syntax_floor_ok=unknown`，不要把 provider 版本当 Chromium 版本。UA-CH 元数据也不得用 vendor package version 伪造。
+    **回归判据**：`WebViewShimTest.chromiumVersionComesFromTheEngineUserAgentNotVendorPackageVersion` 覆盖 Huawei 风格 provider 版本、实际 Chrome token 与 94 以下/以上/未知三态；还需在 MuMu 与报告设备验证 UA 版本和真实渲染表现，测试未跑前不宣称 #312 已解决。
+
+248. **snapshot 工厂清单以外的未知 DSH_HOME 同名项会被事务替换（2026-10-05 源码核实）**：
+    **现象**：`SnapshotTransaction.swap()` 虽然按 `preservedNames` 保护已知数据、对 `profiles` 做专门合并，但其它 staged `.dsh/<name>` 一律进入 `replaceEntry()`。未来工厂快照新增一个与用户未知项同名的文件/目录，就会覆盖用户数据；live-only 未碰巧冲突的未知项则自然幸存，旧测试因此没覆盖此形态。
+    **修法**：对已存在且不在当前工厂直系项清单内的路径采用保留语义；stage 有而 live 无仍 seed-if-absent。工厂资产新增直系项须核实归属并同步 `SnapshotUserData.factorySnapshotNames`，不能通过扩大通用覆盖面实现升级。
+    **回归判据**：`SnapshotTransactionTest.preservesUnknownDshDataOnFactoryCollisionAndSeedsMissingEntries` 同时构造未知同名冲突与缺项 seed；还需跑事务全套 Kotlin 用例与覆盖升级设备验收。
+249. **`android_vdisplay_input` 回执 schema 必须覆盖 `callVdOp` 成功字段（0.14.4 本地用户反馈）**：
+    **现象**：tap 等输入动作已由设备执行，工具结果却因 `additionalProperties: false` 拒绝；失败样本在 `issue存图/阅后即焚.txt`，属于本地反馈回归，不据此声称存在对应 GitHub issue。
+    **真因**：`android_vdisplay_create`、`android_vdisplay_destroy` 与 `android_vdisplay_input` 共用 `callVdOp`，它成功时始终附加 `state`；输入工具 schema 漏声明 `state`。壳侧 `vdInput` 正常回执同时有 `verb`、`screenId`、`displayId`，都必须在严格 schema 中逐一声明，不能开放额外属性。
+    **修法与回归**：schema 保持 `additionalProperties: false`，逐字段覆盖正常和失败形态；工具测试检查正常回执的 `state/verb/screenId/displayId` 与 schema 一致，并检查本地拒绝及控制通道异常也通过各自 schema。检查 web/headless profile 注入共用镜像插件 lib，避免旧副本掩盖修复。
+
+250. **启动期逐批 activation 让 cold-boot compose 次数超过预算（0.14.4 MuMu 实测，0.14.5 修复待设备复验）**：
+    **现象**：`check-boot-budget.mjs --require-real` 测到 C3 `compose calls=8`，真实 `[perf] compose` 行的 records 从 0 逐批增至 68；不是探针重复计数，也不是多实例。
+    **真因**：同一个 `ClientModuleRegistry` 在 loader 逐批 activation 后多次 `flush.changed → compose`。上游 `dsh/` 是只读 checkout，不能直接改。
+    **修法**：engine `combo-probe-P1` 在现有 `loader.await()` settle 屏障前暂存启动期 dirty Fiber，保留构造期同 shape/rev 的空 graph，并在 Web connection ready continuation 前发布完整 graph；启动期最多两次 compose（既有 rows 的同步 flush + settle flush），settle 后 add/remove/HMR 保持即时语义。TOTAL 每次 compose 同步输出同一监视器的累计值；phase 诊断用四阶段 allowlist Map 聚合，首条 phase 记录后固定 250ms 收口，分别报告 wall time、observations 与 forwarded callbacks；壳 `LogCollector` 暂存 LISTEN 前真实 TOTAL，LISTEN 行关联该值，未知仍为 -1。
+    **回归**：`scripts/patches/tests/combo-probe-p1.test.mjs` 覆盖空图、构造期 0 次 compose、settle 前多批合并、ready 顺序、settle 后运行期与 HMR；需在集成 0.14.5 APK 上再跑 C1-C6 真机门禁，不能把夹具通过写作设备通过。
+
+251. **冷启动门禁读取过早的 event-loop 快照（2026-10-05 实机日志核对，解析器已改为取末条）**：
+    **现象**：MuMu 0.14.5 的真实日志先输出 `loopP99Ms=-1 loopSamples=0`，后续 debounce 收口再输出 `245.1/20`；解析器分开用 `.exec()` 取首个值，于是 C4 误判成探针零样本，漏掉真实的超预算读数。更早的解析器还曾因拒绝负数而把首条哨兵误报为字段缺失。
+    **修法**：只从完整 `[perf] TOTAL` 行中成对读取 `loopP99Ms` 与 `loopSamples`，并使用最后一条；负哨兵仍要明确判 FAIL，末条 `245.1/20` 则因 p99 超过 100ms 预算而判 FAIL。不得改预算或把结果降级为 SKIP。
+    **回归**：`node scripts/check-boot-budget.mjs --self-test` 覆盖首条 `-1/0`、末条 `245.1/20`、末条仍为 `-1/0` 三种情况。补丁改变后从当前 registry 重建对应 ABI 快照，再构建 APK、覆盖安装并重新采集日志；旧设备日志和旧 snapshot stage 不能证明新快照行为。
+
+252. **Safe Mode 将备份路径与 realpath 后的 autoDir 作词法比较，导致 symlink 仓库无法恢复（2026-10-05 回归修复）**：
+    **现象**：`autoDir`/`DSH_UNDO_ROOT` 指向目录 symlink 时，Safe Mode `on` 能创建状态和备份，但 `off` 将保存的 symlink 路径目录与 realpath 后的根目录直接比较，恢复被拒绝。
+    **修法**：先 realpath 备份的父目录，与 autoDir 的 realpath 比较；要求叶文件是普通文件且不是 symlink，再返回根目录下规范化后的文件路径。父目录别名可用，备份本身的 symlink 与越界目录仍拒绝。
+    **复验证据**：`node --test vendor/dsh-undo-savepoint/test/safe-mode-transaction.test.mjs` 与 `node --test scripts/patches/tests/safe-mode-transaction.test.mjs` 各覆盖 symlink on→off 恢复和伪造越界备份拒绝；两份源码、测试和补丁模板需保持 APK 子仓逐字节镜像。
+
+
+253. **复用旧 snapshot 会让 APK 缺少当前 engine 探针，源码门禁通过仍不能证明产物新鲜（2026-10-06 独立产物核验）**：
+    **现象**：0.14.5 菜单修复 APK 与设备指纹一致，但解包和设备中的 `dsh-client-modules/lib/index.js` 均没有新 phase 探针；C4 仍为 308.3ms/22 samples，FAIL。
+    **真因**：`build-apk.mjs --snapshot` 复用原始快照，只执行后续 vendor 补丁与插件注入，不重新应用 engine 补丁；旧门禁检查当前源码和 profile，漏检归档中的实际模块。
+    **修法**：engine 补丁变更后重新执行 `build-snapshot-013.mjs`。度量门禁读取快照实际模块并检查 phase allowlist、Map、固定窗口、记录函数和输出字段；旧 P1、缺目标、坏 tar 与缺输出均拒绝。
+    **复验证据**：双仓微型 tar CLI 回归通过；旧原始快照严格检查 exit 1，当前源重建快照严格检查 exit 0。最终 APK 和设备的新探针验收仍须独立完成，mtime、版本号与快照指纹一致不能替代探针内容检查。
+
+
+254. **Android 模型菜单未登记返回层，系统 Back 会结束 Activity（2026-10-06 模拟器复现）**：
+    **现象**：模型选择菜单已不透明，但竖屏 MuMu 16416 用真实 `KEYCODE_BACK` 后直接回到 Launcher；WebView target 同时销毁。
+    **真因**：上游 ModelSelect 的菜单通过 React portal 挂在 body，既无 slash/@ 菜单的 `data-trigger-menu`，也不是附件菜单。原 BackStackSignal 漏掉这一层，壳侧在无其他返回层时结束 Activity。复用普通菜单的 pointerdown 关闭路径也不成立：ModelSelect 使用 mousedown 外部关闭及自己的 Escape 分层逻辑。
+    **修法**：只识别 ComposerPopupGuard 为展开且 aria-controls 关联的 Android ModelSelect 加的 `data-dsh-android-model-menu`，登记 `model-menu`。返回时向真实 portal 发送可取消并冒泡的 Escape，让上游先退模型子列表、再关根菜单并恢复焦点。上游 preventDefault 会让 dispatchEvent 返回 false，这表示事件已处理，不能解释为返回未消费。
+    **复验证据**：新增单测覆盖标记晚到、preventDefault 仍消费、子列表逐级返回、宽屏不依赖窄屏标记、其他菜单不误认领。responsive 全量 463/463、tsc/build 通过；src/tests/lib 已 robocopy 镜像，双仓镜像门禁 SKIP=0。MuMu 16416 热推后真实 ADB tap/Back 验证根菜单关闭、子列表先退一级再关闭、MainActivity 保持前台、模型未变；CDP 确认层信号与不透明背景及关闭后的标记清理，整页 39/39 通过。证据 `.deploy-tmp/refactor/0.14.5-phase-device/portrait-back-menu-*.json/.png` 和 `verify-webview-menu-back-portrait.log`。横屏返回测试及最终入包验收仍待完成；热推不代表修复已进入当前 APK。
+
+
+255. **把 compose 时长当作 C4 根因会漏掉 Loader 扫描和自动补给投影（2026-10-06 MuMu 实测）**：
+    **现象**：compose仅数毫秒，C3已收敛为2，但真实C4仍反复超过100ms。
+    **真因**：client/typert每个dirty名称重新遍历Loader；nearestPackage与resolveMeta复读同一manifest；本方模型能力初次投影、离线目录解析和最终fresh签名在同一事件循环turn堆叠。constructor首TOTAL样本为0，deferred末尾同步TOTAL尚未采到该flush阻塞，故phase wall time本身不是C4 p99。
+    **修法与证据**：同步flush临时索引、当前manifest复用及自动pass分段yield；同步错误回调后重建索引、异步typert完成后live复验、CAS与最新签名重读保留。定量计时、五轮真预算和最终APK边界统一见 `RUNTIME-PATCHES.md` §7.6，不把SKIP或诊断profile当作绿。
+256. **不能把 `actions/checkout@v4` 的 LFS 下载推断成历史全量，也不能用对象清单估算 runner 流量（2026-10-07 复核官方实现）**：
+    **旧结论撤回**：`lfs: true` 并不等价于 `git lfs fetch --all`。checkout v4 的 `git-source-provider.ts` 调用 `lfsFetch(checkoutInfo.startPoint || ref)`；`git-command-manager.ts` 执行 `git lfs fetch origin <ref>`。`fetch-depth: 0` 扩展普通 Git 历史，不会把此命令改成拉取全部历史 LFS 对象。`git lfs ls-files --all` 可列出历史 pointer，但不能证明 CI 实际下载了对应对象或其流量。
+    **修法**：CI checkout 使用 `lfs: false`，快照 job 只按 ABI `git lfs pull --include="base/base-usr-<abi>.tar.xz,base/base-dsh.tar.xz"`，并以 pointer 文件哈希为缓存键；不消费底座归档的 release job 不拉 LFS。这样减少的是无用 ABI 与重复 job 的下载次数；具体节省量以 runner 网络日志核实，不能沿用旧文档按历史对象大小估算的数字。
+    **证据**：[checkout v4 git-command-manager.ts](https://github.com/actions/checkout/blob/v4/src/git-command-manager.ts#L352-L357)、[git-source-provider.ts](https://github.com/actions/checkout/blob/v4/src/git-source-provider.ts#L186-L193)。
+    **验证边界**：本地 workflow/YAML 与本地守卫测试不等于 GitHub runner 流量测量；真实 runner 下载量尚未以日志量化。
+
+257. **自动失败恢复必须隔离插件，不能从用户 patch 物理摘除原块（0.14.5 SafeMode D4）**：
+    **真因**：`PluginMounts.pull` 过去删除命中条目的整个 insert 子块，会丢掉用户配置和未知字段；恢复能力把“本次不加载”误做成“永久删除配置”。
+    **修法**：自动路径唯一命中后保留原块和所有字段，在顶层追加同 id/name 的 Cordis `disabled: true` override；歧义、无 id 或非 insert 命中一律不写。既有重启流程负责应用状态，用户可通过恢复 patch/编辑禁用位重新启用。
+    **判红证据**：`PluginMountsTest` 覆盖原文前缀/自定义字段保留、追加禁用、重复调用幂等、顶层覆盖与重复 id 拒绝；需要 APK fresh JVM suite 验证。
+258. **Safe Mode 不能用 publisher namespace 或包名代替本版本装配身份（0.14.5 D5）**：
+    **真因**：用户可以自行装配 `@deepseek-ai/*` 官方包，甚至创建与产品同名但不同 loader id 的条目。仅按前缀/名字保护，会把用户条目误判成 Hard；Kotlin、vendor core、generated engine snippets 与 emergency CLI 也曾出现策略漂移。
+    **修法**：构建期 `build-hard-manifest.mjs` 从最终注入 snapshot tar 抽取 schema 2 exact `{id,name}` identities，并单独记录来自打包 profile 的 `profileEntries` 子集；APK asset 的 fingerprint 绑定该 tar SHA-256，避免把 manifest 自身计入 tar 形成 hash 循环。online sidecar 由验证过的 stage `usr` 中 dsh-base/web-app patch 加当前 APK `profileEntries` 生成；完整归档出现 `home/` 时必须有可解析的 factory profile，并将其 exact identities 合并，home 整体缺席才允许 usr-only fallback。Stage HOME 仅作为经过 archive SHA 验证的 factory 输入，永不替换 live HOME；live HOME、live patch 与 prior sidecar profile identities 都不建立新归属。marker/.online-snapshot 必须授权 archive/base 双 fingerprint；SafeMode、UndoGate、vendor、CLI 都只按 exact pair 判断。缺失、损坏、未知/不兼容 marker、swap 中断或 fingerprint 不匹配时回执归属无法核实，不修改用户数据。
+    **判红证据**：`build-hard-manifest.test.mjs` 覆盖 exact identity、profile source subset 与缺 id 判红；`safe-mode-policy.yml` golden fixture 区分同名不同 id；Node transaction fixture 检查缺 manifest 时 patch 原文不变；S1 门禁 fixture 先构造带旧宽松谓词的 marker，再断言 `--check` 红、`--apply` 修到 exact pair 后转绿。
+259. **Soft mount digest 不能由单次探活或 Service 重入确认 Stable（0.14.5 Soft lifecycle）**：
+    **真因**：一次 HTTP 200、watchdog healthy 或 service epoch 都不等于插件组合跨冷启动可用；直接写 last-healthy 会把一次启动观察误当回归基线。
+    **修法**：Soft manifest 先记 Candidate；同一 patch digest 必须在两次 `EngineManager.startEngine` 实际 spawn（`lastStartAttemptAt` 只在成功 spawn 后赋值）上分别通过 authenticated `pluginInventory/list`、每个 Hard identity 在 inventory 中存在、当前 enabled 主 Loader 与 enabled preset fibers 为 `active`、`session/list` 与 `session/modelCatalog` 结构检查，且两次在 30 秒至 7 天窗口内，才写 Stable。合法 disabled Hard row 只要求可见，不要求 active。探活限制每次 spawn 一次、失败后至少 60 秒再试。`modelCatalog` 仅证明 API 和目录结构可读；不发真实模型请求，不能据此声称每个 provider 已完成执行验证。缺少 roster/能力证据时保持 Candidate。
+    **判红证据**：`PluginMountsTest` 固定同 spawn 不得 promote、两次不同 spawn 才 promote、digest/window 改变重置候选；`EngineProbeTest` 固定缺失 Hard identity、pending enabled preset、session 或 modelCatalog 缺失/异常时不通过，并接受合法 disabled Hard row。此前执行记录为 fresh JVM 1104 tests / 0 failures / 2 skips（2026-10-07 11:16+08:00）；本轮新增/改动尚未由该旧结果验证，需由 update agent 统一 fresh rerun。
+
+260. **交付前的"夹具随版"门禁会因 registry 文本变化而变红——它比对的是全文 SHA，不是语义（0.14.5）**：
+    **现象**：`node scripts/check-release-gates.mjs --run` 在 `check-patch-fixtures.mjs` 中止组装，报
+    「夹具捕获登记身份/补丁集与当前合同不符：必须从本代真实构建产物重新捕获」；但 `engine`、`sourceCommit`、
+    `overlaySha256`、34 个夹具目录与 18 个 provenance tarball 的哈希**全部对得上真实产物**。
+    **真因**：`fixtures/manifest.json` 的 `capture.registrySha256` 记录的是 `scripts/patches/registry.json`
+    的**整文件 SHA-256**。本轮把 S1/S2 两条补丁的 `summary` 与 `marker` 从"前缀白名单"口径改成"exact
+    {id,name} 权属"口径，registry 文本一变，摘要就与记录不符。而 `registry.json` 同时是**镜像面**文件
+    （`check-patch-mirror.mjs` 的 MIRROR_FILES 逐字节比对），两仓必须同步改文本 ⇒ 两侧摘要一起过期。
+    **为什么不是"重新捕获夹具"**：该报错文案会把人引向重跑一次捕获，但夹具本身是**上游包原样文件**
+    （`inputKind: published-tarball`，34 个目录没有一个与 S1/S2 的 vendor 补丁相关）。真正过期的只有这一枚
+    摘要。重跑捕获反而会在没有新上游产物时制造不可复核的夹具。
+    **修法**：先逐项复核其余捕获字段确实是新的（`sourceCommit` 对齐 `contract.baseline` 0.2.0-rc.2、
+    `overlaySha256` 等于当前 `scripts/snapshot-config/engine-overlay.json`、18 个 tarball 的 SHA-256
+    逐个等于 `.deploy-tmp/engine-overlay/<name>.tgz` 实算值），**确认夹具文件本身没动**之后，才把
+    `capture.registrySha256` 重写为当前 `registry.json` 的实算 SHA；两仓 manifest 逐字节同步。
+    **判红证据**：改前 `check-patch-fixtures.mjs` exit 1；改后两仓均 `PATCH-FIXTURES CHECK PASSED
+    （夹具代 0.2.0-rc.2）`，且 `check-patch-mirror.mjs` 仍 SKIP=0。**不要把这一步当成"改门禁放行"**——
+    摘要不是判据放宽，是记录刷新；一旦有夹具**文件**真变了，`meta.fileSha256` 会独立判红。
+
+261. **补丁镜像门禁把两份"整文件比字节"的补丁测试也镜像了——里面的相对路径必须布局无关（0.14.5）**：
+    **现象**：`check-release-gates.mjs --run` 报 `CHECK-PATCH-TEST-MANIFEST FAILED：出现未声明的补丁回归失败（1 项）`，点名
+    `scripts/patches/tests/safe-mode-policy.test.mjs`；协调仓跑同一文件 6/6 全绿，APK 仓跑却是 `tests 1 / pass 0 / fail 1`。
+    **真因**：该文件是**双仓逐字节镜像**（`check-patch-mirror.mjs` 按递归 tests/ 比对），但它用写死的三段相对路径同时指两仓：
+    `join(HERE, '../../../dsh-mobile-apk/vendor/...')` 与 `join(HERE, '../../../vendor/...')`。协调仓两处都在 ⇒ `length === 2`；
+    APK 仓只有后者在（它自己就是 APK 仓，上面没有第二个 `dsh-mobile-apk/`）⇒ `length === 1` ⇒ 加载期 `throw`。
+    **后果比"少一个断言"更糟**：模块顶层抛出会让**整个文件**被判失败，于是 APK 侧那一份 vendor 实现**一条都没跑**——
+    镜像门禁看得见文件在、看得见字节一致，唯独看不见它其实什么都没验证。
+    **修法**：改成从 `HERE` **向上逐层探测**（6 层内找 `vendor/...` 与 `dsh-mobile-apk/vendor/...`，去重），
+    找不到任何实现在场才判红；找到两份时额外比对**内容一致**（把"两仓必须同源"变成可判红断言，而不是假设）。
+    S1 陈旧 marker 用例里的同款写死路径也一并改为用探测到的 `vendorCores[0]`。
+    **判红证据**：修前 APK 侧 `fail 1`、协调仓 `pass 6`；修后**两仓均 `pass 6 / fail 0`**，且镜像仍逐字节一致。
+    **通用教训**：双仓镜像的测试里，凡是 `../../../` 这种**依赖自己在第几层**的路径都是定时炸弹——
+    写测试时先问"同一份文件放到另一个仓的同一相对位置，这条路径还指得对吗"。
+
+262. **GitHub Actions 残余清理：artifact 是「按 run 分桶 + 有保留期」，cache 是「按 key 分代」，两者判据完全不同（0.14.5）**：
+    **实测存量**（清理前）：50 个 artifacts / 13.52 GB；62 个 caches / 1344 MB；42 个 release / 19.6 GB assets。
+    **判据（不要混用）**：
+    - **artifact**：与**某一次 workflow run** 绑定。同一个 run 里各 job 的产物天然同寿；
+      重新发布同一版本会再产一份 ⇒ 判据是「这个 run 的结论有没有被同版本的后一次成功 run 取代」，不是「文件多老」。
+      保留期由仓库设置决定（本仓 `actions_retention_days` 为 null ⇒ 用 GitHub 默认；实测三个月前的 0.12.x
+      artifacts **仍是 `expired=false`**，所以「等它自己过期」在这个仓不成立）。
+    - **cache**：与 **key** 绑定，不是与 run 绑定。Gradle 的 `setup-gradle@v4` 会为每个 commit 生成一组
+      `gradle-transforms-v1-<hash>` / `gradle-home-v1|...|<sha>` 键；**同一个 key 只有一份**，新 run 命中即复用。
+      但 **content-keyed 的三种 key 必须留下**：`gradle-wrapper-zips-v1-<hash>`、
+      `gradle-generated-gradle-jars-v1-<hash>`、`gradle-dependencies-v1-<hash>` —— 它们的 hash 来自**文件内容**
+      而非 commit，跨 commit 长期复用，删掉等于让下一次 CI 重新下载（本仓实测这三条共 **336 MB**）。
+    **删除动作**：`gh api --method DELETE repos/<owner>/<repo>/actions/artifacts/<id>`、
+    `gh cache delete <id> -R <repo>`、`gh api --method DELETE repos/<owner>/<repo>/releases/<id>`。
+    实测有约 5% 的请求瞬时失败（`DEL FAIL`），**必须重试收口**，不要当成"已被引用/不可删"。
+    **workflow 本身删不掉**：REST 的 `DELETE /repos/{o}/{r}/actions/workflows/{id}` **不存在**（实测 404）。
+    线上残留已删文件的 workflow 只能 `gh workflow disable`（状态变 `disabled_manually`）；
+    **要真正从 Actions 列表消失，必须删掉该 workflow 文件本身那次 commit 之前的版本**——
+    换句话说：workflow 条目由**默认分支上是否还有该文件**决定，本地 `git rm` 只有 push 后才生效。
+    ⇒ 本轮 `build-snapshot.yml` 已本地删除但未推送，线上 `Snapshot Build` 仍在列表里，只能先 disable。
+    **判红/证据**：清理前后 raw JSON 快照（`.deploy-tmp/actions-cleanup/*.json`）；
+    终态 13 artifacts / 1.74 GB（-87%）、2 caches / 4.84 MB、42 releases（0 draft）；
+    删除全程未触碰任何 release asset（`v0.14.4` 仍 12 assets / 586 MB）。
+
+263. **同一个 PowerShell 脚本里，`ConvertFrom-Json` 的字段是 DateTime，`[string]` 一转就变成美式格式——判据和动作会对不上（0.14.5，本轮自伤）**：
+    **现象**：清 cache 时我先用**计划脚本**算出「保留 13 个 / 删除 49 个」，再用**执行脚本**动手；
+    执行完打印 `DELETE 62 caches / 1,344 MB`，与计划的 49 个不符，我却在当时当成"计划过时"没深究。
+    **真因**：两个脚本用了**不同的比较方式**：
+    - 计划脚本：`$_.createdAt -ge '2026-10-04'`（`$_.createdAt` 仍是 **DateTime**，PS 把右侧字符串强转成 DateTime ⇒ 比较正确）；
+    - 执行脚本：`$created = [string]$x.createdAt; if ($created -lt '2026-10-04')` ——
+      `[string]` 把 DateTime 渲染成 `10/05/2026 09:12:27`（**美式 M/d/yyyy**），
+      再与 `'2026-10-04'` 做**字符串**比较 ⇒ `'1' -lt '2'` 恒真 ⇒ **62 个全部判为"太老"**。
+    **结果**：计划保留的 13 个（约 223 MB）被实际删掉，只剩 2 个删除请求恰好失败的（4.84 MB）。
+    **影响**：Gradle cache 是**构建脚手架**，不含任何仓库内容；下次 CI 重新拉取即可自愈（代价是一次构建变慢）。
+    所有 release / artifact / 源码**未受影响**（`v0.14.4` 仍 12 assets / 586 MB，42 个 release 完好）。
+    **通用教训（比这次损失值钱）**：
+    ① **同一批操作的计划与实际必须共用同一个比较函数**，不要一个用对象比较、一个用字符串比较；
+    ② `ConvertFrom-Json` 的日期字段**默认就是 DateTime**，要字符串比较就显式 `.ToString('yyyy-MM-dd')`；
+    ③ **执行输出与计划不一致时必须当场停手查**——我这次看到了 `62 ≠ 49` 却继续，这正是本仓反复出现的
+       「输出看起来正常，但它证明的事情是假的」同一形态，只不过这次是我自己造的。
+
+
+264. **#341：bounds 去重必须与覆盖层 TTL 租约配对（0.14.5-fx-1）**：旧客户端静止时不发相同bounds，原生4000ms后主动INVISIBLE，DOM/加载仍正常。可见挂载每1000ms续租，隐藏/卸载即停止；普通Mutation去重不能重置续租截止时间。不能删TTL，否则幽灵覆盖层回归；也不能把Surface日志当单一根因。回归新增客户端9例与原生TTL/前台契约，真实绘制留第三阶段。
+
+265. **#340：宽屏顶部避让的高度盒必须一起修**：上游frame是height:100%与grid-template-rows:100%；只加top padding会使底部溢出。宽屏frame用border-box/minmax(0,1fr)消费动态inset一次；absolute fullscreen面板在rightbarCol内，不能再加第二层top padding。手机#135消费位置保留。
+
+266. **#342：端口错误不能被恢复流程抢走**：PORT_FOREIGN必须带拒绝码到屏上，禁止自动undo/retry/属主提示和外部HTTP探活顶掉诊断页；显式重试的新启动owner期间监控也不得抢呈现。私有目录诊断需errno及私有目录访问拒绝双证据，公共文件授权和exec拒绝不能据此误报。
+
+267. **fx2 来源链只构建 committed HEAD**：隔离目录不是当前 dirty 工作树的备份，也不包含未提交修改。输出保留供复查，不复制回原仓；续跑必须验证相同 source/commit，不能复用未知非空目录。独立浅检出可能保留 LFS pointer，必须走 sources 链重建，不能拿它冒充本地现成 base 构建。
+
+268. **fx2 通知延后必须先提交后消费**：入队/清结失败都不能清掉耐久条目，来源偏移提交失败保留重放。pending 八条/五分钟、结算哈希三十二条/五分钟是有界语义，不是全局 exactly-once。未知/损坏 journal 不自动清空，须保留证据并排查格式或存储失败。
+
+269. **WSL 启动 Windows Gradle 必须确认真实进程**：本次 PowerShell 调 gradlew.bat 曾空返回但后台 runner 未结束，重复启动导致同一 app/build 编译竞争。用命令行、父 PID 和创建时间核实归属，只处理本任务 runner；单一 Java wrapper、非增量、in-process 编译完成自检。禁止把锁竞争误判为源码缺陷，禁止批量终止用户既有进程或清缓存。
+
+270. **#0.14.6-A7：插件内的兜底轮询要整体移除，不是改成只读**：旧实现每 120s 写一行 `tick: signature=`（设备实测 2400 行 / 380 KB，同期 `runAutoPass: routes=[]` 零产出）。只把写改只读仍保留常驻定时路径与唤醒。修法：删除全部 `setTimeout` / `setInterval`，改纯事件驱动（`settings/document-updated`）+ 启动期一次性首读基线。判据须两层：源码断言（可执行代码无周期/延迟定时器；排除注释，`setImmediate` 的合法单次用途要白名单）+ 运行期断言（观察窗内周期 tick **增量**为零）。日志不随快照重置，**不能判总量为零**；零增长必须附**存活证明**（进程在 + 同期日志仍在写），否则「进程死了所以没写」会被误判为通过。
+
+271. **#0.14.6-A6：`ctx.get(name)` 是 strict 语义，可选依赖必须用 `ctx.inject`**：装配顺序上本插件行早于 `webserver` 行，`apply()` 里裸读 `ctx.get('webServer')` 只返回已激活（state 2）的实现，恒为 undefined，手动补齐路由在 **web profile** 上也从未注册（设备实测 6 次「webServer 缺席」）。两种相反错误都要避开：写进静态 `inject` 会让 `apply()` 整个被挡（headless 无 webServer，插件全失效）；apply 时裸读又读太早。正解 `ctx.inject(['webServer'], cb)`（可选、依赖到位才跑），静态 `inject` 只留真实必需项。**夹具必须忠实实现 cordis 语义**（服务表 + strict get + 延迟回调），且 provide 与 apply 的**顺序要与真实拓扑一致**（apply 先、provide 后）——夹具若让 get 恒返回假对象或顺序反了，「永不注册」这类缺陷恒不可见（本轮 E2E 假绿即此因）。
+
+272. **#0.14.6-D1：快照门禁的前向闭包必须递归，并加「判据是否空转」元防线**：got 14.6.6 本体在场、12 个传递依赖全缺，旧门禁只查一层，414 条断言全绿而设备 ERR_MODULE_NOT_FOUND（dsh-otel failed to import、session-telemetry-otel pending）。改递归 BFS 并输出完整引用链：改造前 PASSED 但设备正崩 / 改造后 FAILED 13 / 补全后缺口 0、传递可达 433。**元防线**：传递可达数必须大于挂载点数量，否则判「判据疑似空转」——空转比判红更危险。补闭包不要用注册表粗解析推断，要用真实 npm install --package-lock-only 取准（@types/* 也可能是 normal dependency）。
+
+273. **#0.14.6-C：发布资产命名历史翻转过，识别层必须是候选清单**：`-arm64-v8a`（v0.14.1 至 v0.14.2-fx-2）与 `-arm64`（v0.14.0、v0.14.2-fx-3 起含当前 latest）两个口径都真实存在。只认其一会使 arm64 设备对当前 latest **恒判「没有 arm64 资产」**，而包就在那里。修法：候选清单按发布链口径优先 + 兼容历史口径；失败原因按类别如实区分（真实缺失 / 限流 / 网络 / 解析 / ABI 识别 / 镜像数据异常），不再把任何失败都说成「没有 arm64 版本」。**测试必须绑定发布链产物名**（读 .github/workflows/release.yml 与脚本 --artifact-name）——旧测试注释写着脚本名、断言却写 -arm64-v8a，把错误约定锁死，是长期未发现的直接原因。
+
+274. **#0.14.6-交付身份：版本号不升会让更新链恒判 UpToDate**：候选若沿用上一个已发布 tag 作 versionName（本轮 0.14.5-fx-2 / vc49 与线上同名同码），isNewer(tag, currentVersion()) 对任何设备恒 false，**应用内更新永远送不出去**，即「修好更新检测却发不出去」。发版候选必须 versionName/versionCode 双升。连带坑：门禁测试里硬编码的「反例版本号」（如用 0.14.6 断言不等）会在版本抬到该值后**静默失效**（期望抛错却相等通过，本轮被全链门禁正确拦下）——反例版本须用恒不可能相等的值（如 9.9.9）。
+
+275. **#0.14.6-验收：升级安装会触发内嵌快照刷新，装机后首次启动不能立即验收**：install -r 替换 assets/snapshot.tar.xz 后新指纹不等于旧指纹，冷启动走 refreshSnapshot 触发 8-12 分钟重抽取，期间引导页停在 Extracting/Updating 相位，**任何设备套件都会假失败**（本轮 D3 第一轮因此如实记 INCONCLUSIVE）。收敛判据三条同时成立：.snapshot-transaction 消失 + .snapshot-fingerprint 翻转 + 引擎进程出现；**只看「stage 不再增长」不算**（可能只是卡住）。**装了包但从未冷启动**同样表现为「指纹未翻转、依赖仍缺」（本轮 emulator-5558），不要误判成「刷新失败」或「修复失效」；查 boot-fail.log 的 vcode= 可区分历史与本次。状态文件在 files/ 下，不在 files/home/.dsh/（后者是引擎 DSH_HOME）。
+
+276. **#0.14.6-取证：验证手法本身会制造假结果（本轮四例）**：① input swipe 起点落在 ScrollView bounds 之外，根本没滚动，得到「控件不存在」的**假 FAIL**（先读 bounds）；② 用 topResumedActivity 判 chooser 得**假 FAIL**（resolver 是 translucent，须用 logcat 的 ChooserActivity START + Displayed）；③ 整页扫「已就绪」把常驻状态芯片（运行时已就绪 / 存储已授权，任何相位都在）当成相位文案，是**假红**，须只扫相位文案区；④ 按正则取「第一个含按钮文案的节点」会取到同名描述性 TextView（真按钮在文档顺序后面），点击落空却记 PASS，是**假绿**（假绿比假红危险）。只接受 clickable=true 且 enabled=true 的节点，取不到即 INCONCLUSIVE、绝不猜坐标；属性正则要加词边界（否则 clickable 会命中 long-clickable 里的子串）。tap 前必须重新 dump 取界，不得沿用上次坐标。
+
+277. **#0.14.6-安全：验收手法本身也受被验主张约束**：声明「诊断包必须脱敏、凭据不得落盘到包外」时，为做对照把设备上含真 token 的原文拉进工作区**就违反了同一主张**。正确口径：**在设备内比对**（设备端算出「源是否含真值」「包内是否含真值」两个布尔），只把布尔与 sha256 拉回本地，明文从不离开设备。测「脱敏生效」的**决定性对照**不是「扫不到敏感词」（那可能本来就没有），而是「源有真值 + 包内被打码」的同行同字段对照（本轮实测：设备 ?token=P2CQF0Wx 与包内 ?token=***）。另：跨设备对照只能证明「脱敏生效」，要证「同一份源到同一份包」必须同设备闭环。
+
+278. **#0.14.6-D2：客户端插件按 combo 整批物化，一个成员取不到会连累全批**：buildCombo 把一批 rows 合成一个 plugins/??id1/client.js,id2/client.js,...&rev= URL，rev 由**全部成员**一起算；arrive() 里 combo 是整批物化的最小单位，整批取不到则整批 fiber 为 undefined，全部记 failed，启动页把**全部同批成员**渲染成 failedItem。于是被点名的条目往往**不是坏的**，只是与真凶同批（本轮点名的 job/terminal-controller 即如此，实测同批 57-58 条、成员含二者、**不含 otel**）。两类失败要分开：**传输/取得失败**（整批连带）与**工厂执行抛错**（只有自己）。诊断性缺陷（D5 候选）：失败面丢掉了「同批」这一事实，会把 57 个受害者并列报成「装配失败」，下一位开发者逐条排查这些插件**方向完全错**。
+
+279. **#0.14.6-取证：`uiautomator dump` 在引导页必失败，且 `dump; cat` 的失败是静默的（会读到旧文件）**：现象——`uiautomator dump <file>; cat <file>` 在 dump 失败时**不报错**，`cat` 读到**上一次的旧文件**，产出「看似正常但过期」的读数；本轮实例的铁证是 XML mtime = 12:56 而读取时刻 = 15:12（**陈旧 2 小时 16 分**），且该 XML 的 `text` 属性**全为空串**（本来就是个无效文件），据此曾报出 PASS=7。实测判据（同脚本同写法）：**WebView 健康态 `FILE_GENERATED size=64528`（可 dump）；引导页任意相位（busy 与非 busy 均由截图确认）`dump_exit=139 / [ERROR: could not get idle state.] / FILE_NOT_GENERATED`（不可 dump）**。
+    **已核实范围（可写结论）**：① 「WebView 健康态可 dump / 引导页不可 dump」有实测支撑；② 该失败**与相位无关**（非 busy 的 Closed 相位同样 `FILE_NOT_GENERATED`，判别实验在 `rm -f` 后执行，**排除了陈旧文件伪影**）；③ 与「`guideView` 可见」**强相关**。
+    **真因未定位（显式标注，不得臆造）**：`progressBar.isIndeterminate = true` 虽为**无条件**设置（`GuidePageRenderer.kt:459`；`:631` 另一处同），但它在**非 busy 相位下 `visibility = View.GONE`**（`:455`），且 `setStatusPulse` 的无限脉冲（`repeatCount = ValueAnimator.INFINITE`，`:671`）受 `:471 setStatusPulse(busy)` **门控**、非 busy 时被 `cancel()`（`:677`）——**故「无限动画 ⇒ dump 失败」只覆盖 busy 相位，解释不了非 busy 也失败**。此归因曾被提出（Lead）并在两轮复核中被否证，**不得写入当真因**。已排查排除的候选：`ShimmerTextView`（自带 `INFINITE`，但**全仓零引用**）、`OverlayPanel.kt:644`、`OverlayHalo.kt:163`（均受 `animationsOn()`/`DsUi.animationsEnabled` 门控且在别的窗口）、`GuideChrome.kt`（**无任何 Animator**，仅两处 `stateListAnimator = null`）、`DsUi` 按压缩放（仅触摸时启动）、`OverlayService` 悬浮窗（非默认在场）。仍未排除的候选：Activity 级 Handler **持续自我重投**（`EngineStartFlow.kt:56`/`:70`/`:108` 每 3s、`:521` 每 5s、`:546` 每 10s）——但它**在 WebView 健康态同样在跑**，故**单独不能解释两态差异**。
+    **修法（两条，适用范围不同，勿混写）**：① **安全读取＝普适硬规范**——任何 `dump; cat` 型读数都必须：先 `rm -f` 目标文件 → `uiautomator dump` → **校验目标文件已新生**（mtime ≥ 调用开始时间）→ 任一不满足即**抛错**，**绝不返回可能陈旧的内容**（tester 已实现 `lib-safe-dump.mjs`，含「未生成/陈旧/为空」三条反例锁）；② **引导页一律改用 `screencap` 截图 + 真实 `input tap` 取证**——这是**保守选择**，**不是**「已证引导页全不可 dump」的真因结论（真因仍未定位）。
+    **为什么不能用 exit code 判断（务必记）**：两侧 exit code **同为 139**（WebView 成功侧 `FILE_GENERATED` 也是 139：其 segfault 发生在**文件写完之后的退出阶段**）⇒ **exit code 完全没有判别力**。「按 exit code 判成败」是本坑最隐蔽的陷阱。
+    **附带**：`dumpsys activity top` **不可替代** —— 实测读不到控件文案。污染面可精确定位：**凡能在 WebView 拿到非空内容的读数，本身就证明 dump 成功** ，故污染面**精确落在「引导页」读数上**（A9/A6/entry-healthy/SSOT 设置页侧不受影响）。
+
+280. **#0.14.6-方法论：结论的量词必须与证据的覆盖面相等（本轮两次同族失误的判据化）**：规则两条并列——① **引用行号正确 ≠ 结论正确；采信结论前必须独立走一遍推理链**；② **结论的量词必须与证据的覆盖面相等**（自查问句：**「我的证据能支撑到这个量词吗？」**）。规则②是规则①的可操作自检点：它指出要检查什么，而不只是要做一件事。**两个真实例证（均属量词越界，而非「没复核」）**：① 把「`startUpdateCheck` 无任何**调用点**」（证据只覆盖调用点）写成「**全仓零引用**」（结论声称覆盖全部引用）——实际定义仍在 `EngineStartFlow.kt:549`、另有 2 处注释与 3 处测试按该签名切片，误写会诱使后人删掉它并连带判红两个测试；② 把「某相位无动画」（证据只覆盖 busy 门控的 `:459`/`:671` 两处）当成「**该界面无动画**」（见坑 279）。**写法要求**：给结论前先明确证据的覆盖面，再选量词；覆盖面不足以支撑全称时，**如实标注「范围」或「未定位」**——坑位宁可有已知空白，也不能写一个错真因。
+
+281. **#0.14.6-证据保全：删除前必须确认目标「类型与归属」，破坏性操作不得静默指向他人证据目录**：现象——对 `final-acceptance/round2/B-16512` 与 `final-acceptance/round3/B-16512` 执行了 `Remove-Item`，把**他人（dev-share）的证据目录**误当「杂散 1 字节文件」（实测该目录 23 / 31 个文件）。**结果：目录完好**（`IsDir=True`、`files=23/31`、`zeroByte=0`）。**真因（已确证，见下「归因的两次自我推翻」）**：该次删除命令**漏了 `-Recurse`** => 非空目录进入**确认提示** => 执行环境**非交互** => **删除从未执行**。**纯属侥幸**，与目录名含 `-` **无关**（普通名对照同样失败，已排除），**不是任何防护机制起作用**。=> 记法只能是**侥幸未造成损失，不得记为「有防护生效」**。
+    **删除卫生（三条）**：① **删除前先确认目标类型与归属** —— `Get-Item -Force` 看 `Attributes` 是否 `Directory`、内容是否属于他人（当事自评：「我这次连它是不是文件都没验，比『没验绝对路径』还低一级」）；② **`final-acceptance/` 下他人前缀目录（`B-*` / `A-*` / `dev-*`）一律不得删**；③ **破坏性操作必须可回滚或先备份**，且 **「我确认过了」不是防护** —— 确认可能基于错误前提。
+    **为什么（同族关系）**：本会话已发生过一次**真实的证据损毁** —— 在共享 `app/build/test-results/` 上跑 `--tests` 定向单测**清空了结果目录**，导致全链构建在最后一条门禁**假失败**（`有结果=1` vs `源测试类=112`）。两者同族：**取证实物与构建产物是不可再生资源，任何「清理」动作都可能摧毁证据链，而损坏往往是静默的**（构建只是判红，没人知道是谁清的）。
+    **归因的两次自我推翻（本条的元教训）**：① 当事最初归因「命令报错救了它」—— 独立复现**不成立**（同样含 `-` 的目录名上 `Remove-Item -Recurse -Force -ErrorAction Stop` 是**删成功**的）；② 中途还曾猜「是不是目录名含 `-` 导致参数解析异常」—— 也被普通名对照**排除**；③ 最终用**变量隔离实测**才确证「漏 `-Recurse` + 非交互 => 从未执行」。=> **听起来合理的因果，在验证前不能写进结论**；且同一条归因被推翻两次，说明「可解释」远不等于「已证实」。
+    **同族第二例（更严重：声明跑在证据前面）**：另一次当事声称「已清理 `deltest*`」，但**该命令实际从未执行**。**决定反证**：`deltest` 是**空**目录却仍然存在 —— 空目录**不需要 `-Recurse` 也能删**，故它必然没被下过命令。=> 这是「**未执行却声明已执行**」，比「删错目标」更严重：**完成态是假的，下游会基于它继续推进**（注：该目录在本文归档时已不在场，我无法再复核，故此处以当事的决定反证为准）。
+    **修法升级为三步（覆盖上面两例）**：**执行 → 读回 → 再声明**。读回不通过（目标仍在、状态不符、文件未新生）就**不得写完成态**。这与坑 279 的「`dump; cat` 必须校验目标文件是否新生」、坑 281 自身的「删前先验类型」是同一族：**没有读回的动作，等于没有证据**。
+    **归档效力（本条价值不在「差点出事」）**：① 它暴露了「目录 vs 文件」这一级的基本确认被跳过；② 它示范了**归因必须被验证** —— 当事的「命令报错救了我」与「目录名含 `-`」两条归因**先后被推翻**，最终靠变量隔离实测才确证是「漏 `-Recurse` + 非交互 = 从未执行」；**未经验证的因果不能当结论**（本轮规范第 1 条），而「可解释」尤其不等于「已证实」**未经验证的因果不能当结论**（本轮规范第 1 条）。
+
+283. **#0.14.7-注入脚本模板串：`$'` 会同时毁掉「外层 String.replace」与「内层模板求值」——症状是整段脚本静默不执行**：
+现象——在 `dsh-host-web-compat/lib/index.js` 的 `PICKER_SCRIPT` 模板串里新增判据 `if(k.indexOf('__reactProps$')!==0)continue;`，本意只是写一个字符串字面量；
+聚合门禁 `smoke-injections.mjs` 立刻报 **`script #4 parses (9476 bytes) -> Invalid or unexpected token`**。
+
+**真因是两层叠加，缺一不可**：
+① 模板串里的插值起始是 `${`，而 **`$'` 本身不是**，故这一步不算插值——但该脚本体最终要经 `String.replace(seed, body)` 注入 HTML，
+   而 **`String.replace` 的替换串里 `$'` 是特殊模式（插入「匹配位置之后的全部文本」）**，于是 `'__reactProps$'` 被替换成 `'__reactProps<body></body></html>'`，
+   **字符串引号被提前闭合**；
+② 报错点因此出现在**离真凶很远**的位置（实测报在解析产物的第 55 行，真凶在源码 596 行附近的语义），
+   且**整段脚本（含全部 polyfill）一起失效**——本仓注释已记录过同型事故（`join('')` 时期 `Unexpected token 'if'` 静默杀死整个元素）。
+
+**修法**：
+- 模板串里**任何** `$` 都要按「会被当作替换模式/插值」对待；判据字符串**不要以 `$` 紧接引号收尾**（本轮改为 `k.indexOf('__reactProps')!==0`，语义等价、零转义）；
+- 确需保留 `$` 时用 `\u0024` 或重新组织字符串拼接。
+
+**复验证据**：修后 `script #4 parses (9457 bytes)`，compat `npm test` exit 0，新增 `scripts/file-click-defer.test.mjs` 7/7 全绿。
+**为什么值得记**：这类缺陷**编译期不报、运行时整段静默跳过**，只有「逐段 new Function 解析」的注入门禁能挡住；
+这也说明该门禁有**真实判别力**——它当场抓到了实现者自己的错误，**不得绕过门禁去改门禁**（同族见坑 305「门禁自身也是防线」）。
+
+284. **#0.14.7-`visualViewport` 判空只写 `=== null` 会漏掉 `undefined`，并在触摸/键盘路径上抛出「整条适配链静默断掉」的 TypeError**：
+现象——设备控制台反复出现 `TypeError: Cannot read properties of undefined (reading 'height')`，栈顶指向 `KeyboardBoundary.apply`（`@dsh-android/dsh-client-ui-responsive`），
+而该异常**不断打断 `onViewportChange` 与其后的 settle 复算**；页面其余部分看起来正常，属「界面显示正常、用起来不对」那一类。
+真因——`keyboard-boundary.ts` 原写作 `const vv = window.visualViewport` 后 `vv === null ? 0 : Math.round(vv.height)`。
+**`window.visualViewport` 在部分宿主上求值为 `undefined`（不是 `null`）**，`=== null` 不拦，直接读 `.height` 即抛。
+最小复现（CDP 内验证）：`(()=>{const vv=undefined; return vv===null?0:Math.round(vv.height)})()` -> `THREW: Cannot read properties of undefined (reading 'height')`。
+修法——统一用 `window.visualViewport ?? null` 归一化后再判空（同包 `composer-popup-guard.ts`、`top-bar-fold.ts` 早已是双判，**同一仓内三种写法并存本身就是漂移源**）。
+复验——新增 2 条用例（`undefined` / `null` 各一：不抛错且不误设 frame 高度），**并做反证**：退回单判 `as VisualViewport | null` 时新用例确定性判红（1 failed | 9 passed），恢复后 10/10 绿。
+为什么值得记——① 这属**跨特性副作用**：`KeyboardBoundary` 与手势/弹层钳制共处一条 effect 链，一个未捕获异常会连带影响同链逻辑，排查时极易误判成别的功能坏了；
+② **`null` 与 `undefined` 在 JS 里是两个值**，凡按「缺席」判空就必须 `?? null`（或 `== null`）；本仓已有同型正确写法，照抄即可，不要另创第四种。
+
+285. **#0.14.7-「摘要自洽」不等于「能解压」：快照门禁只要不解压，坏资产就能一路进包，直到设备上以解码器异常爆出**：
+现象——用户真机（华为 SCA-AL00）在 0.14.5-fx-2 与 0.14.6 上**都**启动失败，logcat 唯一真因是
+`org.tukaani.xz.CorruptedInputException: Compressed data is corrupt`（栈：`XZCompressorInputStream.read` -> `TarArchiveInputStream.read` -> `SnapshotExtractor.extract`），
+而落盘诊断只有 `boot-fail.log` 的 `error=none(boolean-failure-path) stack=none`——真因只存在于易失的 logcat。
+真因（两条互补，缺一都会复发）——
+① **运行期没有真因出口**：`EngineManager.extractSnapshotTo` 的 `catch` 只写 `Log.e` 就 `return false`，
+异常对象从不挂到 `lastRefreshFailure`；`refreshSnapshotInternal` 里另外两条 `return false`（残留目录挪不开、解压后校验未过）同样只留布尔值。
+调用方 `EngineStartFlow` 只能拿到 null ⇒ `boot-fail.log` 落成 `error=none(boolean-failure-path)`。
+② **构建期没有解压门禁**：`check-snapshot-fingerprint.mjs` 断言的是 `sha256(assets/snapshot.tar.xz) == assets/snapshot.sha256`，
+而**声明值由同一条构建步骤自己写**（`build-apk-engine.mjs` 的 `copyFileSync` + `writeFileSync`），属自证；
+`check-snapshot-asset.ps1` 只比对 APK 内嵌与传入的 xz —— **两条都不解压**。于是「摘要自洽但字节流解不开」的资产可以一路进包。
+顺带两处同族缺陷：`EngineManager` 为取 `fd.length` 打开 `AssetFileDescriptor` 从不 close（真机 logcat 的 `A resource failed to call close.` 即它）；
+`SnapshotExtractor.extract` 的 `tar.close()` 无 try/finally，异常路径上 tar/xz 都不关（而这条正是真机走的那条）。
+修法——① 失败路径的真因全部挂 `lastRefreshFailure`（+ 稳定 code：`snapshot-extract-failed` / `snapshot-stage-incomplete` / `snapshot-stage-residue`），
+复用既有通道，不另造机制；② **解码之前**加一次流式 SHA-256 预检（`SnapshotBundledAsset.digest`，固定 64KB 缓冲、不整读入内存、不解码），
+不一致即 `snapshot-bundled-asset-corrupt` 且 detail 带 `expected=/actual=/bytes=`；③ `use{}` 关 fd、try/finally 关 tar/xz（close 异常走 addSuppressed，不得顶掉真因）；
+④ 新增构建期门禁 `scripts/check-snapshot-decode.mjs`：用**与设备同一套** streaming 解码器（`org.tukaani:xz` + `commons-compress`）完整解压一遍，
+判据 = 无异常 + 条目数 > 0 + 实读字节数 == 条目声明 size 之和（**结尾完整**）；两条链在 `assemble` 之后、per-ABI 段里真跑，失败即 `Deny-Abi`。
+反证（实测，非推断）——把 `assets/snapshot.tar.xz` 复制一份、翻转偏移 97309312 处一个字节，
+`node scripts/check-snapshot-decode.mjs --tar <坏文件>` 判红 exit 1 并打出 `CorruptedInputException: Compressed data is corrupt`；
+同一脚本对真实资产 exit 0（`entries=49521 bytes=710586232`，38s）。**两条链的接线由 `check-gate-skips.mjs` 的反向断言锁住**（声明了却没人跑即判红）。
+为什么值得记——① **门禁的输入必须真正被解码**：只比摘要等于「验证了写摘要的人写的是对的」，对「字节能不能解」零判别力；
+② 诊断缺口与门禁缺口是**同形复发**——「只留一个布尔值」让真因不可归因，而这类缺口在真机上一次都复现不了（用户没有 logcat 可用）；
+③ 「与设备同一套解码器」是这条门禁的全部价值，版本对不上就是在证明别的解码器，属结构性假绿（脚本对账 `build.gradle.kts` 的声明版本，不一致即判红）。
+
+286. **#0.14.7-拖动侧边栏时「内容不完整」：被平移的是收起态的导轨，不是抽屉 —— 上游只按 `data-sidebar-collapsed` 决定渲染内容还是导轨**：
+现象——用户截图：把抽屉往右拖到一半时，屏幕上只出现部分内容（不是完整抽屉），松手后才完整展开。
+真因（真机实测，非推断）——上游 `AppFrame` 用 `sidebarCollapsed` 决定侧栏渲染，而 `SidebarRoot` 只在 `!collapsed` 时挂载宽版内容
+（收起态只渲染导轨，且 `SidebarRoot` 的 `everWide` / `wide` 还会让内容在收起后卸载）。跟手预览层平移的元素**在拖动期间仍是收起态**，
+它平移的是一个**里面没有内容**的盒子 ⇒ 用户看到的就是「拖到一半内容不完整」。
+真机读数（emulator-5562 / Android 15 / 600 CSS px，CDP `Input.dispatchTouchEvent` 合成真实触摸）：
+收起态 `buttons=6 elems=58 innerHTML=11209B`；旧实现拖动中途（`dragging=true`，`inline=translateX(-58.43%)`，rect `left=-169`）**仍是 6/58/11209**（导轨）；
+松手后才变 `19/202/40035`。修复后在同样中途位置直接是 `19/202/40035`。
+修法——**同一帧内的顺序**：确认开合意图后 `beginDrag()`（先关 200ms 过渡）→ `ensureOpen()`（提交展开，让上游立刻挂载完整内容）→ 才写内联位移。
+顺序反了（先写位移后提交）会先闪一下导轨。回退必须用**真正的收起动作**（新增 `closeLeft`）；
+**不要拿 `returnToConversation` 当收起用**——它会顺带 `selectPanel(null)`，语义不同会误伤当前面板选择。
+右栏存在**完全同型**的问题：收起态上游 dockkit 的 `renderTab` 因 `visible=false` 根本不执行，实测右栏仅 31 元素 / 3307B，一并按同一顺序修好。
+连带必修（不改就会自毁）——提交展开后 `resolveAction` 会把**同一次手势**重判成 `return`（因为 `leftOpen()` 已为真），于是自己把刚提交的展开又收回去；
+故 `start.action` 必须在首次确认后**锁定**。
+同批修的两处事件守卫——`preventDefault()` 前必须查 `event.cancelable`：真机曾反复刷
+`Ignored attempt to cancel a touchmove event with cancelable=false`（17 次 touchmove + 1 次 touchend），
+说明原生滚动已接管该次触摸，此时既拦不住也不该拦，必须整条手势作废并**回退已提交的状态**（守卫要排在提交之前，否则会「先提交再复位」）。
+反证与验收——单测抽掉 `ensureOpen` → 16 条判红；只看掉 cancelable 守卫 → 2 条判红；两次均还原复跑全绿。
+真机三档实测：小幅右拖 80px 松手 → 回收起；大幅右拖 220px 松手 → 保持打开；关闭方向拖动中内容不提前消失。
+**中栏不重排的判据**：`grid-template-columns` 计算值全程恒为 `0px 600px 0px`（`mobile-form.css.ts` 用 `!important` 钉死 + 抽屉是 `position:fixed`），
+所以「提前提交展开」不会动中栏布局 —— 这条要测**计算值本身**，只测 `getBoundingClientRect` 不足以证明 `!important` 生效。
+为什么值得记——① 「跟手动画不对」的直觉答案（去调百分比/缓动）在这里是错的：几何完全正确，**错的是被移动的元素里没有内容**；
+② 这类缺陷 DOM 断言看不出来（元素在、坐标也对），只有**按内容形态断言**（元素数 / 内容长度）才能咬住；
+③ 把「提交状态」与「画位移」分成两件事并在同一帧内定序，是这类跟手效果的正确形状，任何一侧单独做都会退化成用户看得见的错。
+
+287. **#0.14.7-「同意与 APK versionCode 绑定」= 每次升级静默清掉用户同意（用户反馈「root 免责声明每次更新怎么都会掉」）**：
+现象——用户群内反馈：每次更新后 root 免责声明都要重新确认（截图实证「还有root免责声明每次更新怎么都会掉」）。
+真因——`RootGrant` 把「已阅读」同意存为 `consentVersionCode`，判据是**必须等于当前 `BuildConfig.VERSION_CODE`**；
+于是版本号 +1 必然让 `consentValid()` 变 false，并连带把开关关掉。更糟的是这条被当成**有意设计**写进了类注释
+（「同意与 versionCode 绑定 ⇒ 升级后 consentValid() 自然为 false，无需迁移逻辑」）——注释的「无需迁移」正是缺陷本身。
+修法——同意改绑**免责声明内容版本** `DISCLAIMER_REVISION`，与 APK 版本号解绑：新键 `consentRevision`，旧键 `consentVersionCode` 降为**只读迁移**。
+迁移刻意只用「旧值 > 0」这一个与版本号无关的事实（老用户同意过的事实必须保住，否则「修这个 bug」本身又会清一次同意）。
+安全属性**一条都不放松**：未同意仍开不了（fail-closed）；取消勾选仍立即撤销同意并同时关闭开关。
+迁移纯逻辑提成 `internal fun migratedConsentRevision(stored, legacy, current)`，JVM 可真值驱动。
+复验——真值驱动用例（旧键 {1,42,100,999,MAX} → 等于当前 revision；旧键 {-1,0} → 0；新键不被旧键覆盖；`(0,0)` → 0 即撤销后不复活）；
+**变异反证**：把纯函数里 `legacyVersionCode > 0` 的返回改成 0 → 该用例判红（1 failed / BUILD FAILED），回滚后全绿。
+**写用例的教训**——初版这条用例写成 `for (legacy in listOf(1,42,100,999)) { assertTrue(legacy > 0) }`，
+断言的是**字面量**、从未调用迁移逻辑，是恒真断言，却顶着一个「keeps any consenting user」的名字。独立验收者当场指出。
+此类断言比没有用例更危险：它制造「已覆盖」的错觉。**凡用例名声称某行为，就必须真的驱动那段代码**；
+提取纯函数是让 Android 依赖重的逻辑可被真值驱动的最省做法。
+另一条固化下来的判据——清洁面：`decision`/`isGranted`/`state` 的源码里**不得再出现 `BuildConfig.VERSION_CODE`**（静态契约用例钉死），
+否则等价于把旧缺陷改回来。
+为什么值得记——① 「绑定版本号」看起来是安全加固（升级后重新确认），实际是**把安全门做成了用户可感知的骚扰**，
+结果用户学会无脑点同意，安全意图反被稀释；② 持久化键的语义变更必须同时处理**老数据的迁移方向**，
+而迁移的职责是「保住既有的合法状态」，不是「用新规则重判历史」；③ 注释里写「无需迁移」往往是缺陷的自我确认。
+
+
+
+
+288. **#0.14.7-浏览器 controller 同步 require gateway 缺模块：host 激活条件不能代替 browser 依赖供给条件**：
+现场在同指纹且无快照事务的冷启动中记录 `require("@deepseek-ai/dsh-api-gateway/client") missed the module table`，
+两个 controller 未激活。交接中「web-app 没有 gateway 行，所以补 insert」的推断不成立：web-app 继承 base，base 已有唯一 typert-gateway。
+Registry 只读取 fiber 存在的行；构造供给方 fiber 未构造而消费者已构造的时序，真实 Registry fixture 的图确实漏掉 gateway，combo factory 同步 require 失败。
+修法：既有 client-registry-scan-C4 增补 G1，仅对未 disabled 的 gateway 及其 typert-registry / client-connection 三个 Loader 行解除 browser 元数据扫描的 host fiber 前提。
+保留四个 controller、唯一 host 行、gateway browser 的 inject 依赖，其它 pending 包继续不进图；disabled/移除仍从实时 Loader 集合消失。
+反证：gateway-client-source-g1.test.mjs 旧图 factory require 失败、新图四个 controller factory 成功，并验证排序、禁用/恢复和 C4 旧树增量升级幂等。
+产物门禁保留C4主marker，并另强制requiredMarkers中的G1；单因素去掉G1注释后整个旧字节产物检查只出现这一项红。build-apk只注入插件，改引擎补丁必须先重建build-snapshot，不能沿用缓存快照。
+该机制反证已通过；具体真机哪条 host 激活分支触发漏项仍未证明。最终源码 APK 的升级与冷启动三层验收由版本收口记录承载。
+
+289. **#0.14.7-模型列表高度反馈导致白条与双态抖动**：
+用户实操取证884条样本证实：键盘展开后max-height归零、绘制高度只剩8px；视口/触发按钮位置不变时菜单仍在258/284px限高之间交替。
+真因：guard把已平移、已限高的菜单bottom重新用于高度上限，同时将topShift加入visibleBottom，混用坐标系；上游scroll定位又读取变化后的offsetHeight。
+修法：body portal以aria-controls关联的触发按钮top减8px作锚点，高度直接由锚点、顶栏与真实可视区决定；写限高后测实际高度，再算相对上游位置的绝对平移；可视区不可测仍跳过纵向钳制。
+源码反证：恢复“用菜单bottom作锚点”后新用例判红；覆盖现场二周期、白条恢复、IME视口过程及高内容重复测量。设备及最终APK结论见版本收口记录，不以单测冒充通过。
+完整AVD补充：模型超过4个才出现二级搜索框，必须点菜单内搜索框唤起真实底部键盘。81模型/inset299px时，SN-1-14内部滚动后上游inline top从325改为88，旧shift=-237未同步重算，最终top=-149。只监听scroll/resize不足：仅对controlled模型portal监听上游top/left/width/height，在MutationObserver微任务中重新定位，忽略自身CSS变量，关闭/卸载取消观察。撤掉定位调用的反证精确重现-149，菜单37用例通过；SN-1-15在AVD同81模型/299px键盘下，内部列表及页面上下原生滚动、搜索清空、重新展开全部通过，连续帧无越界。证据见协调仓final-acceptance/0.14.7/evidence/model-SN15-final/。
+只读dsh checkout的旧ModelSelect没有搜索框，不能代替当前APK安装模块；安装产物代码与用户真实操作为该问题的现状证据。
+
+290. **#0.14.7-touchstart才设置touch-action不能挽救当前手势**：
+旧task11在touchstart改触点style，浏览器已经决定该序列的默认手势，不能靠随后样式修改取消原生滚动。祖先的touch-action也参与交集，旧“不继承所以祖先无效”解释错误。
+修法：手机frame预先生效pan-y pinch-zoom，实际横向溢出容器标记为auto例外，保留代码块/横表原生横滚；纵向达到8px后本序列退出，快甩结算不能绕过方向门控。
+手势之外更新横向溢出标记，预览style更新不触发全树尺寸扫描。单测与变异反证见版本收口记录；真实触摸跟手、斜向、原生纵横滚动仍需最终APK三层验收。
+依据：W3C Pointer Events 2 touch-action规范（https://www.w3.org/TR/pointerevents2/#the-touch-action-css-property）。
+
+
+291. **0.14.7追加交互：横滚扫描与菜单边界透传**：SN15语义开合/菜单几何通过不能证明时序与边界。真机22触摸发现列表到边界后背景/IME变化；MuMu独立CPU采样约9秒中全frame refreshSurfaces约2.8秒。只收集变化子树，触点活动期间不量尺寸，释放后增量更新，并先过滤overflow再读宽度；对实际模型.scrollable设置overscroll-behavior-y:none。后台任务绝对定位ul会被折叠顶栏overflow裁切，需按真实aria-label提升fixed并保留React树。会话切换需在capture阶段识别data-row-key/aria-selected，先拦自动focus再等待真正选中后收起；只在bubble阶段处理会漏掉React同步提交。候选707单测通过，设备及新APK结果见协调仓followup证据，未验不写PASS。
+
+292. **团队重启反馈与前台服务ANR**：用户报告启用团队重启失败，AVD记录boot-budget-exceeded与独立的ForegroundService未及时提升/输入分发ANR；系统旧ANR弹窗可以遮住已健康的WebView，因此CDPframe=true不能当真人可用。EngineService.onCreate应先startForeground再偏好/manager初始化，启动请求排队在当前Activity生命周期回调结束后发出，重复请求合并并重查关闭/销毁状态；不改90秒预算来隐藏错误。真实团队任务在MuMu生成2成员/1共享任务/1后台任务并交叉核验1468，证明该场景工具与UI可用，不能覆盖arm64重启失败。候选Kotlin与新包冷启动尚待收口。
+
+293. **0.14.7 启动 CAS 等待者被误判为进程死亡**：SN16 AVD 单独运行第2次冷启动最终页面69条、团队入口与前台服务健康且无应用ANR，却新增process-died-during-boot，t_boot_start/listen均为-1，日志头是正常native fallback。
+EngineManager的Process已为companion共享，CAS也只允许一个winner spawn；缺陷是loser在STARTING被占时直接返回true，Activity随即拿进程句柄尚未发布的窗口当DEAD并写失败、触发恢复。STARTING持有期间的pre-spawn修复/环境准备可放大该窗口；不是两manager各持有一个不同Process。
+最小修法给Activity独立engineBootMayContinue观察，按STARTING→process→STARTING→process顺序读取，覆盖winner发布Process再释放CAS及一次读取期间完整的CAS acquire/publish/release。watchdog/归属仍用原engineProcessAlive，STARTING不能冒充进程所有权。
+两处Activity死亡判据使用新观察；90s预算、真实退出、失败释放及预算终态落盘保留，预算文案同时覆盖尚在准备的请求。
+EngineBootContinuationTest用latch驱动真实观察函数：winner持CAS但无进程时loser等待，发布后继续，真实退出或失败释放后停止；另精确冻结第一次process旧读，迫使winner在中间完成publish/clear，再验证最后重读不会误判。单测与最终SN17 APK三层证据由统一收口记录承载，不把最终页面恢复健康改写为原失败通过。
+
+294. **`node --test <目录>` 在 Node 24 上按 CJS 解析并失败：门禁写对了、命令写错了（0.14.7 webpages PR #360 合并后 CI 实锤）**：新增的 `pages` 工作流在「资产名与 URL 拼接门禁」一步直接红，报 `Error: Cannot find module '/home/runner/work/dsh-mobile-apk/dsh-mobile-apk/webpages/tests'` + `code: MODULE_NOT_FOUND`，25 个用例一个都没跑。
+   **为什么本地没发现**：开发期在本地跑的是**显式文件路径** `node --test webpages/tests/release-url.test.mjs`（25 项全绿），而提交进工作流的是**目录** `node --test webpages/tests/`。两条命令不同形，本地绿证明不了 CI 绿——**门禁的调用形态本身没有被测过**。
+   **真因**：`node --test` 的路径参数在 Node 24 上不展开目录；传目录时该参数被当成 CJS 模块说明符去解析，于是报「找不到模块」而不是「没有测试」。加不加结尾斜杠都一样失败（实测两者 `ℹ fail 1`）。
+   **修法**：给 glob 并加引号，让 node 自己展开——`node --test "webpages/tests/*.test.mjs"`。不要把展开交给 shell（`sh` 与 `pwsh` 行为不同，且无匹配时字面量透传会再次变成「找不到模块」）。
+   **判据（可判红，两条都实测过）**：① 新形态 `node --test "webpages/tests/*.test.mjs"` 必须 `ℹ tests 25 / pass 25 / fail 0`、exit 0；② 反证——旧形态 `node --test webpages/tests` 必须仍然 `ℹ fail 1`、exit 1。只验 ① 不验 ② 就无法区分「修好了」与「这条断言本来就跑不到」。
+
+295. **发布页架构识别在真机上判"未能识别"、PC 上却正常：只取 architecture 不取 bitness 的浏览器把信号丢光了（0.14.7 webpages 线上反馈 + 本轮实修）**
+    **现象**：Android 16 上用夸克浏览器与 H 浏览器打开发布页，均提示"未能识别设备架构"；同一页面在 PC 上能正常识别为 x86_64。
+    **真因（两处，都会把真机推给"未知"）**：① 这些 Chromium 系内核的 `navigator.userAgentData.getHighEntropyValues(["architecture","bitness"])` 常**只返回 architecture，bitness 为空**，而旧实现用 `arch === "arm" && bitness === "64"` 才算数，空 bitness 一路落到"无线索"；② reduced UA 不含架构 token 且 `platform` 只有 `"Linux"` 时，旧实现同样判 unknown。PC 端因为 arch=x86 + bitness=64 齐全而正常——**"PC 能认、手机不能认"正是该缺陷的可识别特征**。
+    **修法**：① architecture 有值但 bitness 缺失时不再丢弃信号，`arm` -> arm64(`likely`)、`x86` -> x86_64(`likely`)，保留用户的"换另一个架构"出口；② `platform="Linux"` 且无架构线索时按主流机型兜底 arm64(`likely`)（Windows/macOS 不会是 `Linux`，真 Linux 桌面几乎必带 x86_64/aarch64）；③ 补零号规则——**桌面系统一律判 unknown**，见下条。
+    **判据（可判红）**：① `{architecture:"arm",bitness:""}` 必须为 arm64/`likely`，而 `{architecture:"arm",bitness:"32"}` 必须仍为 `unsupported`（兜底不得放宽确定性结论）；② `{platform:"Linux",ua:"...Android 16..."}` 必须 arm64/`likely`；③ 反证：`{platform:"FreeBSD",ua:"...(X11; FreeBSD)"}` 仍须 unknown，证明兜底不外溢。
+
+296. **同一发布页把 Windows 访客判成 x86_64 并推模拟器专用包：PC 访客要装的是手机，手机的架构在 PC 上无从得知（0.14.7 本轮发现，与 295 同源）**
+    **现象**：Windows Chrome 打开发布页显示"已识别设备架构：x86_64"并给出 x86_64 安装包——而 x86_64 包是给 **MuMu 等模拟器**用的，真机是 arm64。
+    **真因**：Windows Chrome 的 UA 含 `Win64; x64`，命中字符串探测的 x86_64 规则。判定逻辑默认"访问者就是要在这台设备上装"，而 PC 访客要装的是**另一台设备（手机）**。
+    **修法**：新增零号规则，`platform`/`ua` 命中 `windows nt|win32|win64|macintosh|mac os x|macintel|cros` 一律判 `unknown`，界面改为"请选择设备架构"+两个选项。**关键细节**：MuMu 等模拟器**内部浏览器**是 Android UA，不走这一支，其架构由 `userAgentData` 的 `architecture=x86` 决定 —— 故结构化字段必须**优先于** UA 兜底，否则模拟器会被兜底成 arm64（错）。
+    **判据（可判红）**：① `{platform:"Win32",ua:"...Win64; x64..."}` 必须 abi=null/`unknown`；② 即使 `{architecture:"x86",bitness:"64",platform:"Win32"}` 也必须 unknown（那是 PC 的架构，不是手机的）；③ 反证：`{architecture:"x86",bitness:"",platform:"Linux",ua:"...Android..."}` 必须 x86_64（证明模拟器路径未被桌面规则误伤）。
+
+297. **发布页 robots.txt 声明了一个从不存在的 sitemap.xml：站点自己给自己制造坏信号（0.14.7 本轮 SEO 核查发现）**
+    **现象**：`/dsh-mobile-apk/robots.txt` 返回 200 且含 `Sitemap: https://kelai141.github.io/dsh-mobile-apk/sitemap.xml`，但该 sitemap 请求 **404**——`build.mjs` 只生成 robots.txt，从未生成 sitemap.xml。
+    **真因**：robots 与 sitemap 由两处分别维护（前者硬编码在构建脚本里，后者根本不存在），缺少"声明即产出"的约束。
+    **修法**：同一次构建同时产出两者，并加门禁守住"robots 声明的 sitemap 必须由构建产出"。另补 JSON-LD / canonical / OG / robots meta 与四段不依赖 JS 的静态正文。
+    **判据**：构建产物必须同时含 `robots.txt` 与 `sitemap.xml`；门禁用例断言 build.mjs 里出现 sitemap 产出与 `Sitemap:` 声明。**注意自证陷阱**：JSON-LD 的 `downloadUrl` 只声明**确有其资产**的 URL——声明一个 404 比不声明更糟（与坑 172 同源的"名字对不对"问题）。
+    **宿主限制（如实记，非缺陷）**：`kelai141.github.io/robots.txt` 不存在，项目站**无法**从上层目录声明 sitemap；这是 GitHub Pages 项目站的固有形态，不影响站点自身 robots/sitemap 可访问。
+   **教训**：门禁脚本改完，必须**用工作流里逐字一致的那条命令**本地复验一次，而不是用等价的手工命令。这个坑与「门禁必须被门禁测试」同源。
+
+298. **Release-page data must retain its schema across refresh and offline builds (#364-#366).** The API exposes tag_name/published_at, while the persisted seed uses tag/publishedAt and ABI-indexed checksums. Re-normalizing a seed as an API response broke offline builds, and rendering the checksum map as a scalar displayed [object Object]. The build now validates each source representation and preserves valid seed checksums; the app selects the current ABI digest and reports missing values. Publication uses release/published and checks out the default branch, because completion of the APK workflow only creates a draft. Regression coverage executes offline and refresh round-trips, the actual app with ABI switching/missing hashes, and the workflow contract. Node 24: 35 tests passed; a live Chromium session confirmed both real release digests.
+
+299. **TAR EOF does not certify XZ stream integrity (#359).** The decoder probe stopped at TAR end markers, so a long padded archive could hide a corrupt or truncated XZ footer beyond the bytes requested by the TAR reader. Closing either stream does not drain it. The production probe now reads the remaining XZ stream to EOF before reporting success. Runtime self-tests cover valid padding and both footer failures (14 checks); an installed APK's 150,009,840-byte snapshot also decoded successfully with the declared decoder versions. Device WebView regression passed in portrait and landscape; no APK or runtime extraction behavior is changed by this build-time gate correction.
+
+300. **Touch reorder cancellation must settle the upstream owner (#357/#358).** A second finger or touchcancel previously cleared only local flags; an unmatched touchend could still drop on the previous target. Because upstream dragend commits its last hover, cancellation now flushes a source-row drop through upstream's no-op path before dragend. Synthetic phases use ReactDOM flushSync, DataTransfer types satisfy the global file-drop handler, and competing trusted Android HTML drag/context-menu defaults are suppressed while this adapter owns the row. Real AVD testing exposed both global transfer metadata and native drag competition after the initial React tests passed. Regression: 713 UI tests, successful build, real catalog cancellation with unchanged order, a subsequent successful reorder, persisted order after reload, and native ADB reorder. The browser-stage lease handle is typed as a numeric window timer so Node ambient timer declarations do not break compilation. Evidence applies to the hot-pushed runtime, not a final release APK.
+
+
+301. **线路探针把 403 当成"最快线路"：no-cors 拿到的是不透明响应，读不到状态码（0.14.7 发布页线上故障，本轮实修）**
+    **现象**：发布页自动选中 `gh-proxy.com` 作为默认线路并显示最快，但用户点"下载"拿到的是错误页而非 APK。该镜像对 MANIFEST 与 APK **均返回 403**（连测三次稳定复现），其余三条线路 302/200 正常。
+    **真因**：探针用 `fetch(url, {mode:'no-cors'})`，而 **no-cors 返回的是不透明响应（`type:'opaque'`、`status:0`），读不到状态码**——403 与 200 在探针眼里完全等价。雪上加霜的是 **403 比 200 回得更快**（实测 284ms vs 605ms），于是死线不仅没被判死，还每次都被排成第一名。探针只测了"有没有响应"，没测"响应是不是可用"。
+    **修法**：**判活与测速分离**。判活改用 `<script>` 标签——它对 HTTP 错误状态可靠触发 `onerror`、对 2xx 触发 `onload`，且不受 CORS 限制（CORS 模式实测只有 gh-proxy.com 有 `Access-Control-Allow-Origin`，等于只有死线可读，方向完全相反）。测速仍用 no-cors 但打**真实资产** URL，到响应头即 `abort`。死线按钮置 `disabled` 并显示"不可用"，当前线路被判死时自动换走。
+    **判据（可判红）**：① 实测四条线路，`<script>` 对 gh-proxy.com 必须 `error`、其余三条 `loaded`；② **反证**：对不存在的版本（`v0.0.0-nope`）必须**四条全 `error`**，证明判据不是恒判活；③ 受控负控：把判活改回 `no-cors fetch` 必须判红。
+    **注意**：`<script>` 判活**会真正加载响应体**，所以靶必须是小文件（MANIFEST 约 1.4 KB）；换成 APK 就是 150 MB。
+
+302. **`redirect:'manual'` 在 `fetch` 下全线抛 TypeError，不能当作探测手段（0.14.7 本轮实测）**
+    **现象**：想用 `fetch(url,{mode:'no-cors',redirect:'manual'})` 借 `type:'opaqueredirect'` 区分重定向与 403，结果四条线路**全部立即抛 `TypeError`**（0ms）。
+    **真因**：`redirect:'manual'` 与 `no-cors`/`cors` 的组合在 Chromium 下不产出可用的 `opaqueredirect` 响应（本站四条线路均走重定向）。`cors+manual`、`cors+follow` 同理。
+    **修法**：不依赖该组合；判活走 `<script>`（见 301）。
+    **判据**：同一次实测里 `redirect:'manual'` 的四条线路必须全为 `TypeError`，而 `<script>` 判活能得到"三活一死"的**区分性**结果——这才是可用判据。
+
+303. **`ms=0` 被当成"最快"：未测到速度的线路排序第一（0.14.7 本轮自引入并自测出）**
+    **现象**：加了"测速失败回退 `ms:0`"后，未测到速度的线路会被排到所有有效测量**之前**。
+    **真因**：排序直接写 `sort((a,b)=>a.ms-b.ms)`，而 `0` 是最小的合法数值，语义上却表示"没有数据"。**另有隐藏的第二处**：`runProbe` 内部写缓存时也在按 raw ms 排序，同样中招。
+    **修法**：集中到 `rankBySpeed()`，`ms<=0` 一律映射为 `Number.POSITIVE_INFINITY` 排到最后；调用点（3 处）全部改走它。
+    **判据（可判红）**：受控负控——只把**其中一处**改回 raw sort，必须判红。**这条负控抓到过真实的判据缺口**：最初的门禁只断言 `rankBySpeed` 存在，改回 raw sort 后仍全绿；补上"调用点必须走 rankBySpeed"与"全文不得出现 raw ms 排序"才判红。
+
+304. **门禁在带注释的源码上做全文正则匹配，会把自己的说明文字判红（0.14.7 本轮踩中）**
+    **现象**：新加的判据断言 `app.js` 里不得出现 `mode:'no-cors'` 的健康检查，结果**永远判红**——因为源码注释里为解释"为什么不用 no-cors"必然写了这个写法。
+    **真因**：正则跑在**含注释的全文**上，把文档当代码。
+    **修法**：先剥离注释再断言（块注释与行注释），并把断言范围收窄到目标函数体（`probeMirror`）而非全文。
+    **判据**：同一条测试里补一条**受控正控**——`measureSpeed` 里**确实应存在** `fetch(`，证明"剥离注释 + 收窄函数体"的匹配逻辑真的能命中代码而不是恒不命中。
+
+305. **极简 DOM 环境会把全部线路误判为不可用：把"未探测"当成"探测失败"（外部 PR #372 的门禁暴露）**
+    **现象**：新增的 `<script>` 判活让外部 PR #372 的 DOM shim 用例失败——`document.head` 为 `undefined`，`appendChild` 抛 `TypeError`，四条线路全部被判死。
+    **真因**：判活函数假定 `document.head` 存在；失败与"没有探测能力"没有区分，统一落到 `null`（=不可用）。
+    **修法**：加 `canProbe()` 能力自检；无能力时返回 `{unprobed:true}`，`runProbe` 见"全部未探测"则**不标死线、不排序、不写缓存**，并让点击兜底直接放行。
+    **判据（可判红）**：无 `document.head` 的环境下必须得到 `dead:[]`（而不是四条全死）；受控负控——去掉 `unprobed` 分支必须判红。
+    **教训**：探测类代码必须显式区分**三种**状态——可达 / 明确不可达 / **无法判定**。把第三种混进第二种，会把"我不知道"升级成"它坏了"，进而把全部选项禁用。
+
+306. **用 read 的分页结果做整文件重写会静默截断文件（本轮真实事故）**
+    **现象**：对 343 KB / 1511 行的 `gotchas.md` 追加条目时，用 `read` 取回的内容拼回整文件再 `write`，文件被截成 51 KB / 144 行，**1570 行历史条目丢失**（`git diff --stat` 显示 1570 deletions）。
+    **真因**：`read` 对长文件**分页返回**（默认上限），把当页内容当作全文写回 = 用部分覆盖整体。
+    **修法**：长文件一律用**定向编辑**追加（以文末唯一片段作锚点），不要 `read` 全文再 `write`；发现截断立即 `git checkout -- <file>` 复原再重做。
+    **判据**：写后必须核对 `git diff --stat` 的删除行数与文件字节数，删除数异常大即已截断。
+
+
+307. **子仓镜像用 robocopy /MIR 打到有未提交改动的主工作树 = 真实丢数据风险（本次无损失，但属侥幸）**：
+
+现象：改 `dsh-client-ui-responsive` 要镜像到 `dsh-mobile-apk/<同名目录>`（铁律 5）。我直接对 apk 主工作树跑
+`robocopy <干净worktree>\src <apk主树>\src /MIR`，而该主工作树有 97 项未提交改动，且我的 worktree 基于 `origin/main`、
+**不含**用户那些未跟踪的在途文件。`/MIR` 的语义是「让目标与源完全一致」，会删除目标端独有文件。
+
+真因：`/MIR` 不带「只增不删」语义，而镜像源（干净 worktree）是目标（在途工作树）的**子集**。
+本次未丢数据只是因为在途工作此前已同步进 apk 主树、两边内容恰好一致，`/MIR` 成了空操作。
+
+取证（判定「有没有丢」的正确方法，不能只看 mtime）：
+- `git -C apk status --porcelain -- <子仓>` 数删除条目（本次 0）；
+- 逐个 `git hash-object` 比对「coord 子仓未跟踪文件」与「apk 主树同名文件」（本次 12/12 存在且同内容）；
+- 单看 mtime 会误判：robocopy 对内容相同的文件也刷新时间戳（`sidebar-reorder.ts` 即此情形，字节与 `origin/main` 一致）。
+
+正确做法：镜像前先 `git -C apk status --porcelain` 确认目标干净；不干净时改用**只复制改动文件的显式清单**
+（本次子仓恰好 5 个文件），或先把目标在途工作提交/存档再 `/MIR`。
+
+308. **不要用 read 得到的文本回写大文件（截断即毁档）**：
+
+现象：为给 `docs/AGENTS/gotchas.md`（当时 1721 行 / 340 KB）追加一条坑，我用 `read` 读全文再 `write` 回写，
+结果文件变成 202 行——`read` 的返回有行数与字节上限，超出部分被静默截断，回写等于用截断内容覆盖原档。
+
+真因：`read` 是**有界视图**（offset/limit + 输出上限），不是无损取全文的手段；`write` 则是**全量替换**。
+把二者配合使用，等于把「有界读」当成了「无损读」。
+
+正确做法：
+- 追加一段文本用 `Add-Content`（不读全文、不回写）；
+- 需要精确字节时用 `git cat-file blob <rev>:<path>` 取权威内容，再按目标行尾（本仓该文件是 LF）拼接；
+- 大文件改动一律避免「read 全文 → write 全文」这一组合。
+
+本次恢复来源：`origin/main` 的该文件（1792 行，比被毁版本更完整），307/308 条按 LF 追加。

@@ -1,6 +1,12 @@
 # BRIDGE-API.md — 当前桥与通道说明
 
-> 桥方法与签名以 AndroidBridge/BackGateBridge/consoleBridge 源码为准，计数由门禁现取；不沿用旧版数量。0.14.3为源码交接，尚未构建/验收；后文版本增量用于历史溯源，当前契约以本节为准。
+## fx2 插件特权服务边界
+
+公共 `execAdbShell`、`execAdbLine`、`controlExec` 不接受调用者提供的 `internal` 标记；出现该字段即拒绝。SurfaceFlinger 查询只经私有固定调用路径获得免会话授权，不允许调用者提供任意 shell 文本。动画比例改用 `readAnimationScales` / `writeAnimationScales`：仅三个固定设置键，写值仅允许非负十进制字符串或 null，仍检查会话权限级别和危险操作开关。manage 插件复用桥内会话上下文，不保存额外授权凭证。
+
+这不是同一 Node 进程内恶意插件的沙箱：会话对象和插件装配仍属于既有信任边界。壳侧屏幕范围校验继续保留；不能把私有调用标记当成对任意同进程攻击的完整隔离。
+
+> 桥方法与签名以 AndroidBridge/BackGateBridge/consoleBridge 源码为准，计数由门禁现取；不沿用旧版数量。后文版本增量用于历史溯源，不能代表当前版本的构建或验收状态。
 
 ## 1. 信任与线程边界
 
@@ -82,9 +88,9 @@ exportConfig返回实际path与可能含provider密钥的共享目录警告hint�
 
 | 方向 | 方法 | 位置 | 说明 |
 |---|---|---|---|
-| 页面 → 壳 | `rootGrantState()` | AndroidBridge → RootGrant.state | `granted` 是有效授权（raw switch 且当前版本同意）；`channelRoot` 与显式授权的 `rootGranted` 是替代 root 路径；`ownership={running,overdue,startedAt,completedAt,elapsedMs,operation,result?,lease?}` 回读共享维护。未知通道/状态不猜权限。 |
-| 页面 → 壳 | `setRootGranted(on)` | AndroidBridge → RootGrant.setGranted | root Shizuku 或显式 su 授权在场，且当前版本同意有效才允许开启；关闭永远允许。重新同意不自动复活升级前开关。返回真实写后状态与拒绝码；应用 root 检测是独立显式动作。 |
-| 页面 → 壳 | `setRootConsent(on)` | AndroidBridge → `RootGrant.setConsent` | 「已阅读」确认写面。勾选 = 同意并**与 versionCode 绑定**（升级后自动失效需重新确认）；**取消勾选即撤销同意并同时关闭开关**（issue 用户指定语义，不留矛盾态） |
+| 页面 → 壳 | `rootGrantState()` | AndroidBridge → RootGrant.state | `granted` 是有效授权（raw switch 且同意覆盖当前免责声明内容版本 `RootGrant.DISCLAIMER_REVISION`，**不是** APK versionCode）；`channelRoot` 与显式授权的 `rootGranted` 是替代 root 路径；`ownership={running,overdue,startedAt,completedAt,elapsedMs,operation,result?,lease?}` 回读共享维护。未知通道/状态不猜权限。 |
+| 页面 → 壳 | `setRootGranted(on)` | AndroidBridge → RootGrant.setGranted | root Shizuku 或显式 su 授权在场，且同意覆盖当前免责声明内容版本才允许开启；关闭永远允许。重新同意不自动复活未生效的旧开关。返回真实写后状态与拒绝码；应用 root 检测是独立显式动作。 |
+| 页面 → 壳 | `setRootConsent(on)` | AndroidBridge → `RootGrant.setConsent` | 「已阅读」确认写面。勾选 = 同意并**绑定免责声明内容版本**（`DISCLAIMER_REVISION`；0.14.7 起 APK 升级不再失效——用户实测「root 免责声明每次更新怎么都会掉」的修复，只有声明内容修订才需重新确认；旧键 `consentVersionCode` 只读迁移）；**取消勾选即撤销同意并同时关闭开关**（issue 用户指定语义，不留矛盾态） |
 | 页面 → 壳 | `openRootDisclaimer()` | AndroidBridge → MainActivity `onOpenRootDisclaimer` → `LocalDocs.open` | 免责声明文档通道：APK 内 assets（`docs/root-disclaimer.html`，离线/随版本/不可远端替换）。**不复用 [ExternalLinks]**（其 classify 只允许 https），新开同形本地通道：页面只传 key（固定 `root-disclaimer`），登记表在壳侧 `LocalDocs.kt`。应用内 AlertDialog+WebView 渲染 |
 | 同上（承重墙：策略门） | — | `ShizukuTransport.rootGateRefusal` + `readyService`/`runController` 入口 | 通道 uid==0 且未授权 ⇒ 特权执行面（runShell/pullFile/pushFile/removeRemote/runController）**整体 fail-closed**（code `root-grant-required`）。不做按 op 分类的假隔离（issue 已确证 uid 0 下 shExec 任意 shell，白名单挡不住引号逃逸） |
 | 同上（页面消费） | — | `dsh-client-ui-responsive` 手机控制 Shizuku 区块下方 | 开关 + 「已阅读」复选（带蓝色超链接开免责声明）；非 root 通道：开关置灰 + **红字「无法在未 root 的设备上赋予该权限」**（用户指定文案，逐字） |
@@ -169,10 +175,11 @@ JS interface count is checked from source by `scripts/check-bridge-symmetry.mjs`
 | 方向 | 方法/通道 | 位置 | 说明 |
 |---|---|---|---|
 | 页面 → 壳 | `getScreenScope()` / `setScreenScope(scope)` | AndroidBridge → MainActivity → `ScreenScopePrefs` | 用户设置唯一写面；wire 值仅 `virtual-only`、`real-only`、`all`，未知值回落 `virtual-only`。模型工具没有 setter。设置页落在开发者选项「屏幕与 Shizuku 控制」。 |
-| 页面 → 壳 | `browserHostStatus/show/hide/reload/bounds/viewport/close/identity` | AndroidBridge → MainActivity → `BrowserHost` | Files 右栏的可信页面把 CSS stage bounds 与视口预设传给壳；第二 WebView 只覆盖该 stage（letterbox rect，不做 CSS 缩放），不挂 JavaScript bridge。 |
+| 页面 → 壳 | `browserHostStatus/show/hide/reload/bounds/viewport/close/identity` | AndroidBridge → MainActivity → `BrowserHost` | Files 右栏的可信页面把 CSS stage bounds 与视口预设传给壳；第二 WebView 只覆盖该 stage（letterbox rect，不做 CSS 缩放），不挂 JavaScript bridge。`browserHostBounds` 可见挂载1000ms续租、4000ms过期隐藏；hidden/detach停止续租，普通几何消息仍去重。 |
 | 页面 → 壳 | `vdisplayStatus/create/destroy/launchSettingsProbe/backProbe/bounds` | AndroidBridge → MainActivity → `VdisplayController`/`VdisplayHost` | 建屏/销毁/`am start --display` 探针/`input -d` 回退探针/viewer stage 几何。`virtual-1` 建成前一律 `screen-not-ready`，绝不映射 display 0。 |
 | 页面 → 壳 | `dshBackBridge.setAvailable/getBackAvailable` | BackGateBridge（独立 @JavascriptInterface 对象） | 注入层回传页内层栈可用性；URL 由 Activity 决策，`getBackAvailable` 为只读事实。 |
 | 引擎 → 壳 | `dsh_screen_scope.xml` 只读 | `androidPrivilege.screenScope/screenAccess` | manage 工具在选 a11y/ADB 前读取 native scope；无障碍执行点仍重复检查，防止直连控制队列绕过。 |
+| 引擎 → 壳 | `android_vdisplay_input` → `vdInput` | bridge `controlExec` → `VdisplayOps` → `VdisplayController.input` | `real-only` 下 bridge 与壳执行点均返回稳定 `screen-out-of-scope`，壳在 Shizuku `input -d` 前复核；显式 target 优先于 selected，不能重定向输入。`virtual-only`/`all` 允许已登记虚拟目标。 |
 | 壳 ↔ 引擎 ↔ 页面 | file-incoming queue / claim / content / complete / clean | FileIncoming → dsh-android-file-open → ui-responsive | 五条 exact 路由全部受保护；队列状态只给 opaque entry metadata；成功导航后 claim 得进程内 ticket，再经同源 content 读取字节并交给上游 composer 形成未发送 generic file attachment。路径不进入页面或模型，重启不恢复草稿。 |
 | 壳 ↔ 引擎 | 通知应答流 `$events`（streamId=`dsh-notify-responder`） | NotifyBridge ↔ MuxClient | 与悬浮球事件流独立；waterfall 投放通知、cancel 撤通知、`$events/result` 投递回答。 |
 

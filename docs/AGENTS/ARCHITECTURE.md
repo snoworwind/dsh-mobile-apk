@@ -1,13 +1,21 @@
 # ARCHITECTURE.md — 模块地图
 
+## fx2 生命周期与恢复增量
+
+`EngineService` 的启动属主快速复查预算耗尽后转为五分钟慢速复查；定时任务绑定 Service epoch，销毁时取消，迟到回调不得启动旧世代引擎。端口外来占用、启动门和用户开机选项仍按原有失败分类处理。
+
+`NotifySuppressQueue` 在现有 `dsh-notify` 私有 preferences 内保存 v1 有界延后日志，`NotifyStore.start` 恢复并重启 tick。延后成功必须先同步提交；失败不消费来源偏移。补投后同步结算，借助完整条目哈希和系统活动通知回执缩小崩溃重复窗口，不承诺跨 Android 通知与 preferences 的原子 exactly-once。容量、TTL、会话覆盖语义不变，不迁移模型、HOME 或用户插件目录。
+
+插件授权增量见 `BRIDGE-API.md`：固定动画设置 API 与私有 SurfaceFlinger 查询分离，公共调用不能声明 `internal` 权限。
+
 > 职责：安卓壳源码的权威模块登记（assets 资产、manifest 组件）。**文件数与行数请用命令现数**（`find app/src/main -name '*.kt' | wc -l`、`wc -l <file>`）；本表不维护这些易漂移的数字。「被引用」为名称级 grep（含少量注释提及），调用关系以源码为准。源码根：`app/src/main/java/com/dsharnessmobile/shell/`。
 
 ## 1. 宿主 Activity 及拆分协作类
 
 | 文件 | 职责一句话 | 被引用 |
 |---|---|---|
-| MainActivity.kt | 主 WebView 宿主/生命周期/桥接线/insets/BrowserHost 与 VdisplayHost 生命周期编排 | 几乎所有协作类（构造注入） |
-| GuidePageRenderer.kt | 引导页纯代码 UI 渲染 + GuidePhase 状态机 + WebUI/引导页切换 + APK 自更新交互 | MainActivity |
+| MainActivity.kt | 主 WebView 宿主/生命周期/桥接线/insets（手机/宽屏动态top单层消费）/BrowserHost 与 VdisplayHost 生命周期编排 | 几乎所有协作类（构造注入） |
+| GuidePageRenderer.kt | 引导页纯代码 UI 渲染 + GuidePhase 状态机 + 结构化启动诊断/端口重试与SafeMode分流 + WebUI/引导页切换 + APK 自更新交互 | MainActivity |
 | GuideChrome.kt | 引导页控件句柄束（GuideChrome/GuideCallbacks 数据类，DsUi 消费方） | GuidePageRenderer、MainActivity、WatchdogV2、EngineService |
 | EngineStartFlow.kt / ForegroundPageRecoveryPolicy.kt | CAS generation/token启动所有权；前台页面generation与一次安静恢复，后台不运行freeze监控；销毁取消caller不取消共享root worker | MainActivity、GuidePageRenderer |
 | ConfigTransfer.kt | legacy 配置导入导出未挂载；同文件 DirectoryPickerController 的 SAF 注册仍在用；活动配置读写归 EngineManager→SnapshotUserData | MainActivity（仅选择器） |
@@ -15,8 +23,9 @@
 | WebUiChrome.kt | 窗口 UI chrome：沉浸式/剪贴板/常亮/主题推送（真源统一走 ShellState） | MainActivity |
 | FileIncoming.kt | 外部来件（VIEW/SEND）校验净化→临时工作区→通知引擎；queued source 保留到浏览器草稿 claim 或 TTL | MainActivity、EngineService |
 | AndroidBridge.kt | `window.androidBridge` 全部 @JavascriptInterface（计数由 check-bridge-symmetry 守；含设置/chooser/ScreenScope/BrowserHost/虚拟屏/BackGate 接线） | MainActivity（唯一 addJavascriptInterface 点） |
-| BrowserHost.kt / BrowserHostNavigationPolicy.kt / BrowserOverlayPolicy.kt / BrowserHostProfile.kt | Session/tab 捕获目标与 model/UI focus 分离；每tab无桥WebView先验证nonDefault profile，再允许HTTP/loopback并保留受保护控制origin拒绝；stage/letterbox/TTL；不支持profile拒绝、不回Default | MainActivity、可信browserHostCommand、模型controlOp |
+| BrowserHost.kt / BrowserHostNavigationPolicy.kt / BrowserOverlayPolicy.kt / BrowserHostProfile.kt | Session/tab 捕获目标与 model/UI focus 分离；每tab无桥WebView先验证nonDefault profile，再允许HTTP/loopback并保留受保护控制origin拒绝；stage/letterbox/TTL租约（客户端可见时1000ms续租、原生4000ms过期）；前台只重放新鲜舞台；不支持profile拒绝、不回Default | MainActivity、可信browserHostCommand、模型controlOp |
 | ScreenScope.kt | 0.14 新增：ScreenScope/ScreenTargets/ScreenScopePrefs——用户屏幕范围的 native 真源（损坏/未知回落 virtual-only） | AndroidBridge、DeviceControlService |
+| WebViewShim.kt | WebView 版本敏感面唯一入口：provider 回读（`getCurrentWebViewPackage`+major 解析单实现）、androidx.webkit 特性门、settings 两档（baseline=引擎页/控制台，+isolation=BrowserHost）；LocalDocs 静态文档面刻意不走 baseline | MainActivity、BrowserHost、ConsoleActivity、EngineManager |
 
 注入方向：MainActivity 字段初始化阶段 `by lazy`/直接构造各协作类并传 `this`（如 `engineFlow = EngineStartFlow(this)`）；ActivityResult 注册必须在 STARTED 前，故 dirPickerController/mediaPickerController 为字段直接构造。协作类只回调 MainActivity 的 internal 方法，不持有彼此。
 
@@ -43,13 +52,13 @@
 | EngineManager.kt | 快照部署/指纹刷新（事务化）/引擎 spawn（linker64 回退）/shellEnv/运行时补丁部署 | EngineService、EngineStartFlow、ConsoleSession、MainActivity、UpdateManager、UndoGate |
 | EngineService.kt | ServiceEpoch拥有startup/watchdog/undo caller与WakeLockOwner；等待后重复epoch检查；pending最多六次2/4/8/16/30/30秒重查，耗尽不自旋 | BootReceiver、EngineStartFlow、MainActivity、WatchdogV2 |
 | WatchdogV2.kt | 深度探活/熔断指数退避/PARTIAL_WAKE_LOCK + task-done 标记按字节偏移消费（ST-12） | EngineService、BootReceiver、EngineStartFlow、UndoGate、GuideChrome（注释） |
-| UndoGate.kt | 连败 6 次急救回退：调 assets/undo-emergency.mjs restore-last-good（幂等/防循环） | EngineService、EngineStartFlow、EngineManager（注释） |
+| UndoGate.kt | 看门狗/启动失败恢复：按当前 transaction-authorized Hard `{id,name}` manifest 判归属；非 Hard 故障只追加 disabled override 保留原配置；整份恢复要求同一 Soft digest 在两次实际引擎 spawn 上通过 authenticated Cordis/preset/session/modelCatalog health | EngineService、EngineStartFlow |
 | SnapshotExtractor.kt | xz tar 流式解压（commons-compress）+ security.android.exec xattr 补章 + zip-slip 防护 | EngineManager、UpdateManager |
-| SnapshotTransaction.kt | 运行时替换事务：暂存解压→原子交换→指纹提交；中断恢复（前滚/回滚/丢弃） | EngineManager |
-| SnapshotFs.kt / SnapshotFileMode.kt / SnapshotUserData.kt / SnapshotFingerprintPolicy.kt | NOFOLLOW文件原语、权限、legacy backup；迁移marker与活动profile配置保留/传输/旧blank seed隔离；严格内嵌SHA与durable fingerprint准入 | SnapshotTransaction、EngineManager |
+| SnapshotTransaction.kt | 工厂刷新与在线更新共用事务 journal/stage/previous；在线事务仅换 usr、冷启动回滚未健康提交，工厂事务保持原契约 | EngineManager、UpdateManager |
+| SnapshotFs.kt / SnapshotFileMode.kt / SnapshotUserData.kt / SnapshotFingerprintPolicy.kt / ProfilePackageManifest.kt | NOFOLLOW文件原语、权限；迁移marker与活动profile配置保留/传输/旧blank seed隔离；未知 `.dsh` 冲突项默认保留；严格内嵌SHA与durable fingerprint准入；profile manifest merge 与快照刷新共用 | SnapshotTransaction、EngineManager |
 | FactoryProfilePatch.kt | 0.14（#214）：profile `cordis.patch.yml` 工厂语义定点纠正（按 id 以工厂为准，退役 disabled 残行清理，用户独有条目不动） | EngineManager、SnapshotTransaction |
-| UpdateManager.kt | 快照在线更新（manifest/sha256/换 usr，usr-old 回退） | EngineManager、EngineStartFlow、UndoGate（注释） |
-| EngineProbe.kt | 引擎探活（Proxy.NO_PROXY 直连 #118；401/303 视作 alive） | 壳侧全部探活唯一入口 |
+| UpdateManager.kt | SHA 校验后把在线包解到共享 stage，经 ONLINE_UPDATE journal 只换 usr；探活健康提交，冷启动恢复未提交事务 | EngineManager、EngineStartFlow |
+| EngineProbe.kt | 引擎探活（Proxy.NO_PROXY 直连 #118；401/303 视作 alive）；Soft promotion 的只读健康证据另要求 Cordis inventory、启用的主插件与 preset fibers active、session/list 与 modelCatalog 形状完整 | 壳侧全部探活唯一入口 |
 | ConsoleActivity.kt | 内置 bash 控制台（assets/console.html + consoleBridge 6 方法） | MainActivity、GuidePageRenderer |
 | ConsoleSession.kt | 快照 bash 子进程（stdin 管道 + Listener 回调，随 Activity 生死） | ConsoleActivity |
 
@@ -108,9 +117,11 @@
 |---|---|---|
 | snapshot.tar.xz | 内嵌 Termux 运行时快照（usr/ + home/；引擎版本以构建输入为准） | SnapshotExtractor（首启解压到 filesDir） |
 | snapshot.sha256 | 快照指纹（随 ABI/批次变化，现数用 `check-snapshot-fingerprint` 对账） | EngineManager 读取；与 filesDir/.snapshot-fingerprint 比对——指纹翻转触发事务化全量重解压，`snapshotRefreshing` 闸门在刷新期禁止拉引擎 |
+| plugin-hard-manifest.json | 最终注入 snapshot 的精确 Hard `{id,name}` 清单，schema 2 含 profile 来源子集与 `factoryBundles: [{name,version,patchSha256}]` 并绑定归档 SHA-256；字段缺席表示旧资产无法证明 bundle ownership，`[]` 表示可信空选择 | `build-hard-manifest.mjs` 从 final tar 的 web profile bundle 顺序及 app-boot install-first/profile-second 解析位置生成；patch SHA-256 使用 `DSHBNDL1` + 按声明顺序的 UTF-8 路径/长度帧/实际 bytes。online sidecar 仅由 verified stage 与当前 APK可信选择名重算身份，不继承 live HOME/旧 sidecar；marker/.online-snapshot 双 fingerprint 选中；SWAPPING 或缺失/错版时归属动作不执行 |
 | patched/ | 运行时补丁（文件清单与大小见 RUNTIME-PATCHES.md） | EngineManager.applyRuntimePatches()（内容指纹判定，目标包缺席跳过） |
 | console.html | 控制台终端 UI（consoleBridge 页面侧） | ConsoleActivity 加载 |
 | undo-emergency.mjs | undo 急救 CLI（list/restore/safe-mode，独立于引擎可运行） | EngineManager.deployUndoCli → UndoGate.execute 调用 |
+| Safe Mode / PluginMounts | Exact `{id,name}` identity bound to APK snapshot or transaction-authorized online archive; automatic failure quarantine preserves original insert/config and atomically appends a marked Cordis `disabled: true`. Soft Candidate promotes only across two distinct engine spawns with authenticated inventory, Hard identity presence, enabled preset fibers, session and modelCatalog evidence. | SafeMode / PluginMounts → Safe Console or UndoGate → existing engine restart |
 | licenses/ | GPL 全文四件 + THIRD_PARTY_NOTICES.md（第三方合规随包分发） | 门禁 check-third-party.mjs 校验其来源 |
 
 ## 7. manifest 组件（app/src/main/AndroidManifest.xml）

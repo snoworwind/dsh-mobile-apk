@@ -21,7 +21,6 @@ internal class EngineStartFlow(private val activity: MainActivity) {
 
   private val flowOwnership = StartupFlowOwnership()
   private val ownershipRetry = StartupOwnershipRetryBudget()
-  private val updateRunning = java.util.concurrent.atomic.AtomicBoolean(false)
   /** 重启引擎 in-flight 守卫（防连点双杀双启）。 */
   private val engineRestarting = java.util.concurrent.atomic.AtomicBoolean(false)
   /** #118 建议7（2026-09）：启动失败自动重试（最多 2 次，5s/10s 间隔），
@@ -40,11 +39,25 @@ internal class EngineStartFlow(private val activity: MainActivity) {
   /** Throttles retries of an engine page that failed while the engine was still booting. */
   private var lastEnginePageReloadAt = 0L
   @Volatile private var monitorGeneration = 0L
+  @Volatile private var updateUiGeneration = 0L
   private val engineMonitorHandler = android.os.Handler(android.os.Looper.getMainLooper())
   private val engineMonitorRunnable = object : Runnable {
     override fun run() {
       if (!canRunEngineWork()) return
       if (!activity.pageUiActive || activity.userClosedEngine) return
+      // CONTRACT §4 闸门：插件装配失败 latch 期内整条前台监控都不再动作。
+      // 为什么是整条而不是只挡住 showWeb 那一支：latch 的语义是「页面已定性失败，等用户决策」；
+      // 放行其余分支就会继续做「引擎未运行 → 自动恢复」的相位切换，把 Error 页顶掉——那是
+      // 另一种形态的弹回。用户显式重试/安全模式会清 latch，出口仍在。
+      if (clientPluginTreeFailed) return
+      // The startup owner performs its own probes. A retry clears the previous refusal;
+      // the monitor must not briefly promote that same foreign listener during the new attempt.
+      if (flowOwnership.running) {
+        engineMonitorHandler.postDelayed(this, 3_000)
+        return
+      }
+      // HTTP liveness does not prove that a foreign listener belongs to this engine.
+      if (activity.engineManager.lastStartRefusalCode == EngineManager.REFUSAL_PORT_FOREIGN) return
       val generation = monitorGeneration
       val monitor = this
       Thread {
@@ -53,6 +66,11 @@ internal class EngineStartFlow(private val activity: MainActivity) {
         val portAlive = EngineProbe.portReachable(500)
         activity.runOnUiThread {
           if (generation != monitorGeneration || !activity.pageUiActive || !canRunEngineWork()) return@runOnUiThread
+          if (flowOwnership.running) {
+            engineMonitorHandler.postDelayed(monitor, 3_000)
+            return@runOnUiThread
+          }
+          if (activity.engineManager.lastStartRefusalCode == EngineManager.REFUSAL_PORT_FOREIGN) return@runOnUiThread
           if (activity.webViewReady && activity.guideViewReady && !activity.userClosedEngine) {
             if (httpAlive || portAlive) {
               engineMonitorFailures = 0
@@ -107,6 +125,10 @@ internal class EngineStartFlow(private val activity: MainActivity) {
     override fun run() {
       if (!canRunEngineWork()) return
       if (!activity.pageUiActive || !activity.webViewReady || activity.userClosedEngine || activity.webView.visibility != View.VISIBLE) return
+      // CONTRACT §4 闸门：latch 期内早退。坏页面本来就装不上插件，evaluateJavascript 心跳
+      // 得不到应答是**预期结果**，把它当成「渲染进程冻结」去 reload 只是又一次弹回坏页面
+      // （与 showWeb 的 reload 环同族）。清 latch 之后本看门狗自然恢复。
+      if (clientPluginTreeFailed) return
       val now = System.currentTimeMillis()
       if (now - pageLoadedAt > 45_000 && now - jsAckAt > 20_000) {
         if (!freezeReloaded) {
@@ -262,6 +284,210 @@ internal class EngineStartFlow(private val activity: MainActivity) {
     }
   }
 
+  // ── 客户端插件装配失败：壳侧失败面（CONTRACT §4）────────────────────────────
+  //
+  // 页面注入层在「终局失败」时经 console.error 发布 `[dsh-boot-failed] …`（CONTRACT §1），
+  // MainActivity.onConsoleMessage 路由到本方法。壳侧要做的四件事（顺序即契约）：
+  //   ① 落失败终态（boot-fail.log，stage=client-plugin-tree-failed）+ Log.e 双通道；
+  //   ② 置 latch —— 之后 showWeb / 前台监控 / 冻结看门狗都不得把坏页面弹回前台；
+  //   ③ 前台立即切引导页 Error（非前台只挂起，由 onResume 消费）；
+  //   ④ 后台花掉**一次**自动回滚预算（与 UndoGate 的 30 分钟窗叠加）。
+  //
+  // **不得复用 enginePageFailed + claimLoadErrorRetry()**（CONTRACT §0 的硬约束）：那条路
+  // 是「页面加载失败 → 自动重载」，而坏插件树会让页面每次渲染完都回到同一条契约行——
+  // 复用即重载环。latch 是独立的、只有用户显式动作才解除的闸门。
+
+  /** latch：本世代是否已认定「客户端插件装配失败」（CONTRACT §4）。
+   *  只有三条路径置位（本方法），只有用户显式动作/新启动世代清位（clear...）。 */
+  @Volatile private var clientPluginTreeFailed = false
+
+  /** 本进程是否已花掉自动回滚预算（一次性；与 UndoGate.RETRY_WINDOW_MS 叠加）。 */
+  @Volatile private var clientPluginTreeRecoverySpent = false
+
+  /** 失败契约行原文（折叠后；供解析 failedIds 与落盘 detail）。 */
+  @Volatile private var clientPluginFailureRawLine = ""
+
+  /** 面向用户的失败原因短句（进错误页 hint 的 %1$s；绝不写「未知」以外的臆造内容）。 */
+  @Volatile private var clientPluginFailureReasonText = "未点名具体条目"
+
+  /** latch 的只读访问器（MainActivity 的闸门与单测用；CONTRACT §4 冻结此属性名）。 */
+  internal val clientPluginTreeFailedLatch: Boolean get() = clientPluginTreeFailed
+
+  /** 失败原因短句（MainActivity 呈现错误页时取用）。 */
+  internal val clientPluginFailureReason: String get() = clientPluginFailureReasonText
+
+  /** 用户显式动作/新启动世代/回滚放行时调用：解除 latch（**不**退自动回滚预算）。 */
+  internal fun clearClientPluginTreeFailureLatch() {
+    clientPluginTreeFailed = false
+  }
+
+  /**
+   * 页面契约行入口（由 MainActivity 控制台路由调用；JavaBridge/WebView 线程）。
+   *
+   * 幂等开销极小（重复行只是重复写一条诊断），但编排本身是幂等的：latch 置位后重复到达
+   * 不会重复起回滚线程——[clientPluginTreeRecoverySpent] 是一次性的。
+   */
+  fun onClientPluginTreeFailed(rawLine: String) {
+    if (!canRunEngineWork()) return
+    val folded = (rawLine ?: "").replace('\n', ' ').replace('\r', ' ').trim()
+    clientPluginFailureRawLine = folded
+    val ids = LogCollector.clientFailedIdsOf(folded)
+    clientPluginFailureReasonText = if (ids.isEmpty()) "未点名具体条目" else "条目 " + ids.joinToString(",")
+    // ① 失败终态落盘（writeBootFail 内部另有一条 Log.e；下面这条把「契约行原文」也带进 logcat）。
+    val detail = "客户端插件装配失败（页面侧契约行 " + LogCollector.PAGE_PLUGIN_FAIL_PREFIX + "）：failedIds=" +
+      (if (ids.isEmpty()) "-" else ids.joinToString(",")) + " 原文=" + folded.take(400)
+    LogCollector.writeBootFail(activity, "client-plugin-tree-failed", detail)
+    Log.e("dsh-shell", "client plugin tree failed: failedIds=" + (if (ids.isEmpty()) "-" else ids.joinToString(",")) +
+      " line=" + folded.take(400))
+    // ② latch：此后所有「把 WebUI 推回前台」的自动路径都必须让路。
+    clientPluginTreeFailed = true
+    // ③ 呈现：前台立刻切错误相位；非前台挂起，由 MainActivity.onResume 消费。
+    activity.runOnUiThread { activity.presentClientPluginFailure() }
+    // ④ 后台花掉一次性回滚预算。**不**在 WebView 线程上做 IO/回滚。
+    val generation = monitorGeneration
+    Thread {
+      try {
+        maybeRecoverFromClientPluginTreeFailure(generation)
+      } catch (t: Throwable) {
+        Log.e("dsh-shell", "client plugin tree recovery failed", t)
+      }
+    }.apply { isDaemon = true; name = "dsh-client-plugin-recovery" }.start()
+  }
+
+  /**
+   * 自动回滚编排（CONTRACT §4）：一次性入口 → 判定路线 → 唯一动作走 [UndoGate.execute]。
+   *
+   * **EngineStartFlow 不重复决策**：外科拔除还是整份回滚由 [UndoGate.execute] 内部按同一判据
+   * 分支（§5）；这里只负责「算出该传进去的 clientFailure，以及在明确不该动作时不动手」。
+   */
+  private fun maybeRecoverFromClientPluginTreeFailure(generation: Long) {
+    // 只花一次：本进程已花过预算就直接停手（与 UndoGate 的 30 分钟窗叠加）。
+    if (clientPluginTreeRecoverySpent) return
+    // 一次性入口：被抑制（重试窗内）或未放行 ⇒ 现在不执行回滚。
+    if (!UndoGate.onClientPluginTreeFailure(activity, clientPluginFailureReason, activity.engineManager)) return
+    if (clientPluginTreeRecoverySpent) return
+    clientPluginTreeRecoverySpent = true
+    LogCollector.log("dsh-shell", "client plugin tree recovery starting (generation=" + generation + ")")
+    try {
+      val engine = activity.engineManager
+      val patch = PluginMounts.patchFile(engine)
+      val ids = LogCollector.clientFailedIdsOf(clientPluginFailureRawLine)
+      // 纯判据（见 [clientPluginFailureRoute]）：唯一命中才外科拔除；点名不出但清单未变才允许
+      // 整份回滚；两者都不成立就**不动作**（宁可不动，也不做一次会吞掉用户插件的写回）。
+      val hardManifest = PluginMounts.ensureHard(activity, PluginMounts.currentFingerprint(activity))
+      if (hardManifest == null) {
+        LogCollector.writeBootFail(activity, "client-plugin-tree-failed-ownership-unverified",
+          "本版本插件归属清单缺失或不匹配；未自动隔离/回滚，用户配置保持原样")
+        activity.runOnUiThread { activity.presentClientPluginFailure() }
+        return
+      }
+      val candidate = PluginMounts.clientPullCandidate(activity, patch, ids, hardManifest)
+      val route = clientPluginFailureRoute(candidate, PluginMounts.mountUnchangedSinceHealthy(activity, patch))
+      if (route == ClientPluginFailureRoute.NO_ACTION) {
+        LogCollector.writeBootFail(
+          activity, "client-plugin-tree-failed-no-action",
+          // 措辞必须**如实指向真因**（Lead 设备取证 DEVICE-FINDING-1）：这一支的触发条件是
+          // 「clientPullCandidate 返回 null 且有效 composition 自健康起已变」。
+          // Profile cordis 与已解析 bundle insert layers 都参与点名；身份不唯一、factory来源不明或命中Hard时拒绝修改。
+          "点名不出唯一可拔 Soft 条目（profile/bundle composition 中无对应 insert、命中多条、factory 身份不明或命中 Hard），" +
+            "不自动回滚（避免连坐用户其它插件），停在可读错误页",
+        )
+        activity.runOnUiThread { activity.presentClientPluginFailure() }
+        return
+      }
+      activity.runOnUiThread {
+        if (!activity.isDestroyed && !activity.isFinishing) {
+          activity.applyGuidePhase(
+            GuidePhase.Undoing, "正在回退插件装配…",
+            activity.getString(R.string.ds_client_plugin_fail_hint, clientPluginFailureReason),
+          )
+        }
+      }
+      // 唯一动作：外科传 candidate、整份传 null；分支判定在 execute 内部（§5）。
+      val result = UndoGate.execute(activity, engine, candidate)
+      if (result.executed) {
+        WatchdogV2.reset()
+        engine.resetCooldown()
+        // 设备实测 #3（DEVICE-FINDING-3）：**不 force 就等于没修**。
+        //
+        // startEngine() 的首个判据是 `if (!force && engineUsable && !degradedHttp) return true` ——
+        // 客户端插件装配失败时引擎 **HTTP 是健康的**（坏的只是它装配出来的插件树），于是不带 force
+        // 的调用会判定「已有可用引擎」**直接早退、什么都不做**。引擎继续用**启动时读入的旧 profile**
+        // 组合并服务 window.__DSH_BOOT__，那份清单里仍含刚被拔掉的坏插件；即使下面的
+        // reloadEnginePage() 真的重新导航，取回的**还是同一份坏 manifest**，页面再次报同样的失败。
+        // 真机事实：拔除成功、patch 磁盘上已干净，而引擎进程 ETIME 早于拔除时刻——从未重启，屏幕
+        // 240s 恒定停在「插件装配失败」。数据面修好、服务面没修好，用户面就是没修好。
+        //
+        // force = true 的安全边界**不在本调用点**，而在 startEngine 既有护栏：PORT_FOREIGN 仍拒绝；
+        // OUR_HTTP 但本壳没有可安全停止的子进程句柄仍拒绝；killExistingEngine 只停**本壳持有的**
+        // 句柄，绝不按名字杀未归属的监听器。本场景 engineProcessAlive() == true（有句柄）⇒ 可正常
+        // kill+spawn；此刻界面停在引导页 Error 相位（Web UI 从未加载成功），无用户可见的在跑会话。
+        engine.startEngine(force = true)
+        // 设备实测 #4（DEVICE-FINDING-4）：**reload 必须等引擎真的能应答**。
+        //
+        // startEngine(force = true) 只保证**进程已 spawn**，不保证 HTTP 已 listen（冷启动实测
+        // 5-45s 宽分布）。若紧接着 reload，导航会撞上尚未监听的窗口 ⇒ ERR_CONNECTION_REFUSED
+        // ⇒ onReceivedError 置 enginePageFailed ⇒ 用户看到「页面加载失败」，仍然进不去。
+        // 所以这里在**后台线程**（本函数本就在回滚线程上）做有界就绪等待，不做任何固定 sleep。
+        //
+        // 为什么把等待放在 clearClientPluginTreeFailureLatch() **之前**：latch 的语义是「页面已定性
+        // 失败，等用户决策」。等待期间引擎还没起来，latch 必须继续按住所有「把 WebUI 推回前台」的
+        // 自动路径（含 engineMonitorRunnable），否则 3s 一拍的监控会在引擎未监听时切相位。等待有了
+        // 结论之后再决定是「解 latch + 重新导航」还是「保持 Error 并如实留档」。
+        val ready = awaitEngineHttpReady(
+          budgetMs = ENGINE_BOOT_BUDGET_MS,
+          processAlive = { activity.engineManager.engineProcessAlive() },
+          current = { !activity.isDestroyed && !activity.isFinishing && canRunEngineWork() },
+        )
+        if (!ready) {
+          // 预算内没等到引擎应答：**不** reload（那只会再造一次「页面加载失败」），也不解 latch，
+          // 如实停在可读错误页并把判据落盘——用户仍有「安全模式启动」这条出口。
+          LogCollector.writeBootFail(
+            activity, "client-plugin-tree-failed-engine-not-ready",
+            "已强制重启引擎，但在 " + ENGINE_BOOT_BUDGET_MS / 1000 + "s 预算内未等到 HTTP 应答：" +
+              "不在此时重新导航（避免又一次 ERR_CONNECTION_REFUSED），停在可读错误页",
+          )
+          activity.runOnUiThread { activity.presentClientPluginFailure() }
+          return
+        }
+        // 放行：先解 latch，再**重新导航 + 露出 WebView**（用户可见的「恢复」动作）。
+        clearClientPluginTreeFailureLatch()
+        activity.runOnUiThread {
+          if (!activity.isDestroyed && !activity.isFinishing) {
+            // 设备实测 #2（DEVICE-FINDING-2）：**只 showWeb() 不够**——数据修好不等于屏幕修好。
+            //
+            // showWeb() 只在 enginePageFailed == true 时才 reload，而本场景失败的是**插件装配**
+            // 而非导航传输（WebView 早就加载成功了，enginePageFailed == false），于是 showWeb()
+            // 只执行 guideRenderer.showWeb()：把**已经持有旧失败文档**的 WebView 重新露出来，
+            // 从不重新导航。而客户端插件清单是**文档加载时**拉的，旧文档不会自己重拉一次
+            // ⇒ 真机实测：拔除已成功（patch 与基线逐字节相同），屏幕却 3 分钟仍停在
+            // "Failed to load plugins"，只能靠手动冷启动恢复。
+            //
+            // 因此必须**同时**做两件事，顺序也不可换：
+            //   ① reloadEnginePage() 真正 webView.reload()：重新取 manifest 与插件树（修复数据面）；
+            //   ② showWeb() 把引导页换回 WebView（reload 不负责切界面）。
+            // 前置条件已由上面的就绪等待保证（引擎此刻确实在应答，reload 不会撞空端口）。
+            // 有界性不变：仍是一次性预算（clientPluginTreeRecoverySpent）内的动作；latch 已清，
+            // 走的是 pageRecovery 的 Recovery.RELOAD 一次性重载，不是重载环。
+            activity.reloadEnginePage()
+            activity.showWeb()
+          }
+        }
+        LogCollector.log("dsh-shell", "client plugin tree recovery executed: " + result.summary.take(200))
+      } else {
+        LogCollector.writeBootFail(
+          activity, "client-plugin-tree-failed-recovery-failed",
+          "自动回滚未生效：" + result.summary.take(400),
+        )
+        // 失败 ⇒ 停在 Error，不再自动重试回滚（latch 保持置位，坏页面不会被弹回）。
+        activity.runOnUiThread { activity.presentClientPluginFailure() }
+      }
+    } catch (t: Throwable) {
+      Log.e("dsh-shell", "client plugin tree recovery failed", t)
+      LogCollector.writeBootFail(activity, "client-plugin-tree-failed-recovery-exception", "自动回滚编排抛出异常", t)
+    }
+  }
+
   /** 页面就绪/失败时复位（重新计时 + 允许再次上报）。 */
   fun resetBootStall() {
     bootStallStartAt = System.currentTimeMillis()
@@ -321,12 +547,14 @@ internal class EngineStartFlow(private val activity: MainActivity) {
   }
 
   fun startUpdateCheck() {
-    if (!updateRunning.compareAndSet(false, true)) return
+    if (!OnlineUpdateGate.begin()) return
+    val updateGeneration = ++updateUiGeneration
     activity.guideRenderer.chrome.updateButton.isEnabled = false
     activity.guideRenderer.chrome.updateButton.alpha = 0.55f
     activity.applyGuidePhase(GuidePhase.Updating, "检查更新…")
     UpdateManager(activity).checkAndApply { st ->
       activity.runOnUiThread {
+        if (updateGeneration != updateUiGeneration || !canRunEngineWork()) return@runOnUiThread
         // 相位由**类型**决定（0.14.1 批 2 / P0-2）：旧实现按字符串前缀猜，于是「本版没配发布源」
         // 被当失败渲染成满屏红字，而那串错误里写着 overrideManifestUrl（只存在于代码里的名字）。
         // 现在 NotConfigured 走 Info（中性事实 + 下一步），只有真正的失败才是红。
@@ -338,7 +566,7 @@ internal class EngineStartFlow(private val activity: MainActivity) {
           UpdateManager.UpdateOutcome.NotConfigured -> GuidePhase.Info
           UpdateManager.UpdateOutcome.Failed -> GuidePhase.Error
           UpdateManager.UpdateOutcome.Done -> GuidePhase.Recovering
-          UpdateManager.UpdateOutcome.Working -> GuidePhase.Updating
+          UpdateManager.UpdateOutcome.Working, UpdateManager.UpdateOutcome.Verifying -> GuidePhase.Updating
         }
         if (locked) {
           activity.guideRenderer.applyGuideHint(
@@ -351,8 +579,7 @@ internal class EngineStartFlow(private val activity: MainActivity) {
             if (phase == GuidePhase.Error) st.text.removePrefix("更新失败：") else null,
           )
         }
-        if (st.outcome != UpdateManager.UpdateOutcome.Working) {
-          updateRunning.set(false)
+        if (st.outcome != UpdateManager.UpdateOutcome.Working && st.outcome != UpdateManager.UpdateOutcome.Verifying) {
           activity.guideRenderer.chrome.updateButton.isEnabled = true
           activity.guideRenderer.chrome.updateButton.alpha = 1f
         }
@@ -394,7 +621,7 @@ internal class EngineStartFlow(private val activity: MainActivity) {
         // DEGRADED_HTTP（端口可连、HTTP 持续失败）下恒被清零，于是「半死引擎」在这条路径上
         // 永远达不到阈值，自动回撤静默不可达（与 planTick 的熔断锁存同族盲区）。
         // DEAD 路径不受影响：DEAD 下 consecutiveDegradedHttp 恒 0，两个计数相等。
-        if (!UndoGate.onProbeFailure(activity, WatchdogV2.effectiveFailureCount())) return@Thread
+        if (!UndoGate.onProbeFailure(activity, WatchdogV2.effectiveFailureCount(), engine = activity.engineManager)) return@Thread
         requireCurrentEngineFlow(generation)
         activity.runOnUiThread {
           if (!isCurrentEngineFlow(generation)) return@runOnUiThread
@@ -449,7 +676,8 @@ internal class EngineStartFlow(private val activity: MainActivity) {
     val attempt = engineRetryCount
     activity.runOnUiThread {
       if (!isCurrentEngineFlow(generation)) return@runOnUiThread
-      activity.applyGuidePhase(GuidePhase.Starting, "引擎启动失败，${delayMs / 1000}s 后自动重试（第 $attempt/2 次）")
+      activity.applyGuidePhase(GuidePhase.Starting, "引擎启动失败，${delayMs / 1000}s 后自动重试（第 $attempt/2 次）",
+        startupFailureHint(activity, activity.engineManager.lastStartRefusalCode))
       activity.showGuide()
     }
     engineMonitorHandler.postDelayed({
@@ -464,10 +692,15 @@ internal class EngineStartFlow(private val activity: MainActivity) {
    */
   fun start() {
     if (!canRunEngineWork()) return
+    // CONTRACT §4：新启动世代/用户显式重试 ⇒ 解除插件失败 latch（放行一次坏页面的呈现）。
+    // 这里只清 latch，**不**退一次性回滚预算——预算是「本进程最多自动回滚一次」，与世代无关。
+    clearClientPluginTreeFailureLatch()
     // The owner and generation change in one CAS; an obsolete finally cannot
     // clear a replacement, and duplicate lifecycle callbacks change neither.
     val token = flowOwnership.begin() ?: return
     val generation = token.generation
+    activity.engineManager.lastStartRefusalCode = null
+    activity.engineManager.lastStartRefusal = null
     if (!isCurrentEngineFlow(generation)) { flowOwnership.finish(token); return }
     // 新启动世代 = boot-stall 的新 epoch：在此复位（**不在** onPageFinished。
     // onPageFinished 只代表文档加载完，在那里复位会造成同 epoch 重复报，见 L-1）。
@@ -503,11 +736,19 @@ internal class EngineStartFlow(private val activity: MainActivity) {
           requireCurrentEngineFlow(generation)
           activity.engineManager.recoverInterruptedRefresh()
           requireCurrentEngineFlow(generation)
-          // 0.14.2-fx-2 缺口：恢复期**拒绝回滚**此前只有 logcat/诊断面，没有任何界面提示，
-          // 用户数据被保护了却不知情。这里落结构化码 + 一次性标记 + 诊断包；可见面由
-          // MainActivity 在引擎页面就绪后注入 DOM（引导页会被 showWeb 盖掉，故不切引导页相位）。
-          // 不阻断启动：恢复失败只意味着「这棵树还没收敛」，引擎仍可能正常起。
+          // 恢复期拒绝必须同时留下诊断证据与用户提示：写结构化码、一次性标记和诊断包；
+          // 本轮若仍未收敛，下面直接显示引导页 Error 并阻断探活/启动。恢复后进入引擎页时，
+          // MainActivity 也可消费保留的标记，在 DOM 中交付后续提示。
+          // 恢复失败时必须阻断探活与启动；事务现场未收敛前不能把当前 live 树当成健康运行时。
           reportRecoveryRejectionIfAny(activity, activity.engineManager.pendingRecoveryFailure) { isCurrentEngineFlow(generation) }
+          if (activity.engineManager.snapshotRecoveryBlocksRuntime()) {
+            activity.runOnUiThread {
+              if (!isCurrentEngineFlow(generation)) return@runOnUiThread
+              activity.applyGuidePhase(GuidePhase.Error, "运行时恢复未完成", "事务现场已保留；请打开控制台查看恢复失败原因。修复前不会探活或启动运行时。")
+              activity.showGuide()
+            }
+            throw java.util.concurrent.CancellationException("snapshot recovery has not converged")
+          }
         },
         // Health `running` intentionally includes arbitrary 401s for watchdog semantics; startup
         // early-exit needs ownership proof and must not treat an unrelated local listener as ours.
@@ -621,6 +862,9 @@ internal class EngineStartFlow(private val activity: MainActivity) {
             // 有了码，boot-fail.log 的一行就说清「是哪一类失败」，不必翻栈。
             val refreshCause = activity.engineManager.lastRefreshFailure
             val refreshCode = activity.engineManager.lastRefreshFailureCode ?: "snapshot-refresh-failed"
+            activity.engineManager.lastStartRefusalCode = refreshCause?.let {
+              activity.engineManager.startupExceptionCode(it)
+            } ?: EngineManager.REFUSAL_RUNTIME_UNAVAILABLE
             LogCollector.writeBootFail(
               activity, refreshCode,
               "内嵌运行时快照解压/写入失败（refreshSnapshot 返回 false，code=" + refreshCode + "）"
@@ -642,7 +886,8 @@ internal class EngineStartFlow(private val activity: MainActivity) {
                 // 缺陷 D（fx-2）：这两个显式 hint 会**覆盖** defaultHint，所以安全模式引导
                 // 必须在这里也带上——否则「运行时更新失败」屏的按钮已改成安全模式入口，
                 // 文案却还在让人「重试」，两者对不上。
-                diagnosticsLocationHint(dir) + "。可复制该路径或打开控制台查看 engine.log。" +
+                startupFailureHint(activity, activity.engineManager.lastStartRefusalCode) + "\n" +
+                  diagnosticsLocationHint(dir) + "。可复制该路径或打开控制台查看 engine.log。" +
                   activity.getString(R.string.ds_safe_hint_short),
               )
               activity.showGuide()
@@ -703,9 +948,11 @@ internal class EngineStartFlow(private val activity: MainActivity) {
         }
         activity.runOnUiThread {
           if (!isCurrentEngineFlow(generation)) return@runOnUiThread
-          activity.applyGuidePhase(GuidePhase.Error, "引擎启动失败")
+          activity.applyGuidePhase(GuidePhase.Error, "引擎启动失败", startupFailureHint(activity, refusalCode))
           activity.showGuide()
         }
+        // A foreign listener cannot be repaired by changing this app's profile or ownership.
+        if (refusalCode == EngineManager.REFUSAL_PORT_FOREIGN) return@Thread
         maybeAutoUndo(generation)
         // #118 建议7：失败不清零计数时自动重试（Error 页不再需要手动点重试）。
         scheduleEngineRetry(generation)
@@ -714,8 +961,9 @@ internal class EngineStartFlow(private val activity: MainActivity) {
       // Poll for the web service with process-alive semantics (0.13.0 D1): cold boot takes
       // 20-45s (EngineManager START_COOLDOWN_MS comment); the old hard 30s budget fired
       // "引擎启动超时" on slow devices (K20 Pro) even though the engine later started.
-      // Now: as long as the engine process is alive we keep waiting (up to the budget); only a
-      // dead process declares failure (auto-undo path). UI shows a grey "still starting" state.
+      // A concurrent manager can accept the spawn CAS before publishing its child. Wait for
+      // that preparation too, within the same budget; only neither alive nor preparing is DEAD.
+      // UI shows a grey "still starting" state.
       // FX-212.2（E-9）：预算与文案只许有一个来源——ENGINE_BOOT_BUDGET_MS。旧实现把预算改到
       // 90s 却把文案硬编码成 60 - s，首帧即显示「已等待 -30s」；本处不再出现任何字面量秒数。
       val pollBudgetMs = ENGINE_BOOT_BUDGET_MS
@@ -761,7 +1009,8 @@ internal class EngineStartFlow(private val activity: MainActivity) {
           try { FileIncoming.flushPending(activity) } catch (_: Throwable) {}
           break
         }
-        if (!activity.engineManager.engineProcessAlive()) {
+        if (!activity.engineManager.engineBootMayContinue()) {
+          // 没有存活进程且没有其它 manager 的启动准备请求：此时才确认死亡。
           // 引擎进程已死：宣判失败（自动回退路径），不再空等。
           break
         }
@@ -775,7 +1024,7 @@ internal class EngineStartFlow(private val activity: MainActivity) {
         Thread.sleep(pollStepMs)
       }
       if (!isCurrentEngineFlow(generation)) return@Thread
-      if (!booted && !activity.engineManager.engineProcessAlive()) {
+      if (!booted && !activity.engineManager.engineBootMayContinue()) {
         // 任务 19：失败终态落盘。这条路径是设备实测里最密集的失败形态（44 次 t_listen=-1 中
         // 多数是引擎进程死亡），必须留下「当时配置指纹 + 引擎日志状态 + 退出码」。
         //
@@ -826,7 +1075,7 @@ internal class EngineStartFlow(private val activity: MainActivity) {
         applyShizukuKeepAlive(generation)
         activity.runOnUiThread { if (isCurrentEngineFlow(generation)) activity.showWeb() }
       } else {
-        // 进程还活着但 90s 内未就绪（异常慢）：灰色提示而非红色错误，不触发回退——
+        // 进程还活着或另一路仍在准备，但 90s 内未就绪（异常慢）：灰色提示而非红色错误，不触发回退——
         // 引擎仍在启动，3s engineMonitorRunnable 会兜底切界面。
         // 0.13.8 #175：终点不再「只提示」——安排一次自动重试（DEGRADED_HTTP 阶梯随后
         // 兜底：若 HTTP 持续失败而端口可连，看门狗会受控重启，不再永久停留灰字）。
@@ -834,7 +1083,7 @@ internal class EngineStartFlow(private val activity: MainActivity) {
         // 它此前**只写一行 log 且不落盘**（log 只在调试采集器开启时才写），必须进失败终态。
         LogCollector.writeBootFail(
           activity, "boot-budget-exceeded",
-          "引擎进程存活但 " + ENGINE_BOOT_BUDGET_MS / 1000 + "s 预算内 Web 端口未就绪（t_listen=-1 形态）",
+          "引擎进程存活或启动请求仍在准备，但 " + ENGINE_BOOT_BUDGET_MS / 1000 + "s 预算内 Web 端口未就绪（t_listen=-1 形态）",
         )
         LogCollector.log("dsh-shell", "engine boot window exceeded 90s; scheduling retry (half-dead ladder will take over if HTTP stays failing)")
         scheduleEngineRetry(generation)
@@ -856,9 +1105,11 @@ internal class EngineStartFlow(private val activity: MainActivity) {
           "启动线程抛出未捕获异常（此前该路径零落盘）",
           t,
         )
+        activity.engineManager.lastStartRefusalCode = activity.engineManager.startupExceptionCode(t)
         activity.runOnUiThread {
           if (!isCurrentEngineFlow(generation)) return@runOnUiThread
-          activity.applyGuidePhase(GuidePhase.Error, "引擎启动失败")
+          activity.applyGuidePhase(GuidePhase.Error, "引擎启动失败",
+            startupFailureHint(activity, activity.engineManager.lastStartRefusalCode))
           activity.showGuide()
         }
       } finally {
@@ -884,6 +1135,7 @@ internal class EngineStartFlow(private val activity: MainActivity) {
 
   /** Cancel this Activity's callers, never the process-wide root maintenance worker. */
   fun destroy() {
+    updateUiGeneration++
     flowOwnership.invalidate(destroy = true)
     stopMonitoring()
     engineMonitorHandler.removeCallbacksAndMessages(null)
@@ -891,16 +1143,19 @@ internal class EngineStartFlow(private val activity: MainActivity) {
 
   /** Run the runtime snapshot update; status mirrored to a file for adb verification. */
   fun runUpdate() {
+    if (!OnlineUpdateGate.begin()) return
+    val updateGeneration = ++updateUiGeneration
     val statusFile = File(activity.filesDir, "update-status.txt")
     val manager = UpdateManager(activity)
     manager.checkAndApply { st ->
       activity.runOnUiThread {
+        if (updateGeneration != updateUiGeneration || !canRunEngineWork()) return@runOnUiThread
         // 与 startUpdateCheck 同口径（0.14.1 批 2 / P0-2）：相位由**类型**决定，不猜字符串前缀。
         val phase = when (st.outcome) {
           UpdateManager.UpdateOutcome.NotConfigured -> GuidePhase.Info
           UpdateManager.UpdateOutcome.Failed -> GuidePhase.Error
           UpdateManager.UpdateOutcome.Done -> GuidePhase.Recovering
-          UpdateManager.UpdateOutcome.Working -> GuidePhase.Updating
+          UpdateManager.UpdateOutcome.Working, UpdateManager.UpdateOutcome.Verifying -> GuidePhase.Updating
         }
         activity.applyGuidePhase(phase, st.text)
         activity.showGuide()
@@ -913,13 +1168,24 @@ internal class EngineStartFlow(private val activity: MainActivity) {
     }
   }
 
-  /** Start the foreground service (engine keep-alive + watchdog). */
+  private val foregroundServiceStartQueued = java.util.concurrent.atomic.AtomicBoolean(false)
+
+  /** Request foreground protection after the current Activity lifecycle callback returns. */
   fun startEngineService() {
-    if (!canRunEngineWork() || flowOwnership.destroyed) return
-    try {
-      activity.startForegroundService(Intent(activity, EngineService::class.java))
-    } catch (_: Exception) {
-      // Foreground-service start limits: service will start on next launch.
+    if (!canRunEngineWork() || flowOwnership.destroyed || EngineService.instance != null) return
+    if (!foregroundServiceStartQueued.compareAndSet(false, true)) return
+    // Requesting during onResume starts Android's service deadline while the same
+    // main thread is still restoring views, overlays and picker state. Queue the
+    // request itself so those synchronous lifecycle tasks finish before it starts.
+    activity.window.decorView.post {
+      foregroundServiceStartQueued.set(false)
+      if (!canRunEngineWork() || flowOwnership.destroyed || activity.isFinishing ||
+        activity.isDestroyed || EngineService.instance != null) return@post
+      try {
+        activity.startForegroundService(Intent(activity, EngineService::class.java))
+      } catch (_: Exception) {
+        // Foreground-service start limits: service will start on next launch.
+      }
     }
   }
 
@@ -939,6 +1205,109 @@ internal class EngineStartFlow(private val activity: MainActivity) {
       caller.start()
     } catch (_: Throwable) {
     }
+  }
+
+  /**
+   * D3（0.14.6）：**安全模式启动**的重启动作——先停本壳托管的旧引擎，再走正常启动流。
+   *
+   * ## 为什么必须有它（真机缺陷链）
+   * `GuidePageRenderer.enterSafeMode()` 此前只调 `activity.startEngineFlow()`。那条路先探活，
+   * 探到旧引擎仍在（OUR_PROCESS / OUR_HTTP）就 early-return 并 `showWeb()`——**从不经过**
+   * EngineManager.startEngine，于是「快照新鲜度」与「live 树完整性」两道既有闸门一次都不执行。
+   * 后果正是用户现场：点「安全模式启动」后 UI 看似拉起，却仍是**旧进程服务旧 manifest**
+   * （清单里还含刚被摘掉的第三方插件条目），页面再次报同样的插件失败，随后一连串报错；
+   * 安全模式这一改**根本没生效**。与 0.14.4 已修的 DEVICE-FINDING-3（startEngine 不带 force ⇒
+   * 早退 ⇒ 继续服务旧 manifest）是同一形态，只是这次发生在安全模式这条路径上。
+   *
+   * ## 复用的既有机制（不新造停止语义）
+   * - 停止：[EngineManager.stopOwnedEngine]——只停**本壳持有句柄**的子进程，绝不按名字杀未归属监听器；
+   * - 判据：[safeModeRestartDecision]（纯函数，JVM 可反证），live 完整性 / 快照就绪 / 归属权
+   *   三种输入各走一条明确结论；
+   * - 启动：仍旧 `activity.startEngineFlow()`，**不绕过**，两道既有闸门照常各过一遍。
+   *
+   * ## 中间态如实（D4）
+   * 旧进程已停、新进程未起这段窗口**不得**显示成已就绪：先切 `Starting` 相位并给如实文案。
+   * 被拒的两条路径必须说清「安全模式的插件改动本次不生效」，并照写 boot-fail——
+   * 既不静默失败，也不隐藏真实失败（D5）。
+   *
+   * 停失败（`stopOwnedEngine()` 返回 false）的处理与 [restart] 一字不差：不继续、如实回执。
+   */
+  internal fun restartOwnedEngineForSafeMode() {
+    if (!canRunEngineWork()) return
+    // **必须离开 UI 线程**：本方法由 GuidePageRenderer.enterSafeMode 的 postDelayed 在**主线程**上调用，
+    // 而下面每一步都有真实阻塞——liveRuntimeComplete() 遍历运行时树（文件系统 IO）、
+    // stopOwnedEngine() 内含最长 1s 的端口/归属探活。原地调用就是一条真实的 ANR 路径
+    // （与 enterSafeMode 里 maybeRecoverFromIncompleteLiveRuntime 的同一教训）。
+    Thread {
+      try {
+        performSafeModeRestart()
+      } catch (t: Throwable) {
+        Log.e("dsh-shell", "safe mode restart failed", t)
+        LogCollector.writeBootFail(activity, "safe-mode-restart-failed",
+          "安全模式重启线程抛出未捕获异常：" + t.javaClass.simpleName + ": " + (t.message ?: "无消息"), t)
+      }
+    }.apply { isDaemon = true; name = "dsh-safe-mode-restart" }.start()
+  }
+
+  /** [restartOwnedEngineForSafeMode] 的线程体（**非 UI 线程**；判据与动作都在这里）。 */
+  private fun performSafeModeRestart() {
+    if (!canRunEngineWork()) return
+    val engine = activity.engineManager
+    val liveComplete = engine.liveRuntimeComplete()
+    val snapshotFresh = engine.snapshotFresh()
+    // 归属权在「停」之前只能由 stopOwnedEngine 的真实返回值回答（它内含探活 + 句柄判定），
+    // 故这里先按 live/快照面判一次；归属失败在下一次判定中收口（见下方 stopOk）。
+    val preDecision = safeModeRestartDecision(liveComplete, snapshotFresh, ownedStopOk = true)
+    if (!safeModeRestartCanProceed(preDecision)) {
+      // live 树残缺：停掉旧进程只会把用户从「能跑但插件错」推到「跑不了」，故**一步都不动**。
+      LogCollector.writeBootFail(
+        activity, "safe-mode-restart-refused",
+        "安全模式重启被拒（decision=" + preDecision + "）：live 运行时树不完整，未停止也未重启引擎；" +
+          "安全模式的插件改动本次不生效。停在可读错误页",
+      )
+      activity.runOnUiThread { applySafeModeRestartHint(preDecision) }
+      return
+    }
+    // 中间态：旧进程即将停止 / 新进程尚未就绪——**不得**显示成已就绪。
+    activity.runOnUiThread {
+      if (canRunEngineWork()) applySafeModeRestartHint(preDecision)
+    }
+    val stopped = try { engine.stopOwnedEngine() } catch (t: Throwable) {
+      LogCollector.writeBootFail(activity, "safe-mode-restart-stop-failed",
+        "安全模式重启：停止旧引擎时抛出 " + t.javaClass.simpleName + ": " + (t.message ?: "无消息"), t)
+      false
+    }
+    if (!stopped) {
+      // 端口未被归属到本壳（或停止失败）：**绝不**继续 spawn，否则等于盲目重启一个不属于我们的监听器。
+      val decision = safeModeRestartDecision(liveComplete, snapshotFresh, ownedStopOk = false)
+      LogCollector.writeBootFail(
+        activity, "safe-mode-restart-not-owned",
+        "安全模式重启被拒（decision=" + decision + "）：3080 未被归属到本壳或旧引擎停止失败，" +
+          "未执行启动以免覆盖未知监听器；安全模式的插件改动本次不生效",
+      )
+      activity.runOnUiThread { applySafeModeRestartHint(decision) }
+      return
+    }
+    // 归零既有账本：用户显式要求「以 safe 状态运行」，就该真的发起一次启动尝试，
+    // 而不是被上一次失败的降级闸门挡住（与手动重试同口径）。
+    engineRetryCount = 0
+    engine.clearRefreshLedger()
+    LogCollector.log("dsh-shell", "safe mode restart: owned engine stopped, starting with the safe profile (decision=" + preDecision + ")")
+    activity.startEngineFlow()
+  }
+
+  /** 安全模式重启的如实回执（相位 + 文案），保证「停旧起新」窗口不被显示成已就绪。 */
+  private fun applySafeModeRestartHint(decision: SafeModeRestartDecision) {
+    val hint = safeModeRestartHint(decision)
+    when {
+      safeModeRestartCanProceed(decision) ->
+        // 放行面：此刻是明确的中间态（旧已停、新未起），相位必须是 Starting 而不是任何就绪态。
+        activity.applyGuidePhase(GuidePhase.Starting, "正在以安全模式重启运行时…", hint)
+      else ->
+        // 拒绝面：停在可读错误页（Error 相位保留「安全模式启动」出口，用户可再次尝试）。
+        activity.applyGuidePhase(GuidePhase.Error, "安全模式未能生效", hint)
+    }
+    activity.showGuide()
   }
 
   /**
@@ -964,6 +1333,7 @@ internal class EngineStartFlow(private val activity: MainActivity) {
           }
           return@Thread
         }
+        UndoGate.clearRetryEpochForUserRestart(activity)
         if (!isCurrentEngineFlow(generation)) return@Thread
         EngineManager.lastStartAttemptAt = 0
         LogCollector.log("dsh-shell", "restart engine requested (tracked child only)")
@@ -986,6 +1356,12 @@ internal class EngineStartFlow(private val activity: MainActivity) {
     caller.start()
     return true
   }
+}
+
+internal object OnlineUpdateGate {
+  private val running = java.util.concurrent.atomic.AtomicBoolean(false)
+  fun begin(): Boolean = running.compareAndSet(false, true)
+  fun end() { running.set(false) }
 }
 
 /**
@@ -1017,6 +1393,7 @@ internal class StartupFlowOwnership {
   private data class State(val generation: Long = 0, val token: Token? = null, val running: Boolean = false, val destroyed: Boolean = false)
   private val state = java.util.concurrent.atomic.AtomicReference(State())
   val destroyed: Boolean get() = state.get().destroyed
+  val running: Boolean get() = state.get().running
 
   fun begin(): Token? {
     while (true) {
@@ -1130,18 +1507,14 @@ private fun maybeSelfHealDamagedRuntimeTree(activity: MainActivity, current: () 
  * 为什么必须有人调它：`applyRecovery` 的 ROLLBACK_FAILED 只写 logcat 与
  * `pendingRecoveryFailure`，没有任何面向 UI 的通道 ⇒ 数据被保护了但用户完全不知情。
  *
- * 做三件事（与 :552 的 refreshSnapshot 失败**同族**的落盘面，但可见面不同）：
+ * 做三件事（与 refreshSnapshot 失败**同族**的落盘面，但可见面不同）：
  *   ① `LogCollector.writeBootFail(code)` —— 结构化码，排障者 grep 这个码即可归类；
  *   ② 一次性标记文件 —— 供引擎 WebUI 就绪后**注入 DOM 提示**（可见面，见 MainActivity）；
  *   ③ 诊断包镜像 —— 用户可取包反馈。
  *
- * **为什么不在这里切引导页 Error 相位**（与 :552 的关键差别，改动理由写清以免被当成漏做）：
- *   · 恢复期拒绝**不阻断启动**——实测场景（plugin-loss）里应用「一直能跑」，引擎照常起；
- *   · 启动流紧接着就会 `applyGuidePhase(Starting, "正在启动引擎…")`（引擎未起路径）或
- *     `showWeb()`（引擎已起路径），两者都会**立刻覆盖/隐藏**这里设的 Error 相位；
- *     结果是用户看到一闪而过的错误页然后恢复正常 —— 比不显示更糟（像是「刚才出错了？」）；
- *   · 因此可见面唯一可靠的落点是**页面 DOM 注入**（引擎起来、页面 onPageFinished 之后）。
- *   若引擎最终没起来，既有 boot-fail 错误页已经展示了失败，本条仍完整落在诊断面。
+ * **恢复拒绝会阻断探活与启动**：启动流在发现未收敛事务后保留现场、显示持久的引导页 Error，
+ * 并抛出 CancellationException 结束本轮；不能继续到 `applyGuidePhase(Starting, ...)` 或 `showWeb()`。
+ * 这样用户可直接看到恢复入口提示，诊断码、一次性标记和诊断包仍用于后续排查与恢复。
  */
 private fun reportRecoveryRejectionIfAny(activity: MainActivity, detail: String?, current: () -> Boolean) {
   if (!current()) return
@@ -1317,6 +1690,165 @@ internal class EngineBootClock(elapsedMs: Long, budgetMs: Long) {
   val budgetSeconds: Int = (budgetMs / 1_000L).toInt()
   val waitedSeconds: Int = (elapsedMs.coerceIn(0L, budgetMs) / 1_000L).toInt()
   val remainingSeconds: Int = budgetSeconds - waitedSeconds
+}
+
+// ── CONTRACT §4：客户端插件装配失败的自动回滚路线（纯判据，JVM 可反证）──────────
+
+/**
+ * 自动回滚的路线（[clientPluginFailureRoute] 的取值域）。
+ *
+ * 三者互斥且穷尽：
+ * - [CLIENT_PULL]    点出了唯一可拔条目 → 外科拔除（只动这一条）；
+ * - [KNOWN_GOOD]     点不出名，但挂载清单与健康时的软清单一致 → 故障与插件清单无关，
+ *                    才允许走 known-good 整份回滚（此时回滚不会吞掉任何用户插件）；
+ * - [NO_ACTION]      其余一切 → 不动作（宁可停在可读错误页，也不做一次会抹掉用户插件的写回）。
+ */
+internal enum class ClientPluginFailureRoute { CLIENT_PULL, KNOWN_GOOD, NO_ACTION }
+
+/**
+ * 纯判据：给定唯一可拔候选与清单是否自健康起未变，决定自动回滚走哪条路（CONTRACT §4）。
+ *
+ * **本函数只决定是否调用 [UndoGate.execute]；安全护栏的真源在 UndoGate.execute，不得在此重复实施或绕过。**
+ * 它不碰任何文件、不判硬清单/跨版本/快照在场——那些是 execute 的职责（Lead 仲裁 2026-10-05：两层判据
+ * 不同源，route 层负责「该不该去动清单」并留下 NO_ACTION 留档，execute 负责「动清单的方式安不安全」）。
+ *
+ * 为什么必须把决策与执行分开：执行面（[UndoGate.execute] / [PluginMounts.pullByClientIds]）都要
+ * Context + 文件系统，无法离线单测；而「什么时候不该动用户配置」恰恰是最需要反证的一条
+ * （历史坑：把整个 patch 写回，用户新装的插件全部消失）。抽成纯函数后可直接逐条断言。
+ *
+ * @param candidate 唯一点名的可拔条目（点不出/多命中/命中硬清单时 [PluginMounts.clientPullCandidate] 返回 null）
+ * @param mountUnchangedSinceHealthy 挂载清单是否与健康时记录的软清单逐字节一致
+ */
+internal fun clientPluginFailureRoute(
+  candidate: PluginMounts.FailedEntry?,
+  mountUnchangedSinceHealthy: Boolean,
+): ClientPluginFailureRoute = when {
+  candidate != null -> ClientPluginFailureRoute.CLIENT_PULL
+  mountUnchangedSinceHealthy -> ClientPluginFailureRoute.KNOWN_GOOD
+  else -> ClientPluginFailureRoute.NO_ACTION
+}
+
+// ── D3（0.14.6）：安全模式重启的纯判定（JVM 可反证）──────────────────────────
+
+/**
+ * 「安全模式启动」这一步重启动作的判定面（[safeModeRestartDecision] 的取值域）。
+ *
+ * 为什么需要单独的判定：安全模式的**全部价值**是「改了装配清单 ⇒ 引擎必须用新清单重建」。
+ * 而 GuidePageRenderer.enterSafeMode 走的是 activity.startEngineFlow()，它内部先探活，
+ * 探到旧引擎还在（OUR_PROCESS / OUR_HTTP）就 early-return 并 showWeb()——**根本不经过**
+ * EngineManager.startEngine，于是两道既有闸门（[EngineStartFlow] 的快照新鲜度判定与
+ * EngineManager 的 live 树完整性闸门）一次都不执行：旧进程继续服务**旧 manifest**，
+ * 页面再次报同样的插件失败（0.14.4 的 DEVICE-FINDING-3 同族形态）。故这里把「可不可以动」
+ * 抽成纯判定，使「绝不在不完整 / 未归属的前提下盲目重启」可逐条反证。
+ *
+ * - [PROCEED]                  live 完整 + 快照就绪 ⇒ 正常重启；
+ * - [PROCEED_SNAPSHOT_STALE]   live 完整 + 快照未就绪 ⇒ **允许**放行（issue #240 的有意降级窗
+ *                              就在这条路上：快照未就绪不等于运行时不可用），中间态文案必须如实；
+ * - [REFUSE_LIVE_INCOMPLETE]   live 树残缺 ⇒ 绝不先停后启（停掉旧进程只会把用户从「能跑但插件错」
+ *                              推到「跑不了」），停在可读错误页；
+ * - [REFUSE_OWNERSHIP]         3080 未被归属到本壳 ⇒ 绝不按名字杀未归属监听器（既有护栏）。
+ */
+internal enum class SafeModeRestartDecision { PROCEED, PROCEED_SNAPSHOT_STALE, REFUSE_LIVE_INCOMPLETE, REFUSE_OWNERSHIP }
+
+/**
+ * 纯判据：安全模式重启该不该放行。
+ *
+ * 判据来源全部复用既有权威口径，不另造：live 完整性 = [EngineManager.liveRuntimeComplete]
+ * （与降级闸门同源）；快照就绪 = [EngineManager.snapshotFresh]（= AGENTS.md 高频雷点 2 的
+ * 「指纹翻转 + 事务文件消失」口径）；归属权 = [EngineManager.stopOwnedEngine] 的返回值。
+ *
+ * **本函数不执行任何动作**，也不替代两道既有闸门：放行之后 startEngineFlow 仍会各自再过一遍
+ * 「快照新鲜度」与「live 树完整性」。它只回答「这一步该不该去停旧进程并重新拉起」。
+ *
+ * @param liveComplete live 运行时树是否完整（缺 node/bin.js/profile 时为 false）
+ * @param snapshotFresh 内嵌快照是否已就绪（指纹新鲜）
+ * @param ownedStopOk 旧进程是否可安全停止（本壳持有句柄）；「动之前」传 true 表示只问 live 面
+ */
+internal fun safeModeRestartDecision(
+  liveComplete: Boolean,
+  snapshotFresh: Boolean,
+  ownedStopOk: Boolean,
+): SafeModeRestartDecision = when {
+  !liveComplete -> SafeModeRestartDecision.REFUSE_LIVE_INCOMPLETE
+  !ownedStopOk -> SafeModeRestartDecision.REFUSE_OWNERSHIP
+  snapshotFresh -> SafeModeRestartDecision.PROCEED
+  else -> SafeModeRestartDecision.PROCEED_SNAPSHOT_STALE
+}
+
+/** 放行面：只有两个 PROCEED* 允许进入「停旧进程 + 重新拉起」。拒绝面一律不得动作。 */
+internal fun safeModeRestartCanProceed(decision: SafeModeRestartDecision): Boolean =
+  decision == SafeModeRestartDecision.PROCEED || decision == SafeModeRestartDecision.PROCEED_SNAPSHOT_STALE
+
+/**
+ * 面向用户的**如实**文案（含被拒时的真因与出口）。
+ *
+ * 放行两条都**不得**宣称已就绪：此刻旧进程已停、新进程未起，是明确的中间态。
+ * 被拒两条必须说清「安全模式的插件改动本次不生效」，不得让用户以为已经生效。
+ */
+internal fun safeModeRestartHint(decision: SafeModeRestartDecision): String = when (decision) {
+  SafeModeRestartDecision.PROCEED ->
+    "正在以安全模式重启运行时…（旧引擎已停，新引擎启动中，请保持应用在前台）"
+  SafeModeRestartDecision.PROCEED_SNAPSHOT_STALE ->
+    "正在以安全模式重启运行时…（运行时快照尚未就绪，本次启动会先按既有规则处理快照，可能较慢；旧引擎已停，新引擎启动中）"
+  SafeModeRestartDecision.REFUSE_LIVE_INCOMPLETE ->
+    "运行时不完整，未停止也未重启引擎：安全模式的插件改动**本次不生效**。请先在错误页按提示重做运行时，再重试。"
+  SafeModeRestartDecision.REFUSE_OWNERSHIP ->
+    "3080 端口未被归属到本应用，未停止也未重启引擎：安全模式的插件改动**本次不生效**。请先在控制台排查端口占用。"
+}
+
+// ── DEVICE-FINDING-4：引擎强制重启后的**有界就绪等待**（纯判据，JVM 可反证）─────────
+
+/**
+ * 有界等待引擎 HTTP 真的能应答；true = 已就绪，false = 预算内未就绪（或已换代/进程已死）。
+ *
+ * 为什么必须有它（DEVICE-FINDING-4）：`startEngine(force = true)` 只保证**进程已 spawn**，
+ * **不保证 HTTP 已 listen**（冷启动实测 5-45s 的宽分布）。外科拔除后若紧接着 reload，导航会撞上
+ * 尚未监听的窗口 → ERR_CONNECTION_REFUSED → onReceivedError 置 enginePageFailed → 用户看到
+ * 「页面加载失败」，仍然进不去（真机实测第 4 条）。因此 reload 必须在**引擎已应答之后**发起。
+ *
+ * **为什么不做固定 sleep**：冷启动耗时是 5-45s 宽分布——定短了照样撞窗口（缺陷原样复现），
+ * 定长了则每次故障恢复都白等几十秒。轮询真实探针是以事实收敛，而不是拿猜测换时间。
+ *
+ * 有界性（本函数最危险的形态是「变成无限等」，它跑在回滚的后台线程上）：
+ *  - 硬预算 [budgetMs]：now() 由注入，超预算立即返回 false；
+ *  - 进程已死（[processAlive] 为假）⇒ 再等也不会就绪，提前收手；
+ *  - 已换代（[current] 为假）⇒ 立刻收手，不对废弃世代做动作。
+ *
+ * 判据复用 [EngineProbe.check]：只在 running（200/401/303，与看门狗同一口径）为真时算就绪——
+ * 401 也算就绪是刻意的：那是「引擎活着但要重新认证」，与「端口没起来」必须区分，认证走既有路径。
+ *
+ * @param budgetMs 硬预算（生产传 [ENGINE_BOOT_BUDGET_MS]）
+ * @param pollStepMs 轮询步进
+ * @param now 时钟读数（单测注入）
+ * @param sleep 睡眠（单测注入，避免真实等待）
+ * @param probe 探活：true = 引擎 HTTP 已能应答
+ * @param processAlive 引擎子进程是否仍活着
+ * @param current 世代校验：false 表示已换代/已销毁
+ */
+internal fun awaitEngineHttpReady(
+  budgetMs: Long = ENGINE_BOOT_BUDGET_MS,
+  pollStepMs: Long = ENGINE_BOOT_POLL_STEP_MS,
+  now: () -> Long = { System.currentTimeMillis() },
+  sleep: (Long) -> Unit = { ms -> if (ms > 0L) Thread.sleep(ms) },
+  probe: () -> Boolean = {
+    try {
+      EngineProbe.check(pollStepMs.toInt().coerceIn(200, 1_500)).optBoolean("running", false)
+    } catch (_: Throwable) {
+      false
+    }
+  },
+  processAlive: () -> Boolean = { true },
+  current: () -> Boolean = { true },
+): Boolean {
+  val deadline = now() + budgetMs
+  while (true) {
+    if (!current()) return false
+    if (probe()) return true
+    // 进程已死：再等也不会就绪（spawn 失败/瞬间退出），提前把控制权交回调用方。
+    if (!processAlive()) return false
+    if (now() >= deadline) return false
+    sleep(pollStepMs)
+  }
 }
 
 /** 默认预算 = [ENGINE_BOOT_BUDGET_MS]（调用点不得再传字面量秒数）。 */

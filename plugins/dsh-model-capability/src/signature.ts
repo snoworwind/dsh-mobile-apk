@@ -33,9 +33,39 @@ export function canonicalJson(value: unknown): string {
 /** 模型级能力字段（值敏感）。 */
 export const CAPABILITY_FIELDS = ['reasoningEfforts', 'input', 'contextWindow', 'maxTokens'] as const
 
+/** 一个已声明模型的值敏感签名（id + 全部声明字段，与键序无关）。 */
+export interface ModelSignaturePart {
+  id: string
+  signature: string
+}
+
+/**
+ * 列出一条路由下每个已声明模型的值敏感签名。
+ *
+ * 与 {@link capabilitySignature} 共用同一份口径：保存 diff（哪些模型是这次新加或改动的）
+ * 与自触发签名必须对「同一个模型」给出一致的判断，两处各写一份必然漂移。
+ * @param route - settings 里该路由的值（含 models）。
+ * @returns 每个模型一条，顺序与声明一致；models 缺席或非数组时为空。
+ */
+export function modelSignatureParts(route: unknown): ModelSignaturePart[] {
+  const models = isRecord(route) && Array.isArray(route.models) ? route.models : []
+  return models.map((model) => {
+    if (typeof model === 'string') return { id: model, signature: model }
+    const record = isRecord(model) ? model : {}
+    const id = String(record.id ?? '?')
+    const caps = CAPABILITY_FIELDS.map((field) => field + '=' + canonicalJson(record[field])).join(',')
+    const otherKeys = Object.keys(record).filter((key) => key !== 'id' && !(CAPABILITY_FIELDS as readonly string[]).includes(key)).sort()
+    const others = otherKeys.map((key) => key + '=' + canonicalJson(record[key])).join(',')
+    return { id, signature: id + '{' + caps + (others ? ';' + others : '') + '}' }
+  })
+}
+
 /**
  * 计算 llm-pi-ai 命名空间的补给触发签名。
  * [sectionValue] 是 settings 描述符的命名空间值（含 providers）；[routes] 可选，限定参与计算的路由。
+ * @param sectionValue - llm-pi-ai 命名空间的值。
+ * @param routes - 可选，限定参与计算的路由。
+ * @returns 值敏感签名。
  */
 export function capabilitySignature(sectionValue: unknown, routes?: readonly string[]): string {
   const providers = isRecord(sectionValue) && isRecord(sectionValue.providers) ? sectionValue.providers : {}
@@ -45,16 +75,7 @@ export function capabilitySignature(sectionValue: unknown, routes?: readonly str
     const route = isRecord(providers[name]) ? providers[name] as Record<string, unknown> : {}
     const routeKeys = Object.keys(route).filter((key) => key !== 'models').sort()
     const routePart = routeKeys.map((key) => key + '=' + canonicalJson(route[key])).join(',')
-    const models = Array.isArray(route.models) ? route.models : []
-    const modelParts = models.map((model) => {
-      if (typeof model === 'string') return model
-      const record = isRecord(model) ? model : {}
-      const id = String(record.id ?? '?')
-      const caps = CAPABILITY_FIELDS.map((field) => field + '=' + canonicalJson(record[field])).join(',')
-      const otherKeys = Object.keys(record).filter((key) => key !== 'id' && !(CAPABILITY_FIELDS as readonly string[]).includes(key)).sort()
-      const others = otherKeys.map((key) => key + '=' + canonicalJson(record[key])).join(',')
-      return id + '{' + caps + (others ? ';' + others : '') + '}'
-    })
+    const modelParts = modelSignatureParts(route).map((part) => part.signature)
     parts.push(name + '[' + routePart + '](' + modelParts.join(';') + ')')
   }
   return parts.join('|')

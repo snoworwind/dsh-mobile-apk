@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import androidx.core.content.FileProvider
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.net.HttpURLConnection
@@ -19,6 +20,11 @@ import java.net.URL
  * - 安装：REQUEST_INSTALL_PACKAGES 未持有 → 先拉「安装未知应用」授权页（launcher 返回后续继）；
  *   签名不匹配由系统安装器天然拒绝；sha256 资产存在则下载后校验。
  * 与引擎快照更新（EngineStartFlow.startUpdateCheck / UpdateManager）完全分离。
+ *
+ * 0.14.6 功能 C（arm64 误报）：本文件此前把**所有**未命中都报成「无 $abi 资产」，而 arm64 资产名
+ * 在发布历史上翻转（v0.14.2-fx-2 及更早 = `-arm64-v8a`，v0.14.2-fx-3 起 = `-arm64`），
+ * 于是 arm64 设备对当前 latest 恒判"无 arm64 资产"（x86_64 同名故不可见）。
+ * 现在：识别层接受两代命名（[assetNameCandidates]），失败按 [CheckResult.FailureKind] 如实分类。
  */
 object UpdateChecker {
 
@@ -42,7 +48,37 @@ object UpdateChecker {
     data object UpToDate : CheckResult()
     /** 发现新版：tag + 双 ABI 资产 URL（按设备 ABI 已选好）。 */
     data class Available(val tag: String, val name: String, val apkUrl: String, val sha256Url: String?, val sizeBytes: Long) : CheckResult()
-    data class Failed(val reason: String) : CheckResult()
+
+    /**
+     * 检查失败的**原因类别**（0.14.6 功能 C）。
+     *
+     * 真因（旧的单一失败路径）：只要「没选中本机可用的资产」，文案就恒为
+     * `latest release $tag 无 $abi 资产（$want）` —— 而走到那一句的**并不只有**「这台设备真的没有包」：
+     * 发布资产被改名、assets 为空、资产缺下载地址，全都会掉进同一句，用户看到的是
+     * 「没有你这个架构的版本」。文案比事实强，用户据此判「这项目不支持我的机器」并放弃，
+     * 而真实原因本来说清就能处理。故把类别做成**事实层**：它只决定文案与日志，
+     * 调用方（GuidePageRenderer）仍只读 `reason`，不新增分支面，也不隐藏任何错误。
+     */
+    enum class FailureKind {
+      /** 该 release 确实没有能装在这台设备上的包（本机 ABI 不在其资产里）。 */
+      NO_COMPATIBLE_APK,
+      /** 发布侧数据异常（assets 为空 / 无 APK 资产 / 资产缺下载地址）——不是设备不支持。 */
+      RELEASE_DATA_BROKEN,
+      /** 接口限流（403 配额耗尽 / 429 / Retry-After）——与设备架构无关，稍后重试即可。 */
+      RATE_LIMITED,
+      /** 接口返回非 200 且非限流（服务端 / 代理 / 接口面异常）。 */
+      API_HTTP,
+      /** 响应体不是可用的 Release JSON（畸形 JSON / 缺 tag_name / 被中间页替换）。 */
+      PARSE,
+      /** 设备自身 ABI 读不到（SUPPORTED_ABIS 为空）——不得借「无 arm64 资产」顶罪。 */
+      ABI_UNSUPPORTED,
+      /** 网络不可达（DNS / 连接 / 超时 / TLS）。 */
+      NETWORK,
+      /** 未归类：如实说未完成并指向日志，不编造原因。 */
+      UNKNOWN,
+    }
+
+    data class Failed(val reason: String, val kind: FailureKind = FailureKind.UNKNOWN) : CheckResult()
   }
 
   /** 设备 ABI → ABI 家族名（arm64 / x86_64）。**家族名不是发布资产名**——发布口径见 assetName()。
@@ -60,62 +96,226 @@ object UpdateChecker {
     }
   }
 
-  private fun deviceAbi(): String = abiFrom(android.os.Build.SUPPORTED_ABIS.toList())
+  /** 本机 ABI 列表（可注入面：判定层只吃这个列表，真机值只在 checkLatest 里取一次）。 */
+  internal fun deviceAbis(): List<String> = android.os.Build.SUPPORTED_ABIS?.toList().orEmpty()
 
-  /** 发布资产命名约定（docs/RELEASE.md 第 6 节，abi = arm64-v8a | x86_64）：
-   *  dsh-mobile-apk-v<版本>-<abi>.apk。
+  /**
+   * **兼容资产名清单**（0.14.6 功能 C 的识别层）。第一个是**线上发布链口径**，其余为历史/旁路口径。
    *
-   *  这里必须是**发布口径**，不能是开发口径：本仓的 ABI 命名有两条链——
-   *  build-apk-013.ps1（本地/开发产物）出 `-arm64.apk`，
-   *  build-release.ps1（GitHub Release 资产）出 `-arm64-v8a.apk`。
-   *  checkLatest() 拿本函数的返回值去匹配 **Release 资产名**，故归一到发布口径。
-   *  x86_64 两条链同名，所以这个偏差**只在 arm64 设备上暴露**（回归：坑 172）。 */
-  fun assetName(tag: String, abi: String): String {
-    val releaseAbi = if (abi == "arm64") "arm64-v8a" else abi
-    return "dsh-mobile-apk-v${tag.removePrefix("v")}-$releaseAbi.apk"
+   * 为什么必须是"清单"而不是单个名字（实测枚举 `gh release view <tag> --json assets`，11 个 release）：
+   *   1. 发布链与开发链**不同名**：release.yml:262 → build-apk-013.ps1:465 产 `dsh-mobile-apk-v<ver>-arm64.apk`；
+   *      未被 release.yml 调用的旁路 build-release.ps1:208 产 `...-arm64-v8a.apk`。
+   *   2. 线上**已经翻转过一次**：v0.14.1 / v0.14.1-preview / v0.14.2 / v0.14.2-fx-1 / v0.14.2-fx-2 是
+   *      `-arm64-v8a`；v0.14.0 / v0.14.2-fx-3 / v0.14.3 / v0.14.4 / v0.14.5 / v0.14.5-fx-1 /
+   *      **v0.14.5-fx-2（当前 latest）** 是 `-arm64`。只认其中任一个 ⇒ 一半 tag 的 arm64 恒判失败，
+   *      文案还是"没有 arm64 版本"（issue 现场）。
+   *   3. 只多认**同一个 ABI 家族**的名字：下面任一名字都只用于**设备自身 ABI 对应的那一族**，
+   *      异构架构（arm 设备拿 x86_64 包）永远不可能被选中——兼容命名不放宽任何架构校验。
+   *
+   * 复发防线：`UpdateCheckerTest.assetCandidatesAreBoundToReleaseChainProductName` 直接读
+   * `.github/workflows/release.yml`（唯一线上发布入口）与 `scripts/build-apk-013.ps1` 的
+   * `--artifact-name` 形态并逐字比对——**发布链改名即判红**，不靠人记得同步。
+   */
+  fun assetNameCandidates(tag: String, abi: String): List<String> {
+    val v = tag.removePrefix("v")
+    val releaseAbis = if (abi == "arm64") listOf("arm64", "arm64-v8a") else listOf(abi)
+    return releaseAbis.map { "dsh-mobile-apk-v$v-$it.apk" }
   }
 
   /**
-   * 查 latest release（镜像链逐级回退）；资产按 dsh-mobile-apk-v<ver>-<abi>.apk 匹配。
+   * 资产命名（**主口径 = 线上发布链产物名**：dsh-mobile-apk-v<版本>-<abi>.apk）。
+   *
+   * 保留本函数是既有契约（本地落盘名与旧断言都调它）；**匹配环节不再只认它**，
+   * 见 [assetNameCandidates]。坑 172 的教训是「把某一时点的口径硬编码成唯一真名」——
+   * 修法不是换个同样硬的名字，而是让接受集与发布链产出名绑定且可被判红。
+   */
+  fun assetName(tag: String, abi: String): String = assetNameCandidates(tag, abi).first()
+
+  /** 一件发布资产（只取判定所需字段；不引入 JSON 对象到判定层，便于 JVM 单测）。 */
+  internal data class ReleaseAssetRef(val name: String, val url: String, val sizeBytes: Long)
+
+  /** 解析后的 latest release：tag + 资产清单。 */
+  internal data class LatestRelease(val tag: String, val assets: List<ReleaseAssetRef>)
+
+  /**
+   * 解析 latest release 响应体（纯函数，可 JVM 单测）。
+   *
+   * 解析失败**抛异常**而不是回一个"没有资产"的默认值：畸形响应必须归入 [CheckResult.FailureKind.PARSE]，
+   * 归类到资产问题就是本缺陷的原形（把别的原因说成架构问题）。缺 tag_name 同理——tag 是版本判定的前提。
+   */
+  internal fun parseLatestRelease(body: String): LatestRelease {
+    val j = JSONObject(body)
+    val tag = j.optString("tag_name", "").trim()
+    require(tag.isNotEmpty()) { "latest release 无 tag_name" }
+    val arr = j.optJSONArray("assets") ?: JSONArray()
+    val assets = ArrayList<ReleaseAssetRef>(arr.length())
+    for (i in 0 until arr.length()) {
+      val a = arr.optJSONObject(i) ?: continue
+      val name = a.optString("name", "").trim()
+      if (name.isEmpty()) continue
+      assets += ReleaseAssetRef(name, a.optString("browser_download_url", "").trim(), a.optLong("size", 0L))
+    }
+    return LatestRelease(tag, assets)
+  }
+
+  /**
+   * 非 200 的**分类**（纯函数，可 JVM 单测）。
+   *
+   * 限流(403 配额耗尽 / 429)与其它 HTTP 失败必须分开：限流是"等一会儿再来"，而用户当前能做的
+   * 补偿动作不同（[CheckResult.FailureKind.RATE_LIMITED] 会说明未认证配额是 60 次/小时）。
+   * **不读响应体**：GitHub 的限流说明里含请求来源 IP，不进日志也不上屏（日志会被用户分享）。
+   */
+  internal fun classifyHttpFailure(code: Int, rateLimited: Boolean): CheckResult.Failed = when {
+    rateLimited -> CheckResult.Failed(
+      "检查失败：更新接口限流（HTTP ${code}）——接口未认证时每小时只有 60 次查询，请稍后重试。这与本机架构无关，不代表没有适配版本",
+      CheckResult.FailureKind.RATE_LIMITED,
+    )
+    else -> CheckResult.Failed(
+      "检查失败：更新接口返回 HTTP ${code}（服务端或网络代理异常）——请稍后重试；持续失败可复制日志反馈",
+      CheckResult.FailureKind.API_HTTP,
+    )
+  }
+
+  /**
+   * 限流判定（纯函数）：**不能只看状态码**。
+   *
+   * - 429 = 明确的限流；
+   * - 403 只在响应头确认配额耗尽（`x-ratelimit-remaining: 0`）或带 `retry-after` 时才算限流；
+   *   普通 403（滥用拦截 / 拒绝访问）归 [CheckResult.FailureKind.API_HTTP]——把普通 403 说成
+   *   "限流、稍后重试"同样是给用户一条不会生效的路。
+   */
+  internal fun isRateLimited(code: Int, rateLimitRemaining: String?, retryAfter: String?): Boolean {
+    if (code == 429) return true
+    if (code != 403) return false
+    if (rateLimitRemaining?.trim() == "0") return true
+    return !retryAfter.isNullOrBlank()
+  }
+
+  /**
+   * 传输/解析异常的**分类**（纯函数）。
+   *
+   * 旧实现把一切都拼成"检查失败：<异常消息>——请核对网络后重试"：解析错误被说成网络错误，
+   * 用户按提示换网络、换流量，问题照旧。这里按异常类别分开，且 UNKNOWN 保持原有的
+   * "请核对网络后重试"文案（不编造原因，也不后退既有措辞）。
+   */
+  internal fun classifyTransportFailure(e: Throwable): CheckResult.Failed {
+    val name = e.javaClass.name
+    val msg = e.message ?: e.javaClass.simpleName
+    val kind = when {
+      name.contains("JSONException") || name.contains("IllegalArgument") -> CheckResult.FailureKind.PARSE
+      name.contains("UnknownHost") || name.contains("Connect") || name.contains("SocketTimeout") ||
+        name.contains("NoRouteToHost") || name.contains("SSL") || name.contains("SocketException") ||
+        name.contains("Network") -> CheckResult.FailureKind.NETWORK
+      else -> CheckResult.FailureKind.UNKNOWN
+    }
+    val text = when (kind) {
+      CheckResult.FailureKind.PARSE ->
+        "检查失败：更新接口返回的内容无法解析（可能被网络中间页替换）——请稍后重试；持续失败可复制日志反馈"
+      CheckResult.FailureKind.NETWORK ->
+        "检查失败：网络不可达（${msg}）——请检查网络后重试"
+      else ->
+        "检查失败：${msg}——请核对网络后重试"
+    }
+    return CheckResult.Failed(text, kind)
+  }
+
+  /**
+   * 命中失败时的**分类**（纯函数，核心判据）：
+   * 「这台设备真的没有可用包」与「发布侧数据有问题」必须分开说。
+   *
+   * - 一个 APK 资产都没有（assets 空 / 只有快照与插件包）→ [CheckResult.FailureKind.RELEASE_DATA_BROKEN]；
+   * - 有 APK 资产但都不是本机 ABI 那一族 → [CheckResult.FailureKind.NO_COMPATIBLE_APK]，
+   *   且把**实际资产名**与**本机 abilist** 写进文案——事实可核对，用户/维护者能一眼看出是发布侧漏了包
+   *   还是包改名了（改名这一形态正是本缺陷的真实成因，见 [assetNameCandidates]）。
+   */
+  internal fun classifyAssetFailure(
+    tag: String,
+    family: String,
+    deviceAbis: List<String>,
+    assetNames: List<String>,
+  ): CheckResult.Failed {
+    val apkNames = assetNames.filter { it.endsWith(".apk") }
+    if (apkNames.isEmpty()) {
+      return CheckResult.Failed(
+        "检查失败：发布数据异常——latest release $tag 里没有 APK 资产（不是本机没有可用版本）",
+        CheckResult.FailureKind.RELEASE_DATA_BROKEN,
+      )
+    }
+    val want = assetNameCandidates(tag, family)
+    return CheckResult.Failed(
+      "找不到可安装的版本：latest release $tag 的资产（${apkNames.joinToString("、")}）中没有适配本机 $family 的包" +
+        "（本机 ABI：${deviceAbis.joinToString(",")}；期望名 ${want.joinToString(" / ")}）——请等待适配本机架构的版本发布",
+      CheckResult.FailureKind.NO_COMPATIBLE_APK,
+    )
+  }
+
+  /**
+   * 200 响应体的**判定**（纯函数）：选包 → 版本比较，失败按类归因。
+   *
+   * 选包只用 [assetNameCandidates]，且候选名**只属于本机 ABI 那一族**——兼容命名不放宽架构校验。
+   * 顺序保持既有行为：先确认"有本机可用的包"，再比版本（不因为已是最新而掩盖发布侧缺件）。
+   */
+  internal fun classifyLatestBody(body: String, deviceAbis: List<String>, family: String): CheckResult {
+    val latest = try {
+      parseLatestRelease(body)
+    } catch (e: Exception) {
+      return classifyTransportFailure(e)
+    }
+    if (deviceAbis.isEmpty()) {
+      return CheckResult.Failed(
+        "检查失败：读不到本机 ABI（SUPPORTED_ABIS 为空）——无法判断该取哪个包；这不是『没有 arm64 版本』",
+        CheckResult.FailureKind.ABI_UNSUPPORTED,
+      )
+    }
+    val byName = latest.assets.associateBy { it.name }
+    val hit = assetNameCandidates(latest.tag, family).firstNotNullOfOrNull { byName[it] }
+      ?: return classifyAssetFailure(latest.tag, family, deviceAbis, latest.assets.map { it.name })
+    if (hit.url.isEmpty()) {
+      return CheckResult.Failed(
+        "检查失败：发布数据异常——资产 ${hit.name} 缺下载地址（发布可能未完成）",
+        CheckResult.FailureKind.RELEASE_DATA_BROKEN,
+      )
+    }
+    if (!isNewer(latest.tag, currentVersion())) return CheckResult.UpToDate
+    val shaUrl = byName["${hit.name}.sha256"]?.url?.takeIf { it.isNotEmpty() }
+    return CheckResult.Available(latest.tag, hit.name, hit.url, shaUrl, hit.sizeBytes)
+  }
+
+  /**
+   * 查 latest release；资产按 [assetNameCandidates] 匹配（发布链口径优先，兼容历史口径）。
    * 版本比较：tag（去 v 前缀）与 BuildConfig.VERSION_NAME 语义比较（点分段数值）；
    * 相等 = 已是最新（快照后缀 -SN-* 不参与比较）。
+   *
+   * 元数据直连 GitHub API（体积小、可用性远高于 169MB 资产下载）；资产下载才走镜像链（[download]）。
+   * API 不可达 / 限流 / 接口异常 / 解析失败 / 发布数据异常 / 本机 ABI 读不到，**各自如实分类**，
+   * 不得一律说成"没有 arm64 资产"（0.14.6 功能 C：C1/C2）。
    */
   fun checkLatest(): CheckResult {
-    // 元数据直连 GitHub API（体积小、可用性远高于 169MB 资产下载）；
-    // 资产下载才走镜像链（download()）。API 不可达即失败并如实报告。
+    val abis = deviceAbis()
+    val family = abiFrom(abis)
+    var conn: HttpURLConnection? = null
     try {
-      val conn = URL("$API/repos/$REPO/releases/latest").openConnection(Proxy.NO_PROXY) as HttpURLConnection
+      conn = URL("$API/repos/$REPO/releases/latest").openConnection(Proxy.NO_PROXY) as HttpURLConnection
       conn.connectTimeout = 10_000
       conn.readTimeout = 15_000
       conn.setRequestProperty("Accept", "application/vnd.github+json")
       val httpCode = conn.responseCode
       if (httpCode != 200) {
-        conn.disconnect()
-        return CheckResult.Failed("检查失败：GitHub API 返回 HTTP $httpCode")
+        val rateLimited = isRateLimited(
+          httpCode,
+          conn.getHeaderField("x-ratelimit-remaining"),
+          conn.getHeaderField("retry-after"),
+        )
+        android.util.Log.w(TAG, "check HTTP $httpCode rateLimited=$rateLimited")
+        return classifyHttpFailure(httpCode, rateLimited)
       }
-      val body = conn.inputStream.use { it.readBytes().toString(Charsets.UTF_8) }
-      conn.disconnect()
-      val j = JSONObject(body)
-      val tag = j.optString("tag_name", "")
-      if (tag.isEmpty()) return CheckResult.Failed("latest release 无 tag_name")
-      val assets = j.optJSONArray("assets") ?: org.json.JSONArray()
-      val abi = deviceAbi()
-      val want = assetName(tag, abi)
-      var apkUrl = ""
-      var shaUrl: String? = null
-      var size = 0L
-      for (i in 0 until assets.length()) {
-        val a = assets.optJSONObject(i) ?: continue
-        val name = a.optString("name", "")
-        if (name == want) { apkUrl = a.optString("browser_download_url", ""); size = a.optLong("size", 0L) }
-        if (name == "$want.sha256") shaUrl = a.optString("browser_download_url", "")
-      }
-      if (apkUrl.isEmpty()) return CheckResult.Failed("latest release $tag 无 $abi 资产（$want）")
-      if (!isNewer(tag, currentVersion())) return CheckResult.UpToDate
-      return CheckResult.Available(tag, want, apkUrl, shaUrl, size)
+      val raw = conn.inputStream.use { it.readBytes() }
+      return classifyLatestBody(raw.toString(Charsets.UTF_8), abis, family)
     } catch (e: Exception) {
       android.util.Log.w(TAG, "check via $API failed: " + (e.message ?: e.javaClass.simpleName))
-      return CheckResult.Failed("检查失败：" + (e.message ?: e.javaClass.simpleName) + "——请核对网络后重试")
+      return classifyTransportFailure(e)
+    } finally {
+      runCatching { conn?.disconnect() }
     }
   }
 

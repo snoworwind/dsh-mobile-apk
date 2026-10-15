@@ -1,18 +1,25 @@
-// T1 常驻 CPU 回归（2026-09-25）：默认间隔 + 事件驱动 + 每 tick describe 次数上界。
+// T1 常驻 CPU 回归（2026-09-25；A7 升级 2026-10-11）：**零定时器** + 事件驱动 + describe 次数上界。
 //
 // 判据不是「字符串在场」，而是**可数的行为**：
-//   ① 默认 pollIntervalSeconds 必须是兜底量级（>=30s），不是 5s；
+//   ① 源码里不存在任何 setTimeout / setInterval —— 既无启动轮也无兜底轮询；
 //   ② 事件驱动存在：settings/document-updated 到达时**不靠轮询**即跑一轮；
-//   ③ 每 tick 的 describe 调用次数有上界（旧实现同 tick 内 2-3 次）；
+//   ③ 每次事件触发的 describe 调用次数有上界（旧实现同 tick 内 2-3 次）；
 //   ④ 回归场景（用户添加自定义供应商）在事件路径下仍然可达。
 //
-// 反证（改坏必须判红，见末例 REVERSE）：
-//   - 把默认间隔改回 5 -> ① 红；
+// 【为什么 ① 从「间隔 >=30s」改成「一个定时器都没有」】
+// 旧 ① 挡的是「默认间隔退回 5s ⇒ 常驻 24-26% CPU」。但设备实证（2026-10-10，
+// $DSH_HOME/model-capability.log 380KB）显示：即使间隔是 120s，也照样每 120 秒写一行
+// tick 日志、连续数日，而该设备当时 runAutoPass: routes=[] —— 定时轮本身就产不出价值。
+// 所以「调大间隔」只是把成本摊薄，「一个定时器都不留」才是消除；新 ① 比旧 ① 更强：
+// 它同时覆盖 5s、120s 以及任何未来重新引入的间隔。
+//
+// 反证（改坏必须判红，见末例 REVERSE 与 A7 的变异自证）：
+//   - 塞回任意一个 setInterval/setTimeout -> ① 红；
 //   - 去掉事件订阅 -> ② 红；
 //   - 让 readDescriptor 每次重新 describe -> ③ 红。
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { copyFileSync, existsSync, readFileSync, rmSync } from 'node:fs'
+import { copyFileSync, existsSync, readFileSync, renameSync, rmSync } from 'node:fs'
 import { apply } from '../lib/index.js'
 
 const SRC = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8')
@@ -25,19 +32,23 @@ const SRC = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8')
 // CI 上 T1-⑤/⑥/X1-⑧ 取不到目录数据 → 写回不发生 → 断言判红；本机全绿。
 //
 // 处置：**不用 SKIP**（那会让 CI 永久丢掉 X1 的守卫，而 X1 正是咬过我们一次的 HMR 嵌套回归）。
-// 改为「缺席则用夹具补上、仅当是自己写的才删」，使 CI 与本地**同形真跑**；本地真快照在场时不覆盖。
+// 改为「缺席则用夹具补上」，使 CI 与本地**同形真跑**；本地真快照在场时不覆盖。
+//
+// **写一次、永不删除**（2026-10-11 竞态实锤）：`node --test test/*.test.mjs` 把**每个文件放进独立
+// 进程并行跑**，而本仓有 4 个文件共用这同一条快照路径。旧实现「谁写的谁删（after 里 rmSync）」于是
+// 出现：进程 A 跑完删掉文件，进程 B 正要读 -> ENOENT，**同一份代码时绿时红**（实测净检出下 8 次里
+// 失败 1 次；4 个写入者时 8 次里失败 5 次）。不删是安全的：各写入者内容完全相同（同一 FIXTURE）、
+// 真快照由 build-snapshot-013.mjs 构建时无条件重生成、check-patch-mirror 第 392 行显式跳过该路径、
+// .gitignore:19 已忽略 lib/。写入用「临时文件 + rename」保证读者看不到半截内容。
 const SNAPSHOT = new URL('../lib/catalog-snapshot.json', import.meta.url)
 const FIXTURE = new URL('./fixtures/catalog-snapshot.min.json', import.meta.url)
-let wroteFixture = false
 
 before(() => {
   if (existsSync(SNAPSHOT)) return
-  copyFileSync(FIXTURE, SNAPSHOT)
-  wroteFixture = true
-})
-
-after(() => {
-  if (wroteFixture) rmSync(SNAPSHOT, { force: true })
+  const tmp = new URL(`${SNAPSHOT.pathname}.${process.pid}.tmp`, 'file:')
+  copyFileSync(FIXTURE, tmp)
+  try { renameSync(tmp, SNAPSHOT) } catch { /* 另一进程已抢先落盘（内容相同） */ }
+  finally { try { rmSync(tmp, { force: true }) } catch { /* 已被 rename 移走 */ } }
 })
 
 /** 剥注释：只保留可执行/声明行，避免用文档串当判据（本仓三次踩过的坑）。 */
@@ -53,7 +64,7 @@ const CODE = stripComments(SRC)
 function makeCtx(providers) {
   const listeners = new Map()
   let section = { providers }
-  const state = { describes: 0, mutates: 0, disposer: undefined }
+  const state = { describes: 0, mutates: 0, saves: 0, disposer: undefined }
   const settings = {
     describe() {
       state.describes += 1
@@ -73,11 +84,27 @@ function makeCtx(providers) {
       return {}
     },
   }
+  // 忠实模拟 cordis 的服务表与可选依赖（ctx.get strict 语义 / ctx.inject 延迟回调）。
+  // 见 save-triggered-fill.test.mjs 同类夹具的说明：夹具若不忠实，
+  // 「A6 在真机上永不注册」这类缺陷会恒不可见（2026-10-11 设备实锤教训）。
+  const services = new Map()
+  const pending = []
+  const routes = []
+  const runPending = () => {
+    for (let i = pending.length - 1; i >= 0; i -= 1) {
+      if (pending[i].names.every((n) => services.has(n))) {
+        const item = pending.splice(i, 1)[0]
+        item.cb(ctx)
+      }
+    }
+  }
   const ctx = {
     settings,
     logger: () => ({ info: () => {}, warn: () => {}, debug: () => {} }),
     effect: (fn) => { state.disposer = fn() },
-    get: () => undefined,
+    get: (name) => services.get(name),
+    inject(names, cb) { pending.push({ names, cb }); runPending() },
+    provide(name, value) { services.set(name, value); runPending() },
     tools: { register: () => {} },
     on(name, listener) {
       if (!listeners.has(name)) listeners.set(name, [])
@@ -85,11 +112,24 @@ function makeCtx(providers) {
       return () => {}
     },
   }
+  const emit = (name, ...args) => { for (const l of listeners.get(name) ?? []) l(...args) }
   return {
     ctx,
     state,
     get section() { return section },
-    emit(name, ...args) { for (const l of listeners.get(name) ?? []) l(...args) },
+    emit,
+    /**
+     * 模拟一次「用户在设置页保存」：先把新内容写进 section，再发保存事件。
+     *
+     * 顺序与上游一致（settings.write 先落盘、describe、再 emit），因此这是唯一
+     * 能让本插件看到变化的入口——它没有任何定时器可依赖。
+     * @param mutate - 收到当前 section，返回新 section（省略则只发事件）。
+     */
+    save(mutate) {
+      if (typeof mutate === 'function') section = mutate(section) ?? section
+      state.saves += 1
+      emit(EV, 'llm-pi-ai', state.saves)
+    },
     hasListener: (name) => (listeners.get(name) ?? []).length > 0,
     dispose() { if (state.disposer) state.disposer() },
   }
@@ -99,25 +139,28 @@ const flush = () => new Promise((resolve) => setTimeout(resolve, 40))
 
 const EV = 'settings/document-updated'
 
-// ── ① 默认间隔：必须是兜底量级，不是 5s ────────────────────────────────────────
-test('T1-① 兜底间隔分两档且都 >=30s，下界钳制存在，旧的 5s 已消失', () => {
-  // 两档默认：事件可用=120s（安全网），事件不可用=30s（唯一触发器）
-  assert.match(CODE, /const fallbackSeconds = eventDriven \? 120 : 30/,
-    '找不到「按事件面是否可用分两档」的默认值表达式')
-  assert.match(CODE, /config\.pollIntervalSeconds \?\? fallbackSeconds/,
-    'pollMs 没有使用分档默认值')
-  // 下界钳制（有意）：旧实现 Math.max(2, ...) 允许 2s
-  const guard = /Math\.max\((\d+),\s*config\.pollIntervalSeconds/.exec(CODE)
-  assert.ok(guard, '找不到 pollMs 的下界守卫')
-  assert.ok(Number(guard[1]) >= 30, '下界守卫 ' + guard[1] + 's 过小')
-  // 旧的硬编码 5 必须不再作为默认
-  assert.ok(!/pollIntervalSeconds \?\? 5\b/.test(CODE), '默认值仍是旧的 5s（T1 未生效）')
+// ── ① 零定时器：不存在任何周期/延迟装置 ────────────────────────────────────────
+test('T1-① 源码里不存在任何 setTimeout / setInterval（含启动轮与兜底轮询）', () => {
+  // 这条同时覆盖旧的「默认间隔是 5s」「默认间隔是 120s」两种回归形态：
+  // 只要还有一个定时器，就还有一条与用户操作无关的常驻路径。
+  for (const banned of ['setTimeout', 'setInterval']) {
+    assert.ok(!CODE.includes(banned), '源码仍含 ' + banned + '（A7 要求零定时器）')
+  }
+  // setImmediate 本身不是定时器（零延迟、一次性），这里只锁它的**用法**：
+  // 只允许出现在让出一轮事件循环的 yieldAutoPass 里，不得成为任何循环驱动。
+  const immediateUses = CODE.split('setImmediate').length - 1
+  assert.equal(immediateUses, 1, 'setImmediate 出现 ' + immediateUses + ' 次（应只有 yieldAutoPass 一处）')
+  assert.match(CODE, /const yieldAutoPass = \(\) => new Promise<void>\(\(resolve\) => setImmediate\(resolve\)\)/,
+    'setImmediate 不在 yieldAutoPass 里（出现了一处意外的异步驱动）')
+  // 周期语义的配置项也必须消失，否则「没实现定时器但留了配置」会误导后来者接回去。
+  assert.ok(!/pollInterval|intervalSeconds|scanInterval/.test(CODE), '仍存在周期扫描配置项')
+  assert.ok(!/const fallbackSeconds/.test(CODE), '仍存在兜底间隔计算')
 })
 
 // ── ② 事件驱动存在：不靠轮询也能触发 ──────────────────────────────────────────
 test('T1-② settings/document-updated 到达即触发一轮（不依赖轮询）', async (t) => {
   const c = makeCtx({})
-  apply(c.ctx, { startupDelaySeconds: 3600, pollIntervalSeconds: 3600 })
+  apply(c.ctx, {})
   // A（止血，2026-09-26）：断言先抛时下面的 dispose 走不到 -> setInterval(1h) 泄漏 ->
   // node:test 永不排空事件循环 -> CI 卡死且拿不到 pass/fail 汇总行。故挂 t.after 兜底。
   t.after(() => c.dispose())
@@ -135,7 +178,7 @@ test('T1-② settings/document-updated 到达即触发一轮（不依赖轮询�
 
 test('T1-② 非 llm-pi-ai 命名空间的事件必须被忽略（不为其做全量 describe）', async (t) => {
   const c = makeCtx({})
-  apply(c.ctx, { startupDelaySeconds: 3600, pollIntervalSeconds: 3600 })
+  apply(c.ctx, {})
   // A（止血，2026-09-26）：断言先抛时下面的 dispose 走不到 -> setInterval(1h) 泄漏 ->
   // node:test 永不排空事件循环 -> CI 卡死且拿不到 pass/fail 汇总行。故挂 t.after 兜底。
   t.after(() => c.dispose())
@@ -153,9 +196,9 @@ test('T1-③ 单次事件触发内 describe 次数 <= 2（旧实现同 tick 内 
     gateway: { baseURL: 'https://a.example/v1', api: 'openai-completions', models: [{ id: 'gw-model' }] },
   }
   const c = makeCtx(providers)
-  apply(c.ctx, { startupDelaySeconds: 3600, pollIntervalSeconds: 3600 })
-  // A（止血，2026-09-26）：断言先抛时下面的 dispose 走不到 -> setInterval(1h) 泄漏 ->
-  // node:test 永不排空事件循环 -> CI 卡死且拿不到 pass/fail 汇总行。故挂 t.after 兜底。
+  apply(c.ctx, {})
+  // 旧实现会泄漏一个 setInterval(1h)，断言先抛时 dispose 走不到 -> node:test 永不排空
+  // 事件循环 -> CI 卡死且拿不到 pass/fail 汇总行。故挂 t.after 兜底（现已是防御性保留）。
   t.after(() => c.dispose())
   await flush()
 
@@ -187,12 +230,13 @@ test('T1-④ 回归场景：事件触发后补给链仍可达（用户口径不�
     },
   }
   const c = makeCtx(providers)
-  apply(c.ctx, { startupDelaySeconds: 3600, pollIntervalSeconds: 3600 })
-  // A（止血，2026-09-26）：断言先抛时下面的 dispose 走不到 -> setInterval(1h) 泄漏 ->
-  // node:test 永不排空事件循环 -> CI 卡死且拿不到 pass/fail 汇总行。故挂 t.after 兜底。
+  apply(c.ctx, {})
+  // 旧实现会泄漏 setInterval(1h)：断言先抛时 dispose 走不到 -> 事件循环永不排空
+  // -> CI 卡死且拿不到汇总行。故挂 t.after 兜底（防御性保留）。
   t.after(() => c.dispose())
   await flush()
-  c.emit(EV, 'llm-pi-ai', 1)
+  // 用户的保存动作：新加模型（这正是 2026-09-10 的现场）
+  c.save((s) => ({ providers: { ...s.providers, gateway: { ...s.providers.gateway, models: [{ id: 'gw-model' }] } } }))
   await flush()
 
   const models = c.section.providers.gateway.models
@@ -208,13 +252,14 @@ test('T1-④ 回归场景：事件触发后补给链仍可达（用户口径不�
 
 // ── REVERSE：反证可判红 ───────────────────────────────────────────────────────
 test('T1-REVERSE 反证可判红：改坏任一处都会让 ①/②/③ 判据失败', () => {
-  // A) 把两档默认改回「5s」形态 -> ① 必须判红
-  const brokenDefault = CODE.replace(/const fallbackSeconds = eventDriven \? 120 : 30/, 'const fallbackSeconds = 5')
-  assert.ok(!/const fallbackSeconds = eventDriven \? 120 : 30/.test(brokenDefault), '反证构造失败 A')
-  assert.ok(/const fallbackSeconds = 5/.test(brokenDefault))
+  // A) 塞回任意一个定时器 -> ① 必须判红
+  const withTimer = CODE.replace('const stamps = createStampStore()',
+    'const stamps = createStampStore()\n    setInterval(() => {}, 120000)')
+  assert.ok(withTimer.includes('setInterval'), '反证构造失败 A')
+  assert.ok(!withTimer.includes('const stamps = createStampStore()\n    setInterval'.replace('const stamps = createStampStore()\n    setInterval', 'NOPE')),
+    '反证构造 A 无判别力')
   // ① 的判据在这份「坏代码」上不成立
-  assert.ok(!/const fallbackSeconds = eventDriven \? 120 : 30/.test(brokenDefault),
-    '把默认改回 5 后 ① 的 match 必须失败（判据有判别力）')
+  assert.ok(withTimer.includes('setInterval'), '塞回 setInterval 后 ① 的判据必须失败（判据有判别力）')
 
   // B) 去掉事件订阅 -> ② 必须判红
   const noEvent = CODE.replace(/'settings\/document-updated'/, "'settings/never-fired'")
@@ -234,33 +279,32 @@ test('T1-REVERSE 反证可判红：改坏任一处都会让 ①/②/③ 判据�
 // thinkingFormat=openai），这样才能真的走完 discover → mergeCatalog → applyModelPatch。
 const REAL_ID = 'zai-org/GLM-5.3-Fast'
 
-test('T1-⑤ 回归场景端到端：事件到达后真实写回 reasoningEfforts（用户口径不退化）', async (t) => {
+test('T1-⑤ 回归场景端到端：保存新模型后真实写回 reasoningEfforts（用户口径不退化）', async (t) => {
   const c = makeCtx({
     gateway: {
       baseURL: 'https://a.example/v1',
       api: 'openai-completions',
-      // 用户新加的供应商：声明了模型、但没有思考档位 —— 正是 2026-09-10 的用户现场
-      models: [{ id: REAL_ID }],
+      // 供应商已在、尚无模型：稍后的保存把模型加进来 —— 正是 2026-09-10 的用户现场
+      models: [],
     },
   })
-  apply(c.ctx, { startupDelaySeconds: 3600, pollIntervalSeconds: 3600 })
-  // A（止血，2026-09-26）：断言先抛时下面的 dispose 走不到 -> setInterval(1h) 泄漏 ->
-  // node:test 永不排空事件循环 -> CI 卡死且拿不到 pass/fail 汇总行。故挂 t.after 兜底。
+  apply(c.ctx, {})
   t.after(() => c.dispose())
   await flush()
-  c.emit(EV, 'llm-pi-ai', 1)
+
+  // 用户在设置页「获取模型列表 → 勾选 → 保存」
+  c.save((s) => ({ providers: { ...s.providers, gateway: { ...s.providers.gateway, models: [{ id: REAL_ID }] } } }))
   await flush()
 
   const models = c.section.providers.gateway.models
   const entry = models.find((m) => typeof m === 'object' && m.id === REAL_ID)
   t.diagnostic('mutates=' + c.state.mutates + ' entry=' + JSON.stringify(entry))
-  assert.equal(c.state.mutates, 1, '事件路径没有产生写回（回归场景失效）')
+  assert.equal(c.state.mutates, 1, '保存路径没有产生写回（回归场景失效）')
   assert.ok(entry && entry.reasoningEfforts, '写回后条目仍无 reasoningEfforts（档位不会出现）')
   assert.ok(entry.reasoningEfforts.high, 'reasoningEfforts 缺少 high 档')
 })
 
-test('T1-⑤ 反证：关掉事件且间隔拉到极大 -> 回归场景在窗口内不成立', async (t) => {
-  // 判据 (b) 的判别力证明：这正是「只用轮询兜底」的世界。
+test('T1-⑤ 反证：没有任何保存事件时，等再久也不写回（无定时器可兜底）', async (t) => {
   const c = makeCtx({
     gateway: {
       baseURL: 'https://a.example/v1',
@@ -268,16 +312,14 @@ test('T1-⑤ 反证：关掉事件且间隔拉到极大 -> 回归场景在窗口
       models: [{ id: REAL_ID }],
     },
   })
-  apply(c.ctx, { startupDelaySeconds: 3600, pollIntervalSeconds: 3600 })
-  // A（止血，2026-09-26）：断言先抛时下面的 dispose 走不到 -> setInterval(1h) 泄漏 ->
-  // node:test 永不排空事件循环 -> CI 卡死且拿不到 pass/fail 汇总行。故挂 t.after 兜底。
+  apply(c.ctx, {})
   t.after(() => c.dispose())
   await flush()
   const before = c.state.mutates
-  // 不触发事件，只等一小段（远小于 3600s 的兜底间隔）
-  await flush()
-  assert.equal(c.state.mutates, before, '未触发事件却发生了写回（判据无判别力）')
-  assert.equal(c.state.mutates, 0, '无事件时不应写回——这正是纯轮询下「要等 2 分钟」的证据')
+  // 刻意等一段：旧实现里 setInterval 或启动 setTimeout 会在这段内触发一轮（并写回）。
+  await new Promise((r) => setTimeout(r, 300))
+  assert.equal(c.state.mutates, before, '未保存却发生了写回（说明还有定时器在跑）')
+  assert.equal(c.state.mutates, 0, '无保存事件时不应写回（A7：已无任何定时轮可兜底）')
 })
 
 // ── ⑥ 自触发环收敛（lead 复核问题 1）────────────────────────────────────────
@@ -286,12 +328,10 @@ test('T1-⑥ 自触发环收敛：连续自身写回后签名稳定，不无限�
     gateway: {
       baseURL: 'https://a.example/v1',
       api: 'openai-completions',
-      models: [{ id: REAL_ID }],
+      models: [],
     },
   })
-  apply(c.ctx, { startupDelaySeconds: 3600, pollIntervalSeconds: 3600 })
-  // A（止血，2026-09-26）：断言先抛时下面的 dispose 走不到 -> setInterval(1h) 泄漏 ->
-  // node:test 永不排空事件循环 -> CI 卡死且拿不到 pass/fail 汇总行。故挂 t.after 兜底。
+  apply(c.ctx, {})
   t.after(() => c.dispose())
   await flush()
 
@@ -304,41 +344,29 @@ test('T1-⑥ 自触发环收敛：连续自身写回后签名稳定，不无限�
     return out
   }
 
-  c.emit(EV, 'llm-pi-ai', 1)
+  // 用户保存新模型；此后每一轮都由「我方写回自己引发的那个事件」驱动。
+  c.save((s) => ({ providers: { ...s.providers, gateway: { ...s.providers.gateway, models: [{ id: REAL_ID }] } } }))
   await flush()
   await flush()
   await flush()
 
-  // 收敛判据：首次写回之后再无第二次（字段已填 → plan 无变化 → 不再 mutate）
+  // 收敛判据：首次写回之后再无第二次（字段已填 → diff 无新增 → 不再 mutate）
   t.diagnostic('mutates=' + c.state.mutates + ' describes=' + c.state.describes)
   assert.equal(c.state.mutates, 1, '写回发生了 ' + c.state.mutates + ' 次：自触发环未收敛（应为 1）')
 })
 
-// ── ⑦ 兜底间隔钳制（lead 复核问题 2）─────────────────────────────────────────
-test('T1-⑦ 配置 pollIntervalSeconds=5 被有意钳到 30（防配回 5s 打回高 CPU）', () => {
-  const guard = /Math\.max\((\d+),\s*config\.pollIntervalSeconds/.exec(CODE)
-  assert.ok(guard, '找不到下界守卫')
-  const lower = Number(guard[1])
-  assert.equal(lower, 30, '下界守卫应为 30（有意钳制），实际 ' + lower)
-  // 钳制是**有意**的：Math.max(30, ...) 让用户显式配的 5 也会被抬到 30
-  assert.match(CODE, /Math\.max\(30,\s*config\.pollIntervalSeconds \?\? fallbackSeconds\)/,
-    '钳制表达式形态不符')
-  // 行为化验证：模拟 Math.max 对该表达式的取值
-  assert.equal(Math.max(30, 5), 30, '钳制语义确认：显式 5 应被抬到 30')
-  assert.equal(Math.max(30, 120), 120, '显式大于钳制下界时应尊重用户值')
-})
-
-test('T1-⑦ 事件订阅不可用时兜底间隔自动收紧到 30s（避免功能延迟退化到 2 分钟）', async (t) => {
-  // ctx.on 缺席 = 事件面不可用：此时轮询是唯一触发器，必须用短档。
+// ── ⑦ 无事件面时的行为：不注册监听，也**不**悄悄退回轮询 ────────────────────────
+test('T1-⑦ ctx.on 缺席时不注册监听，且不会退回任何定时器', async (t) => {
   const c = makeCtx({})
   delete c.ctx.on
-  apply(c.ctx, { startupDelaySeconds: 3600 })
-  // A（止血，2026-09-26）：断言先抛时下面的 dispose 走不到 -> setInterval(1h) 泄漏 ->
-  // node:test 永不排空事件循环 -> CI 卡死且拿不到 pass/fail 汇总行。故挂 t.after 兜底。
+  apply(c.ctx, {})
   t.after(() => c.dispose())
   await flush()
-  // 结构断言：两档选择由 eventDriven 驱动（上面 ⑦ 已锁表达式），此处锁「订阅缺失不注册监听」
   assert.ok(!c.hasListener(EV), '本夹具不应有事件订阅')
+  // 关键：事件面缺席的旧处置是「改用 30s 轮询兜底」——那正是要根除的常驻路径。
+  // 现在没有任何可退回的定时器，因此这里只断言「不该发生写回」。
+  await new Promise((r) => setTimeout(r, 300))
+  assert.equal(c.state.mutates, 0, '事件面缺席时不应有任何写回（更不该有轮询兜底）')
 })
 
 // ── ⑧ X1 回归：事件回调必须把写回送出 hmr 事务上下文 ────────────────────────────
@@ -351,7 +379,7 @@ test('X1-⑧ 事件回调把 tick 送出当前异步上下文（否则写回被 
   const { AsyncLocalStorage } = await import('node:async_hooks')
   const als = new AsyncLocalStorage()
   const c = makeCtx({ gateway: { baseURL: 'https://a.example/v1', api: 'openai-completions', models: [{ id: REAL_ID }] } })
-  apply(c.ctx, { startupDelaySeconds: 3600, pollIntervalSeconds: 3600 })
+  apply(c.ctx, {})
   // A（止血，2026-09-26）：断言先抛时下面的 dispose 走不到 -> setInterval(1h) 泄漏 ->
   // node:test 永不排空事件循环 -> CI 卡死且拿不到 pass/fail 汇总行。故挂 t.after 兜底。
   t.after(() => c.dispose())
@@ -437,7 +465,7 @@ async function runWithFetchCounter({ opts = {}, seedCache = null, settleMs = 200
   let c
   try {
     c = makeCtx({ gateway: { baseURL: 'https://a.example/v1', api: 'openai-completions', models: [{ id: 'gw-model' }] } })
-    apply(c.ctx, { startupDelaySeconds: 0, pollIntervalSeconds: 3600, ...opts })
+    apply(c.ctx, { ...opts })
     await new Promise((r) => setTimeout(r, settleMs))
     return { calls, state: c.state, dir, home: dir }
   } finally {
@@ -494,7 +522,7 @@ test('E-P2-4 tick/事件/轮询路径恒 0 次网络（总次数 <=1，第二次
   let c
   try {
     c = makeCtx({ gateway: { baseURL: 'https://a.example/v1', api: 'openai-completions', models: [{ id: 'gw-model' }] } })
-    apply(c.ctx, { startupDelaySeconds: 0, pollIntervalSeconds: 3600 })
+    apply(c.ctx, {})
     await new Promise((r) => setTimeout(r, 150))
     // 主动再触发几轮事件 tick，覆盖 event 路径
     for (let i = 0; i < 3; i++) { c.emit(EV, 'llm-pi-ai', i + 1); await new Promise((r) => setTimeout(r, 60)) }
@@ -525,7 +553,7 @@ test('E-P2-4 tick 的 describe 次数不因 S3/S5 合流增加（上界仍为 2�
   const c = makeCtx({
     gateway: { baseURL: 'https://a.example/v1', api: 'openai-completions', models: [{ id: REAL_ID }] },
   })
-  apply(c.ctx, { startupDelaySeconds: 0, pollIntervalSeconds: 3600 })
+  apply(c.ctx, {})
   await new Promise((r) => setTimeout(r, 150))
   const used = c.state.describes
   assert.ok(used <= 2, '启动轮用了 ' + used + ' 次 describe（>2）：S3/S5 合流增加了描述符读取')
@@ -550,8 +578,11 @@ test('E-P2-2 端到端：S3 提供的长尾字段真的写回 settings（离线�
       schema: 1, source: 'models.dev', generatedAt: new Date().toISOString(), modelCount: 1,
       models: [{ id: LONG_TAIL, provider: 'encyclopedia', contextWindow: 131072, maxTokens: 8192, input: ['text'] }],
     }))
-    const c = makeCtx({ gateway: { baseURL: 'https://a.example/v1', api: 'openai-completions', models: [{ id: LONG_TAIL }] } })
-    apply(c.ctx, { startupDelaySeconds: 0, pollIntervalSeconds: 3600 })
+    const c = makeCtx({ gateway: { baseURL: 'https://a.example/v1', api: 'openai-completions', models: [] } })
+    apply(c.ctx, {})
+    await new Promise((r) => setTimeout(r, 200))
+    // A7：无定时器 => 写回只可能由「保存」触发，因此这里必须真的模拟一次保存。
+    c.save((s) => ({ providers: { ...s.providers, gateway: { ...s.providers.gateway, models: [{ id: LONG_TAIL }] } } }))
     await new Promise((r) => setTimeout(r, 200))
     const entry = c.section.providers.gateway.models.find((m) => m && m.id === LONG_TAIL)
     assert.ok(c.state.mutates >= 1, 'S3 命中却没有写回（mutates=' + c.state.mutates + '）')
@@ -575,7 +606,7 @@ test('E-P2-2 端到端反证：无 models.dev 缓存时同一 id 不写回（未
   try {
     const LONG_TAIL = 'vendor-only-long-tail-9b'
     const c = makeCtx({ gateway: { baseURL: 'https://a.example/v1', api: 'openai-completions', models: [{ id: LONG_TAIL }] } })
-    apply(c.ctx, { startupDelaySeconds: 0, pollIntervalSeconds: 3600 })
+    apply(c.ctx, {})
     await new Promise((r) => setTimeout(r, 200))
     const entry = c.section.providers.gateway.models.find((m) => m && m.id === LONG_TAIL)
     assert.equal(c.state.mutates, 0, '无任何来源却发生了写回（凭空造事实）')
@@ -616,4 +647,42 @@ test('P2-S3 结构：apply() 的 diag 行必须报告 modelsDev 状态（可观�
   for (const s of ['disabled', 'no-cache', 'stale', 'fresh']) {
     assert.ok(CODE_INDEX.includes("'" + s + "'"), 'modelsDevStatus 缺少状态 ' + s)
   }
+})
+
+
+test('C4 automatic pass yields before fresh signature and observes intervening settings', async (t) => {
+  const c = makeCtx({})
+  t.after(() => c.dispose())
+  const original = c.ctx.settings.describe
+  let peerTurnRan = false
+  let readsAfterPeerTurn = 0
+  c.ctx.settings.describe = () => {
+    const descriptor = original()
+    if (c.state.describes === 1) setImmediate(() => { peerTurnRan = true })
+    else if (peerTurnRan) readsAfterPeerTurn++
+    return descriptor
+  }
+  apply(c.ctx, {})
+  await flush()
+  c.emit(EV, 'llm-pi-ai', 1)
+  await flush()
+  assert.ok(readsAfterPeerTurn >= 1, 'fresh signature was read in the same turn as initial projection')
+  assert.equal(c.state.mutates, 0)
+})
+
+test('C4 disposal during the pass checkpoint prevents further discovery or signature reads', async (t) => {
+  const c = makeCtx({ gateway: { api: 'openai-completions', models: [{ id: 'unrecognized-model' }] } })
+  t.after(() => c.dispose())
+  const original = c.ctx.settings.describe
+  c.ctx.settings.describe = () => {
+    const descriptor = original()
+    if (c.state.describes === 1) setImmediate(() => c.dispose())
+    return descriptor
+  }
+  apply(c.ctx, {})
+  await flush()
+  c.emit(EV, 'llm-pi-ai', 1)
+  await flush()
+  assert.equal(c.state.describes, 1, 'disposed pass performed another settings projection')
+  assert.equal(c.state.mutates, 0)
 })

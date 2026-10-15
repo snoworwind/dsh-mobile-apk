@@ -84,7 +84,10 @@ class W3ShellContractTest {
 
   @Test
   fun bothDownloadPathsShareOneArtifactVerification() {
-    val body = memberBody(codeOnly(source("GuidePageRenderer.kt")), "private fun downloadAndInstall(")
+    // 0.14.6 单一真源重构：下载推进逻辑从 GuidePageRenderer 迁到 ApkUpdateController
+    // （原因见该文件顶部：状态机长在视图里 => 健康态无入口 + 两入口会打架）。
+    // 本用例守的不变量**没变**：缓存复用分支与新下载分支必须共用同一份产物判定。
+    val body = memberBody(codeOnly(source("ApkUpdateAction.kt")), "private fun downloadAndInstall(")
     assertTrue("必须调用统一的 verifyApkArtifact", body.contains("verifyApkArtifact("))
     assertTrue("缓存复用分支必须走该判定", body.contains("artifactVerdict()"))
     assertFalse(

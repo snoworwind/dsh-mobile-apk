@@ -27,7 +27,7 @@
 ## 3. release/ 目录规范
 
     release/
-    ├── v<版本>/apk/dsh-mobile-apk-v<版本>-<abi>.apk   # abi = arm64-v8a | x86_64（双 ABI 必须同时产出）
+    ├── v<版本>/apk/dsh-mobile-apk-v<版本>-<abi>.apk   # abi = arm64 | x86_64（双 ABI 必须同时产出；见 §6 改名窗口）
     ├── v<版本>/snapshot/snapshot-<abi>.tar.xz         # 双快照（在线更新/重打包用）
     ├── v<版本>/plugins/*.tgz                          # 3 插件
     ├── v<版本>/MANIFEST.txt                           # sha256 清单
@@ -53,7 +53,18 @@
 
 ## 6. 资产命名约定
 
-- APK：dsh-mobile-apk-v<主版本>-<abi>.apk（abi = arm64-v8a / x86_64）
+- APK：dsh-mobile-apk-v<主版本>-<abi>.apk，**abi 逐字取构建 ABI 名**（arm64 / x86_64）。
+
+  事实源（2026-10-11 核对）：线上发布唯一入口是 `.github/workflows/release.yml:262` 调
+  `scripts/build-apk-013.ps1`，其 `--artifact-name`（:465）= `dsh-mobile-apk-v$ver-$abi.apk`，
+  `$abi ∈ {arm64, x86_64}` ⇒ **arm64 资产名不带 `-v8a` 后缀**。
+  旁路脚本 `scripts/build-release.ps1:208` 用 `arm64-v8a`，但它**不在**发布工作流里。
+
+  **历史窗口（必须兼容，客户端已同时接受两代命名）**：实测 `gh release view <tag> --json assets`，
+  `-arm64-v8a` = v0.14.1 / v0.14.1-preview / v0.14.2 / v0.14.2-fx-1 / v0.14.2-fx-2；
+  `-arm64` = v0.14.0 / v0.14.2-fx-3 / v0.14.3 / v0.14.4 / v0.14.5 / v0.14.5-fx-1 / v0.14.5-fx-2。
+  x86_64 两代同名。客户端 `UpdateChecker.assetNameCandidates` 与
+  `UpdateCheckerTest.assetCandidatesAreBoundToReleaseChainProductName` 绑定本约定：**发布链改名即单测判红**。
 - 快照：snapshot-<abi>.tar.xz
 - 插件：dsh-android-<pkg>-<插件版本>.tgz（npm pack 原名）
 - MANIFEST.txt：sha256 + 相对路径 + 字节数（排序稳定，跨平台可校验）

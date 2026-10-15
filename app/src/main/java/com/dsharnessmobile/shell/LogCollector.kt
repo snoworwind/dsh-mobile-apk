@@ -177,6 +177,15 @@ object LogCollector {
     return null
   }
 
+  /** A TOTAL can precede the shell's LISTEN observation; cache it, but only emit once associated. */
+  internal data class ComposeTotalUpdate(val totalMs: Long, val shouldEmit: Boolean)
+
+  internal fun composeTotalUpdate(currentTotalMs: Long, listenMs: Long, engineText: String): ComposeTotalUpdate? {
+    val total = parseComposeTotalMs(engineText) ?: return null
+    if (total == currentTotalMs) return null
+    return ComposeTotalUpdate(total, shouldEmit = listenMs > 0L)
+  }
+
   /**
    * 纯函数：判定 compose 口径的来源标签。这是「未装探针」与「采样为 0」可区分的**判据面**
    * （-1 混过 42 个样本的教训 → 详档 §5.1 C6 要求 `t_compose_total != -1`）。
@@ -383,13 +392,11 @@ object LogCollector {
 
   /** 探针 TOTAL 出现/更新时补落一行（真实 t_compose_total）。 */
   private fun maybeEmitComposeTotal(ctx: Context, engineText: String) {
-    if (segListenMs <= 0L) return
     val source = composeProbeSource(engineText)
     if (source != SOURCE_NONE) segComposeSource = source
-    val total = parseComposeTotalMs(engineText) ?: return
-    if (total == segComposeTotalMs) return
-    segComposeTotalMs = total
-    emitBootSegments(ctx, "note=compose-total")
+    val update = composeTotalUpdate(segComposeTotalMs, segListenMs, engineText) ?: return
+    segComposeTotalMs = update.totalMs
+    if (update.shouldEmit) emitBootSegments(ctx, "note=compose-total")
   }
 
   private fun emitBootSegments(ctx: Context, note: String) {
@@ -519,7 +526,10 @@ object LogCollector {
    * @param error 导致失败的异常（可为 null —— 多数失败分支是布尔判定而非异常）
    */
   fun writeBootFail(context: Context, stage: String, detail: String, error: Throwable? = null) {
-    writeBootFailTo(context.applicationContext.filesDir, stage, detail, error, System.currentTimeMillis())
+    writeBootFailTo(
+      context.applicationContext.filesDir, stage, detail, error, System.currentTimeMillis(),
+      embeddedAssetFingerprint(context),
+    )
     // 失败路径必须有 Log.e（用户反馈第 5 项：logcat 里连一行都没有）。
     Log.e(TAG, "boot failed: stage=" + stage + " detail=" + detail, error)
   }
@@ -533,6 +543,8 @@ object LogCollector {
    *
    * @param filesDir 应用私有目录（生产传 `context.applicationContext.filesDir`）
    * @param nowMs 时间戳（单测可注入固定值）
+   * @param embeddedSnapshot 内嵌资产指纹（0.14.7 / task-9），见 [writeBootFail] 的重载说明；
+   *   缺省 null 时按 live 指纹单列的**旧口径**渲染（既有单测与调用方不传即可）。
    */
   internal fun writeBootFailTo(
     filesDir: File,
@@ -540,8 +552,13 @@ object LogCollector {
     detail: String,
     error: Throwable?,
     nowMs: Long,
+    embeddedSnapshot: String? = null,
   ) {
-    appendBounded(filesDir, BOOT_FAIL_FILE, bootFailLine(filesDir, stage, detail, error, nowMs), BOOT_FAIL_MAX_BYTES)
+    appendBounded(
+      filesDir, BOOT_FAIL_FILE,
+      bootFailLine(filesDir, stage, detail, error, nowMs, embeddedSnapshot),
+      BOOT_FAIL_MAX_BYTES,
+    )
   }
 
   /**
@@ -557,6 +574,8 @@ object LogCollector {
    *
    * @param filesDir 用于取配置指纹
    * @param nowMs 时间戳
+   * @param embeddedSnapshot **内嵌**资产指纹（`assets/snapshot.sha256` 的声明值），与 live 指纹并列；
+   *   见 [bootConfigFingerprint] 的 `snapshotEmbedded=` 字段说明。
    * @return 完整的单行诊断（不含行尾换行）
    */
   internal fun bootFailLine(
@@ -565,13 +584,14 @@ object LogCollector {
     detail: String,
     error: Throwable?,
     nowMs: Long,
+    embeddedSnapshot: String? = null,
   ): String {
     val sb = StringBuilder()
     sb.append(BOOT_FAIL_MARK)
       .append(" stage=").append(stage)
       .append(" at=").append(nowMs)
       .append(" ").append(bootSegmentsSnapshot())
-      .append(" fingerprint=").append(bootConfigFingerprint(filesDir))
+      .append(" fingerprint=").append(bootConfigFingerprint(filesDir, embeddedSnapshot))
     if (error != null) {
       // 异常类名 + 栈：用户反馈的核心诉求就是「有没有栈可读」。栈必须有界（单条不得爆文件）。
       sb.append(" error=").append(error.javaClass.name)
@@ -604,6 +624,8 @@ object LogCollector {
       filesDir, BOOT_FAIL_FILE,
       BOOT_FAIL_MARK + " stage=ok at=" + System.currentTimeMillis() +
         " " + bootSegmentsSnapshot() +
+        // 无 Context 的 ok 标记取不到 assets：`snapshotEmbedded=na` 是**如实**的「本次未采到」，
+        // 与本文件「绝不留空」的纪律一致（空值会让读的人以为漏采）。
         " fingerprint=" + bootConfigFingerprint(filesDir) +
         " error=none stack=none detail=" + detail.replace('\n', ' ').replace('\r', ' '),
       BOOT_FAIL_MAX_BYTES,
@@ -623,7 +645,7 @@ object LogCollector {
    *
    * 任一取不到写 `na`，**绝不留空**（空字段正是「看起来正常」误导的同一族形态）。
    */
-  internal fun bootConfigFingerprint(files: File): String {
+  internal fun bootConfigFingerprint(files: File, embeddedSnapshot: String? = null): String {
     val snap = readTrimmed(File(files, ".snapshot-fingerprint")) ?: "na"
     val tx = if (File(files, ".snapshot-transaction").exists()) "present" else "absent"
     val repair = if (File(files, ".profile-patch-repair-" + BuildConfig.VERSION_NAME).exists()) "present" else "absent"
@@ -634,9 +656,32 @@ object LogCollector {
       engineLog.length() == 0L -> "empty"
       else -> "bytes=" + engineLog.length()
     }
-    return "snapshot=" + snap + ",vcode=" + BuildConfig.VERSION_CODE +
+    // 0.14.7 / task-9：**内嵌**资产指纹必须与 live 指纹并列出现，且字段名一眼可分。
+    // 为什么：`snapshot=` 读的是 live/已提交的 `.snapshot-fingerprint`，而真正被解码的是
+    // 安装包里的 `assets/snapshot.tar.xz`（声明值在 `assets/snapshot.sha256`）。
+    // 坏的是「内嵌资产」还是「live 提交值不一致」，此前在 boot-fail.log 里**无法区分**
+    // ——这正是本 issue 的日志误导来源。`snapshotEmbedded=` 是**声明值**（不改动既有字段名，
+    // 消费方与既有单测不受影响）；两者不相等即说明 live 与安装包不同源。
+    // 注意：这里刻意**不**写「实际字节摘要」——那属于刷新期预检的判据（见 EngineManager），
+    // 本字段的职责只是在失败现场摆出「安装包声称的是什么」。
+    val embedded = embeddedSnapshot?.takeIf { it.isNotBlank() } ?: "na"
+    return "snapshot=" + snap + ",snapshotEmbedded=" + embedded + ",vcode=" + BuildConfig.VERSION_CODE +
       ",transaction=" + tx + ",patchRepair=" + repair + ",home=" + home +
       ",engineLog=" + engineLogState
+  }
+
+  /**
+   * 读出**内嵌**资产指纹（`assets/snapshot.sha256` 的声明值）供 [bootConfigFingerprint] 使用。
+   *
+   * 为什么是一个独立的小函数：读取必须 fail-soft（诊断面绝不因取指纹失败而改变主流程），
+   * 且与 [EngineManager] 的读取**同一份文件**。这里只做「读 + 归一化」，不做任何判据
+   * ——判据在 EngineManager（预检）与 SnapshotFingerprintPolicy（声明值格式）里。
+   */
+  internal fun embeddedAssetFingerprint(context: Context): String? = try {
+    context.assets.open("snapshot.sha256").bufferedReader().use { it.readText().trim() }
+      .takeIf { it.isNotEmpty() }
+  } catch (_: Throwable) {
+    null
   }
 
   /** 读一个小文本文件并 trim；不存在/读失败返回 null（指纹面必须 fail-soft，绝不抛）。 */
@@ -741,6 +786,28 @@ object LogCollector {
   /** 页面**就绪**前缀（L-1 的判据来源）：页面首次 rendered() 为真时报一条。 */
   const val PAGE_READY_PREFIX = "[dsh-boot-ready]"
 
+  /**
+   * 页面**插件装配失败**前缀（CONTRACT §1，与页面侧 BOOT_FAILED_PREFIX='[dsh-boot-failed]'
+   * 逐字一致）。页面注入层判定「终局失败」后经 **console.error** 发布契约行：
+   *
+   * ```
+   * [dsh-boot-failed] dsh-boot-diag source=page-plugin-fail detail=<折叠k=v> failedIds=<逗号分隔|-> pageSideRuntime=<JSON>
+   * ```
+   *
+   * 与 ready/stall 同族（同一条 console 通道），但语义相反：它宣告页面**不会**再自愈到就绪，
+   * 壳侧据此落失败终态并退出到引导页错误相位。两侧常量必须字节一致，改动须跨仓同步。
+   */
+  const val PAGE_PLUGIN_FAIL_PREFIX = "[dsh-boot-failed]"
+
+  /** failedIds= 里单条 id 的合法形状（CONTRACT §1 第 5 条，与页面侧过滤口径同源）。 */
+  private val CLIENT_FAILED_ID = Regex("^[@A-Za-z0-9][@A-Za-z0-9._/-]*\$")
+
+  /** failedIds= 最多保留的条目数（CONTRACT §1 第 5 条：页面侧最多 8 项）。 */
+  private const val MAX_CLIENT_FAILED_IDS = 8
+
+  /** 单条 id 的最大长度（CONTRACT §1 第 5 条：≤120）。 */
+  private const val MAX_CLIENT_FAILED_ID_CHARS = 120
+
   /** 页面控制台行的分流结果（`null` = 与本插件无关，直接透传原日志行为）。 */
   internal data class PageConsoleRoute(val source: String, val detail: String)
 
@@ -760,6 +827,9 @@ object LogCollector {
     val folded = text.replace('\n', ' ').replace('\r', ' ').trim()
     if (folded.startsWith(PAGE_STALL_PREFIX)) return PageConsoleRoute("page-console", folded)
     if (folded.startsWith(PAGE_READY_PREFIX)) return PageConsoleRoute("page-console", folded)
+    // 第三分支（CONTRACT §3）：页面宣告插件装配终局失败。source 仍是 page-console（同一条
+    // 控制台通道的家族），排在 ready/stall 之后——顺序即契约，前两条必须先生效。
+    if (folded.startsWith(PAGE_PLUGIN_FAIL_PREFIX)) return PageConsoleRoute("page-console", folded)
     return null
   }
 
@@ -770,6 +840,46 @@ object LogCollector {
   /** 该页面控制台行是否表示「页面自报卡住」（L-2 的诊断载荷）。 */
   internal fun isPageStallMessage(message: String): Boolean =
     (message ?: "").trimStart().startsWith(PAGE_STALL_PREFIX)
+
+  /**
+   * 该页面控制台行是否表示「客户端插件装配终局失败」（CONTRACT §1/§3）。
+   *
+   * 判据是**行首前缀**（trimStart 后 startsWith），与 ready/stall 同款：页面侧保证前缀在行首
+   * 且无前导空白。只认前缀，不做任何字段解析——解析交给 [clientFailedIdsOf]，两者各自可反证。
+   */
+  internal fun isClientPluginTreeFailureMessage(message: String): Boolean =
+    (message ?: "").trimStart().startsWith(PAGE_PLUGIN_FAIL_PREFIX)
+
+  /**
+   * 纯函数：从契约行取出 failedIds= 字段 → split(",") → 过滤 "-" / 空 / 不合法项（CONTRACT §3）。
+   *
+   * 合法性口径与页面侧发布时的过滤**同源**（CONTRACT §1 第 5 条）：id 必须匹配
+   * [@A-Za-z0-9] 起头、其余为 [@A-Za-z0-9._/-]，长度 ≤120，且最多 8 项。
+   * 页面侧已经把不合法的项滤掉了，壳侧**必须再滤一遍**——跨仓契约的任一侧都可能被单独改坏，
+   * 而把垃圾 id 传进外科拔除的代价是误删用户插件，宁可两边都严。
+   *
+   * 截断行为（fold 有 2048 字符上限）：字段缺失 / 被截断成半截 id / 写成 "-" 时，
+   * 解析结果是「更少的 id」或空列表，**绝不臆造**——空列表让上层退回「整份回滚或如实拒绝」。
+   *
+   * @param message 页面 console 原文（可能含换行）
+   * @return 合法 id 列表（最多 8 项；无字段/全不合法返回空列表）
+   */
+  internal fun clientFailedIdsOf(message: String): List<String> {
+    val text = message ?: return emptyList()
+    val key = "failedIds="
+    val at = text.indexOf(key)
+    if (at < 0) return emptyList()
+    val rest = text.substring(at + key.length)
+    // 字段值到下一个空白或行尾；契约保证值是「无引号无空格」的逗号分隔串。
+    // 被 fold 截断时 rest 里可能没有空白，整体即（半截）值——半截 id 会被下面的形状过滤掉。
+    val end = rest.indexOfFirst { it.isWhitespace() }
+    val value = (if (end < 0) rest else rest.substring(0, end)).trim()
+    if (value.isEmpty() || value == "-") return emptyList()
+    return value.split(",")
+      .map { it.trim() }
+      .filter { it.isNotEmpty() && it != "-" && it.length <= MAX_CLIENT_FAILED_ID_CHARS && CLIENT_FAILED_ID.matches(it) }
+      .take(MAX_CLIENT_FAILED_IDS)
+  }
 
   /** 当前分段判据快照（诊断行/自检面共用；未知一律 -1）。 */
   internal fun bootSegmentsSnapshot(): String =

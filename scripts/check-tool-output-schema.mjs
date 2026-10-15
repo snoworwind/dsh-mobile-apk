@@ -331,6 +331,18 @@ async function drivePlugin(pluginDir, mode) {
     get: (k) => (k === 'androidPrivilege' ? { ...face, status: () => ({ tier: 'adb' }) } : undefined),
     effect: (fn) => { try { return fn?.() } catch { return undefined } },
     on: () => {},
+    // cordis 的 `ctx.inject(names, cb)`：**可选依赖**在依赖到位后回调（不在静态 inject 里也不挡 apply）。
+    // 夹具必须忠实实现它，否则会出两类假结论（0.14.6 全链实测）：
+    //   ① 只给「服务已在场」的假对象 => 「依赖后到就不注册」这类缺陷恒不可见（假绿）；
+    //   ② 干脆不提供 inject => apply() 直接抛 `ctx.inject is not a function`，把「夹具缺能力」
+    //      误报成「插件缺陷」，拒绝打包（本轮实测：dsh-model-capability）。
+    // 这里按「服务表里有就立刻回调、没有就暂不回调」实现，与真实 cordis 语义同形。
+    inject: (names, cb) => {
+      const wanted = Array.isArray(names) ? names : [names]
+      if (typeof cb !== 'function') return undefined
+      const ready = wanted.every((n) => n === 'androidPrivilege')
+      return ready ? (() => { try { return cb(ctx) } catch { return undefined } })() : undefined
+    },
   }
   let moduleSpec
   try {

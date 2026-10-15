@@ -13,7 +13,7 @@ DeepSeek Harness 的**安卓壳应用**（包名 `com.dsharnessmobile.shell`）�
 
 **关键约束：AI 可见的能力全部来自插件**，壳侧不直接注册工具。
 
-**运行时**：内嵌 Termux 快照（`assets/snapshot.tar.xz` → `files/usr` + `files/home`）；引擎 `@deepseek-ai/dsh` 0.1.7-rc.2 监听 `127.0.0.1:3080`；WebView 加载引擎 Web UI。
+**运行时**：内嵌 Termux 快照（`assets/snapshot.tar.xz` → `files/usr` + `files/home`）；当前快照中的 `@deepseek-ai/dsh` 为 **0.2.0-rc.2**（以快照内 `package.json` 与 `scripts/snapshot-config/engine-overlay.json` 为准），监听 `127.0.0.1:3080`；WebView 加载引擎 Web UI。
 
 **构建链**：minSdk 26 / targetSdk 34 / compileSdk 36；Kotlin 2.0.21；AGP 8.8.2；Java 17。
 
@@ -60,7 +60,7 @@ adb -s <serial> install -r -t out\v<版本>\dsh-mobile-apk-v<版本>-arm64.apk
 **什么时候可以用热推 —— 它是免打包通道，不是绕过验收的通道**：
 
 - **适用**：改动**完全落在快照内 runtime**（`@dsh-android` 插件的 `lib/**`、`client.js`、引擎树 JS）。这类改动的生效链是
-  「本地 `npm run build` → 推进设备快照树 → 引擎重读」，与 APK 打包无关 ⇒ 热推后跑三层验收，**结论对最终 APK 成立**。
+  「本地 `npm run build` → 推进设备快照树 → 引擎重读」，与 APK 打包无关；三层结果只覆盖热推后的设备树。最终 APK 须核对同一源码/构建产物并重新装机验收。
 - **不适用（必须走 `build-apk-013.ps1` 全链）**：壳侧 Kotlin（`.kt` 要编译进 dex）、签名/权限/清单、assets 与 `snapshot.tar.xz` 本身，
   以及任何**面向发布的最终产物**。改了这些还热推 = 验的是旧壳，属假绿。
 - **仍须三层验收**：热推只省掉「打包 + 装机 + 快照重解压」这段等待，**不省任何一层判据**（§2.1）。代码层、CDP 层、ADB 用户层一个不能少。
@@ -87,10 +87,19 @@ adb -s <serial> install -r -t out\v<版本>\dsh-mobile-apk-v<版本>-arm64.apk
 
 ---
 
+### 2.2 开发期选择与最终收口
+
+- 开始版本任务时建立 `release/v<版本>/notes.md` 草稿，随实现和证据更新；计划/待验收明确标注。最终对照上一 Release、目标 Commit/Tag、已合并 PR、Issue、CI/设备证据和资产核对，仅保留该版本实际交付内容。发布说明面向用户，先写问题改善，再写安装/升级、限制与验证范围。
+- 根据变更输入选择自检；结果记录源码/门禁版本、输入哈希、环境和命令。相关输入、依赖、门禁或环境改变即失效；相关输入不变可复用已有有效证据。成组修正后集中重验；权限、数据事务、签名、桥协议及门禁自身的即时反证不可省。
+- 纯 runtime JS 改动开发期优先热推；壳侧、签名、Manifest、APK assets 改动需要 APK。选择开发 ABI 前实际查询 ADB 设备和 `ro.product.cpu.abilist`；仅在设备非空且均明确 x86/x86_64 时可缩为 x86_64。设备为空或未知不能推断。最终候选从最终源码构建双 ABI，重新安装并完成 §2.1 三层验收及覆盖升级；热推证据不能代替最终 APK。
+- 来源审计入口 `scripts/source-build/run-local-source-chain.mjs` 仅构建已提交 HEAD，在原工作树外的独立检出执行；未提交内容不进入来源链。产物留在隔离目录，续跑显式传 `--build-workspace <同 HEAD 目录>`。不要把来源链的 LFS pointer 当成本地底座归档。
+- 权限、用户数据、运行时生效、ABI、签名、快照/APK 产物门禁保持阻断。仅维护说明的生成块漂移由 PR Gate 的提示 job 呈现（`check-maintenance-docs.mjs`，更新用 `--write`），不加入 APK 发布阻断链；branch protection 的远端设置不由本地文档改变。
+
 ## 3. 去哪查（按需 grep，别通读）
 
 | 要查什么 | 去哪 |
 |---|---|
+| fx2 阶段计划 / 开发候选与验收交接 | `docs/HANDOFF-0.14.5-FX-2-PLAN-2026-10-09.md` / `docs/HANDOFF-0.14.5-FX-2-DEVELOPMENT-2026-10-09.md` |
 | **坑位（历史实锤，权威）** | `docs/AGENTS/gotchas.md`（递增编号，允许空缺；grep 关键词） |
 | 模块职责 / 函数位置 | `docs/AGENTS/modules.md` |
 | 架构 / 依赖方向 | `docs/AGENTS/ARCHITECTURE.md` |
@@ -104,19 +113,26 @@ adb -s <serial> install -r -t out\v<版本>\dsh-mobile-apk-v<版本>-arm64.apk
 | 运行顺序 / 嵌套 / 耦合 / 流程图（排查入口） | `docs/AGENTS/EXECUTION-MAP.md` |
 | 模拟器验收规范（代码/CDP/adb 三层 + 真实任务） | `docs/AGENTS/emulator-test-protocol.md` |
 | **版本历史（全量）** | `docs/AGENTS/changelog-archive.md` |
+| Hard / Soft / Data 持久化路径、SharedPreferences keys、恢复来源 | `docs/AGENTS/PERSISTENT-DATA.md` |
 
 ---
 
 ## 4. 铁律（违反即返工）
 
 1. **需求不延期**：有明确需求且未获准延后，本轮必须完成。技术阻塞只能给替代实现 + 记真因，不得以「实验特性 / 下版本」降级。
-2. **模拟器优先**：本地构建 → **MuMu x86_64 实测** → 才谈 PR。禁止以「等真机」推迟模拟器实测，也禁止把模拟器实测挂在 PR 之后。真机是发布前补充门禁。改动必须过**三层验收**（代码层 + CDP 层 + ADB 用户实际体验层，缺一层即未验收）且验收任务是**真实任务、由模型自己编排**（禁止喂步骤），见 §2.1。
-3. **批量改、统一验**：成组改动一次改完，再做一次构建 + 打包 + 装机 + 回归。中途只跑廉价检查（Kotlin 单测、静态门禁）。安全敏感项（快照事务 / 签名 / 门禁自身 / 桥协议面）例外，即时验。
+2. **设备验证按风险触发，不是每次改动的必经关卡**（0.14.8 放宽）。**必须**做打包后三层验收的情形只有两类：
+   - **发版候选**：凡进入 `release/v<版本>/` 的候选产物，必须过三层验收（代码层 + CDP 层 + ADB 用户实际体验层，缺一层即未验收）且验收任务是**真实任务、由模型自己编排**（禁止喂步骤），见 §2.1；
+   - **高风险面即时验**：L2 安全敏感面（快照事务 / 签名 / 门禁自身判据 / 桥协议）与 L3 UI/UX 及壳侧行为改动，**当轮即时**跑三层，不得延后。
+   其余改动（L0 文档、L1 门禁与构建链内部逻辑）**不强制**打包后设备验证，但必须携带该档的替代证据（L1 = `--self-test` + 一条受控负控）。
+   **不可省的两条**：① 未做设备验证的改动必须在 PR 描述里**显式标注「未做设备验证」**；② 该改动进入发版候选前必须补验，未补验不得随版本发布。禁止以「等真机」推迟高风险面的验证；真机仍是发布前补充门禁。
+3. **原子化交付 + 分档验证**：一个 PR = 一个逻辑改动，可独立 revert；禁止把「修 bug + 重构 + 顺手优化」混在一个 PR 里。**但「原子 PR」不等于「不验」**——每个 PR 必须携带与其风险类相符的**最廉价充分证据**：L0 文档/注释 → CI 绿即可；L1 门禁/脚本逻辑 → `--self-test` + **一条受控负控**；L2 安全敏感面（快照事务 / 签名 / 门禁自身判据 / 桥协议）→ **即时三层**；L3 UI/UX 与壳侧行为 → **即时模拟器三层**。
+   统一全量测试（双 ABI 全链 + 冷启动矩阵 + 真机补充门禁）前移到**发布计划确定时**执行，且它**只做集成验证、替代不了上面每档的证据**。细则见协调仓 `docs/0.14.8-DELIVERY-PLAN-2026-10-14.md` §3。
 4. **一切改动走 PR**：建分支 → 提交（`<type>: <描述>`）→ 推分支 → 开 PR（1-3 标签）→ CI 绿 → 合并 → 删分支。**禁止直接 push `main`**。例外仅限不改仓库内容的外部动作（Release 资产、issue 评论与开关、标签）。
 5. **子仓镜像（幽灵缺陷防线）**：改 `dsh-client-ui-responsive` / `dsh-host-web-compat` / `dsh-shell-termux` / `plugins/dsh-android-*` 的源码或 bump 版本后，**必须 robocopy 镜像到本仓同名目录**（src + package.json + **`lib/` 产物**）。漏了 → 云端自包含构建注入旧副本，**编译通过但功能缺失**。
    - 只同步**镜像清单内的文件**，切勿对 `scripts/` 等目录整体 `/MIR`——会删掉本仓独有的设备脚本（真实事故）。
 6. **补丁镜像面**：`scripts/patches/**`、`scripts/check-patch-mirror.mjs`、`scripts/build-apk-013.ps1` 等是协调仓的**逐字节镜像**，单边演进即拒。补丁改动**先合本仓镜像 PR，再合协调仓权威源 PR**。
 7. **禁 emoji**：提交信息、PR 标题/描述、文档、标签一律不用。
+8. **工作区卫生**：`.deploy-tmp` 只增不减会拖垮开发机（实测 2026-10-14 达 34.8 GB / 313,393 文件，是开发机第一大空间消耗，文件数本身就在拖慢目录遍历类工具）。每完成一轮交付，在协调仓根跑 `node scripts/clean-deploy-tmp.mjs`（默认 dry-run，`--apply` 执行）。判定口径与保留清单见该脚本头注释；**注册的 git worktree 与近 3 天内活动过的目录一律保留**。
 
 ---
 
@@ -172,7 +188,7 @@ adb -s <serial> install -r -t out\v<版本>\dsh-mobile-apk-v<版本>-arm64.apk
 
 | 套件 | 守什么 |
 |---|---|
-| `scripts/verify-screen-scope-matrix.mjs` | 屏幕范围/通道/落点的设备级验收：跨面一致性（引擎面 vs 壳侧面 vs 设备事实）+ 拉起落点回读 + 双屏像素对照 + `real-only` 反证。判据全落在设备事实上；**证据不足判 `INCONCLUSIVE`（exit 2），不得当通过**。`--self-test` 自带 6 例判别力 |
+| `scripts/verify-screen-scope-matrix.mjs` | 屏幕范围/通道/落点的设备级验收：跨面一致性（引擎面 vs 壳侧面 vs 设备事实）+ 拉起落点回读（目标屏必须出现本轮新 ActivityRecord，存量 Activity 不算落点证明）+ 双屏像素对照 + `real-only` 反证。权限档位拦截归环境阻塞；**证据不足判 `INCONCLUSIVE`（exit 2），不得当通过**。 |
 
 ---
 

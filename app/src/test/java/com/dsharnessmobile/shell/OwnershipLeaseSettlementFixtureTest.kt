@@ -230,7 +230,9 @@ class OwnershipLeaseSettlementFixtureTest {
   @Test fun backgroundSelfHealNeverRaisesAPermissionDialog() {
     // 后台自愈（repairOwnership）必须在取服务时就禁掉授权请求：否则本机假阴性会让维护卡在系统框上
     val repair = body("ShizukuTransport", "fun repairOwnership(")
-    assertTrue(repair.contains("readyService(context, applyGate = false, requestPermission = false)"))
+    // 后台自愈（repairOwnership）两条约束：不弹授权框 + 绕过不可靠的客户端权限预检
+    // （否则本机自检假阴性会让维护卡在系统框上、或永远修不了 —— 复审 B 项）
+    assertTrue(repair.contains("readyService(context, applyGate = false, requestPermission = false, ignoreGranted = true)"))
     assertFalse(repair.contains("Shizuku.requestPermission"))
   }
 
@@ -275,6 +277,13 @@ class OwnershipLeaseSettlementFixtureTest {
   @Test fun waitingPhaseHasASlowRecheckAfterTheBoundedBudget() {
     assertTrue(source("EngineStartFlow").contains("ownershipRetry.nextDelayMs() ?: SLOW_OWNERSHIP_RECHECK_MS"))
     assertTrue(source("EngineService").contains("SLOW_OWNERSHIP_RECHECK_MS = 300_000L"))
+    val service = body("EngineService", "private fun ensureEngine(")
+    assertTrue(service.contains("epoch.ownershipRetry.nextDelayMs() ?: SLOW_OWNERSHIP_RECHECK_MS"))
+    assertTrue(service.contains("scheduleStartup(epoch, delay)"))
+    val retire = body("EngineService", "private fun retireEpoch(")
+    assertTrue(retire.contains("epoch.startupFuture.getAndSet(null)?.cancel(true)"))
+    val schedule = body("EngineService", "private fun scheduleStartup(")
+    assertTrue(schedule.contains("if (!isEpochCurrent(epoch)) future.cancel(true)"))
   }
 
   @Test fun waitingPhaseOffersAProductExitInsteadOfForcingAReboot() {
@@ -311,7 +320,7 @@ class OwnershipLeaseSettlementFixtureTest {
   @Test fun staleLeaseIsClearedInsideTheJobEntryCriticalSection() {
     // 真机实测（2026-10-02）：清算放进本锁、且只在确实有租约时付探测成本；置 running 在同一临界区内。
     val jobs = body("RootOwnershipJobs", "private fun start(")
-    val lock = jobs.indexOf("synchronized(lock)")
+    val lock = jobs.indexOf("synchronized(entryLock)")
     val runningCheck = jobs.indexOf("if (running) return false")
     val firstOutstanding = jobs.indexOf("RootMaintenanceLease.outstanding(app) != null")
     val clear = jobs.indexOf("ShizukuTransport.clearLeaseWhenNoRootChannel(app)")
@@ -320,6 +329,26 @@ class OwnershipLeaseSettlementFixtureTest {
     assertTrue(lock >= 0 && runningCheck > lock && firstOutstanding > runningCheck)
     assertTrue(clear > firstOutstanding && secondOutstanding > clear)
     assertTrue(setRunning > clear)
+  }
+
+  @Test fun rootStatusReadIsNotBlockedByTheEntryProbe() {
+    // issue #319（方案来自 PR #322 @Ni-ShuWu）：真绑定探测最长 15s，不得在 state() 共用的状态锁内执行。
+    // 反证：探测调用必须出现在 entryLock 内，且**不在任何 synchronized(lock) 块里**。
+    val jobs = body("RootOwnershipJobs", "private fun start(")
+    val probe = jobs.indexOf("ShizukuTransport.clearLeaseWhenNoRootChannel(app)")
+    assertTrue(probe > jobs.indexOf("synchronized(entryLock)"))
+    val stateLockBlocks = Regex("""synchronized\(lock\)\s*\{""").findAll(jobs).map { it.range.last }.toList()
+    for (open in stateLockBlocks) {
+      var depth = 1
+      var i = open + 1
+      while (i < jobs.length && depth > 0) {
+        if (jobs[i] == '{') depth++ else if (jobs[i] == '}') depth--
+        i++
+      }
+      assertFalse("探测落在状态锁内会重现 #319", probe in open..i)
+    }
+    // state() 只取状态锁，不碰入口锁。
+    assertFalse(body("RootOwnershipJobs", "fun state(").contains("entryLock"))
   }
 
   @Test fun noRootPathClearIsTheOnlyNonOwnerExitAndKeepsUnknownSemanticsElsewhere() {

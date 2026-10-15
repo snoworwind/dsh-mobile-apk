@@ -7,8 +7,8 @@
  *   2. `vendor-descriptor`  — explicit capability schemas (OpenRouter / Google / Ollama);
  *   3. `engine-catalog`     — exact model-id lookup in the pi-ai vendor catalogs the
  *      engine ships (a vendor *declaration*, never a name heuristic);
- *   4. `active-probe`       — only with explicit approval, and only after a negative
- *      control proves the endpoint actually validates the effort field.
+ *   4. active reasoning probes run only after explicit confirmation, through a
+ *      known serializer, with a rejecting negative control.
  *
  * Write-back is opt-in per call (or by the startup pass) and field-level: it only
  * fills missing model-level fields and never overwrites a value the user declared.
@@ -19,18 +19,31 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import {
   DIALECT_COMPAT_KEYS,
   THINKING_LEVELS,
+  canApplyReasoningEfforts,
+  effortsFrom,
+  normalizeReasoningEfforts,
   probePassive,
-  probeReasoningEfforts,
+  probeOpenAICompletionsReasoningEfforts,
+  probeResponsesReasoningEfforts,
   type FetchLike,
   type Modality,
   type ModelCapabilities,
   type ProbeReport,
+  type ProviderConfig,
   type ReasoningEfforts,
 } from './capability-probe.js'
 import { hasCapabilities, lookupCatalog, type CatalogSnapshot } from './catalog-lookup.js'
 import { providerFromSettings, type SettingsLike } from './settings-config.js'
 import { applyModelPatch, createStampStore, type ModelPatch, type SettingsWriteLike } from './settings-writer.js'
-import { capabilitySignature } from './signature.js'
+import { modelSignatureParts, type ModelSignaturePart } from './signature.js'
+import {
+  authorizeMobileRoute,
+  sendMobileRouteRejection,
+  shellControlToken,
+  type ConnectionRouteAuth,
+  type MobileRouteRequest,
+  type MobileRouteResponse,
+} from '@dsh-android/dsh-android-bridge'
 import {
   MODELS_DEV_URL,
   buildModelsDevSnapshot,
@@ -47,12 +60,25 @@ import {
 
 export const name = 'dsh-model-capability'
 
-/** `settings` is the write-back seam; `tools` registers the discovery tools. */
+/**
+ * `settings` is the write-back seam; `tools` registers the discovery tools.
+ *
+ * `webServer` is deliberately **not** injected: it is optional. The headless profile
+ * mounts no HTTP server (dsh-headless/cordis.patch.yml: "It mounts no Host, HTTP server,
+ * Web runtime, or browser plugin"), and `inject` gates `apply()` — declaring it here
+ * would stop the tools and the save-triggered fill from ever registering on every
+ * profile without a web server. The manual-fill route (A6) instead reads it through
+ * {@link optionalService} and simply skips registration when it is absent.
+ */
 export const inject = ['tools', 'settings'] as const
 
 export {
   THINKING_LEVELS,
+  canApplyReasoningEfforts,
+  normalizeReasoningEfforts,
   probePassive,
+  probeOpenAICompletionsReasoningEfforts,
+  probeResponsesReasoningEfforts,
   probeReasoningEfforts,
   parseDescriptor,
   parseOllamaShow,
@@ -90,18 +116,12 @@ export {
 export type { ModelsDevEntry, ModelsDevSnapshot, ModelsDevAgreement } from './models-dev.js'
 
 export interface PluginConfig {
-  /** Fill missing model capabilities automatically on startup (default true). */
-  autoApply?: boolean
-  /** Seconds to wait after startup before the automatic pass (default 8). */
-  startupDelaySeconds?: number
   /**
-   * Fallback safety-net poll interval in seconds (default 120), used only when the
-   * event-driven trigger below is unavailable. The trigger path is
-   * `settings/document-updated`, so this is a backstop rather than the primary
-   * mechanism — see the auto-apply comment in `apply()` for the measured reason it
-   * cannot be 5s.
+   * Enrich capabilities when a settings save is observed (default true). There is
+   * no timer of any kind: the only writer is the `settings/document-updated` event
+   * a save emits (see the auto-apply comment in `apply()`).
    */
-  pollIntervalSeconds?: number
+  autoApply?: boolean
   /** Restrict the automatic pass to these routes (default: every declared route). */
   routes?: string[]
   /**
@@ -135,6 +155,9 @@ interface CtxLike {
   get?: (name: string) => unknown
   tools: { register(tool: unknown): void }
 }
+
+/** Manual-fill route path (A6): the settings page calls this to fill on demand. */
+export const MANUAL_FILL_ROUTE = '/api/android/model-capability/fill'
 
 /** 可选服务读取：未声明 inject 时直接读属性会抛（cordis 4 实测），统一走 ctx.get。 */
 function optionalService<T>(ctx: unknown, name: string): T | undefined {
@@ -194,6 +217,152 @@ export function pickDialect(compat: Record<string, unknown> | undefined): Record
   return out
 }
 
+function effectiveCompat(
+  provider: ProviderConfig | undefined,
+  id: string,
+  catalogCompat?: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+  const merged = { ...catalogCompat, ...provider?.compat, ...provider?.modelProfiles?.[id]?.compat }
+  return Object.keys(merged).length > 0 ? merged : undefined
+}
+
+function hasConfiguredEfforts(provider: ProviderConfig | undefined, id: string): boolean {
+  return Boolean(provider?.modelProfiles?.[id]
+    && Object.prototype.hasOwnProperty.call(provider.modelProfiles[id], 'reasoningEfforts'))
+}
+
+/** Official, exact-id profile. Its profile id versions this protocol assertion. */
+export const MIMO_THINKING_PROFILES = Object.freeze([{
+  profileId: 'xiaomi-mimo-openai-completions-thinking-toggle-v1',
+  api: 'openai-completions',
+  modelIds: ['mimo-v2.5', 'mimo-v2.5-pro'],
+  sourceUrl: 'https://mimo.mi.com/docs/zh-CN/api/chat/openai-api',
+}] as const)
+
+/** Apply only a versioned exact-model profile or a user's explicit mimo dialect. */
+export function applyMimoThinkingProfile(provider: ProviderConfig, report: ProbeReport): void {
+  if ((provider.api ?? '').toLowerCase() !== 'openai-completions') return
+  for (const id of provider.models ?? []) {
+    const model = report.models.find((item) => item.id === id)
+    const explicit = effectiveCompat(provider, id)
+    if (explicit?.thinkingFormat !== undefined && explicit.thinkingFormat !== 'mimo') continue
+    const official = MIMO_THINKING_PROFILES.find((profile) => profile.api === provider.api?.toLowerCase()
+      && profile.modelIds.includes(id.toLowerCase() as typeof profile.modelIds[number]))
+    if (explicit?.thinkingFormat !== 'mimo' && !official) continue
+    const source = explicit?.thinkingFormat === 'mimo' ? 'user profile' : official?.profileId
+    const target = model ?? { id, sources: {} }
+    const configured = provider.modelProfiles?.[id]
+    const hasConfiguredValue = configured !== undefined && Object.prototype.hasOwnProperty.call(configured, 'reasoningEfforts')
+    const configuredEfforts = configured && hasConfiguredValue
+      ? configured.reasoningEfforts : undefined
+    const explicitlyDisabled = hasConfiguredValue && configuredEfforts === false
+    const preserveUserMap = (configuredEfforts && typeof configuredEfforts === 'object' && !Array.isArray(configuredEfforts))
+      ? configuredEfforts as ReasoningEfforts
+      : model?.sources.reasoningEfforts === 'user-fallback' ? model.reasoningEfforts : undefined
+    if (explicitlyDisabled) {
+      delete target.reasoningEfforts
+      delete target.sources.reasoningEfforts
+    } else if (preserveUserMap) {
+      // The old saved map remains visible in the report/settings. The pinned DSH
+      // overlay presents it as a binary mode and PiAi serializes only the toggle.
+      target.reasoningEfforts = preserveUserMap
+      target.sources.reasoningEfforts = 'user-fallback'
+    } else {
+      target.reasoningEfforts = { off: 'off', low: 'low' }
+      target.sources.reasoningEfforts = 'protocol-profile'
+    }
+    const compat = { ...target.compat }
+    for (const [key, value] of Object.entries(explicit ?? {})) {
+      if (compat[key] === undefined) compat[key] = value
+    }
+    // An official exact-id profile outranks passive/catalog descriptions. Explicit
+    // user compat above remains intact because conflicting user thinkingFormat exits.
+    if (explicit?.thinkingFormat === undefined) compat.thinkingFormat = 'mimo'
+    if (explicit?.supportsReasoningEffort === undefined) compat.supportsReasoningEffort = false
+    if (explicit?.requiresReasoningContentOnAssistantMessages === undefined) compat.requiresReasoningContentOnAssistantMessages = true
+    target.compat = compat
+    if (!report.models.includes(target)) report.models.push(target)
+    report.notes.push(`${id}: 使用 ${source} MiMo 二态思考 profile（off/low 映射为关闭/开启；不会发送 reasoning_effort）`)
+  }
+  report.models.sort((a, b) => a.id.localeCompare(b.id))
+  report.unknown = (provider.models ?? []).filter((id) => {
+    const model = report.models.find((item) => item.id === id)
+    return !model || Object.keys(model.sources).length === 0
+  })
+}
+
+/** Add an explicitly authorized active result without replacing declared/discovered levels. */
+export async function runConfirmedActiveProbe(
+  provider: ProviderConfig,
+  report: ProbeReport,
+  options: {
+    active?: boolean
+    confirm?: boolean
+    offline?: boolean
+    source?: 'auto' | 'endpoint' | 'catalog' | 'modelsdev' | 'offline'
+    levels?: string[]
+    fetchImpl?: FetchLike
+  },
+): Promise<void> {
+  if (!options.active) return
+  if (options.confirm !== true) {
+    report.notes.push('主动 reasoning probe 未执行：必须同时设置 active=true 与 confirm=true')
+    return
+  }
+  if (options.offline === true || options.source === 'offline' || options.source === 'catalog' || options.source === 'modelsdev') {
+    report.notes.push('主动 reasoning probe 未执行：当前请求为离线或非端点网络模式')
+    return
+  }
+  const api = (provider.api ?? '').toLowerCase()
+  const isResponses = api === 'openai-responses'
+  const isCompletions = api === 'openai-completions'
+  if (!isResponses && !isCompletions) {
+    report.notes.push(`主动 reasoning probe 未执行：API 方言「${provider.api ?? 'unknown'}」没有已验证的主动请求序列化，能力保持未知`)
+    return
+  }
+  const levels = options.levels?.length ? options.levels : ['low', 'medium', 'high']
+  for (const id of provider.models ?? []) {
+    const model = report.models.find((item) => item.id === id)
+    const compat = effectiveCompat(provider, id, model?.compat)
+    if (isCompletions && compat?.thinkingFormat === 'mimo') {
+      report.notes.push(`${id}: MiMo thinking.type 是二态开关，主动 reasoning_effort probe 未执行`)
+      continue
+    }
+    if (isCompletions && (compat?.thinkingFormat !== 'openai' || compat.supportsReasoningEffort !== true)) {
+      report.notes.push(`${id}: 主动 reasoning probe 未执行：Completions 缺少明确的 thinkingFormat=openai + supportsReasoningEffort=true 序列化声明`)
+      continue
+    }
+    if (hasConfiguredEfforts(provider, id)) {
+      report.notes.push(`${id}: 已存在用户声明的 reasoningEfforts，主动探测跳过并保留原值`)
+      continue
+    }
+    if (model?.reasoningEfforts) {
+      report.notes.push(`${id}: 已有来源声明 reasoningEfforts，主动探测跳过并保留原值`)
+      continue
+    }
+    const result = isResponses
+      ? await probeResponsesReasoningEfforts(provider, id, levels, { fetchImpl: options.fetchImpl })
+      : await probeOpenAICompletionsReasoningEfforts(provider, id, compat, levels, { fetchImpl: options.fetchImpl })
+    const negative = result.negativeControl
+    if (negative?.reason) report.notes.push(`${id}: reasoning effort 负控未能证明服务端校验字段（${negative.reason}），候选接受结果不写入`)
+    else if (negative) report.notes.push(`${id}: reasoning effort 负控被服务端拒绝（HTTP ${negative.status}），继续核验指定档位`)
+    if (result.accepted.length > 0) {
+      const { efforts } = effortsFrom(result.accepted)
+      if (efforts) {
+        const target = model ?? { id, sources: {} }
+        target.reasoningEfforts = efforts
+        target.sources.reasoningEfforts = 'active-probe'
+        if (!report.models.includes(target)) report.models.push(target)
+      }
+    }
+    report.notes.push(`${id}: 主动 reasoning probe accepted=${result.accepted.join('/') || 'none'} rejected=${result.rejected.map((item) => item.level).join('/') || 'none'} inconclusive=${result.inconclusive.map((item) => item.level).join('/') || 'none'}`)
+  }
+  report.unknown = (provider.models ?? []).filter((id) => {
+    const model = report.models.find((item) => item.id === id)
+    return !model || Object.keys(model.sources).length === 0
+  })
+}
+
 /**
  * Injects models.dev (S3) capabilities into a probe report and recomputes unknowns.
  *
@@ -211,6 +380,7 @@ export function mergeModelsDevInto(
   snapshot: ModelsDevSnapshot | undefined,
   /** Filled with levels that must wait for a wire dialect (see applyDeferredModelsDevLevels). */
   deferred?: Map<string, ReasoningEfforts>,
+  provider?: ProviderConfig,
 ): ProbeReport {
   if (!snapshot) return report
   const byId = new Map(report.models.map((model) => [model.id, model]))
@@ -239,14 +409,17 @@ export function mergeModelsDevInto(
       model.maxTokens = agreed.maxTokens
       model.sources.maxTokens = 'models-dev'
     }
-    // 与引擎目录同纪律：只有方言明确时才写 reasoningEfforts。models.dev 不声明 wire 方言，
-    // 所以档位写入仍然要等 S4（或用户显式 compat）给出 thinkingFormat——否则跳过并记 note。
+    // models.dev supplies names, not endpoint-specific meaning. Responses can
+    // encode one declared on-level safely; several levels stay unknown because
+    // some Responses providers document them as enable-only.
     const levels = effortsFromLevels(agreed.thinkingLevels)
-    if (levels && !model.reasoningEfforts) {
-      const dialect = pickDialect(model.compat)
-      if (dialect) {
-        model.reasoningEfforts = levels
-        model.sources.reasoningEfforts = 'models-dev'
+    if (levels && !model.reasoningEfforts && !hasConfiguredEfforts(provider, model.id)) {
+      const api = provider?.api ?? model.api
+      const compat = effectiveCompat(provider, model.id, model.compat)
+      if (canApplyReasoningEfforts(api, compat)) {
+        model.reasoningEfforts = normalizeReasoningEfforts(api, compat, levels, 'models-dev')
+        if (model.reasoningEfforts) model.sources.reasoningEfforts = 'models-dev'
+        else report.notes.push(`${model.id}: models.dev 档位无法证明 Responses 各等级语义不同，保持推理能力未知`)
       } else {
         // 方言还没到（models.dev 不声明 wire 方言，S4 目录可能稍后给出）。先挂起，
         // 由 applyDeferredModelsDevLevels 在 S4 之后决定写或跳过——方言门本身不动。
@@ -281,6 +454,7 @@ export function mergeFallbacks(
   declared: string[],
   fallbacks: { contextWindow?: number; maxTokens?: number; input?: Modality[]; reasoningEfforts?: ReasoningEfforts } | undefined,
   configured: boolean,
+  provider?: ProviderConfig,
 ): ProbeReport {
   if (!configured || !fallbacks) return report
   // 先确保每个 declared 模型都有条目：models.dev 关闭/无缓存时它不会建条目（提前返回），
@@ -298,6 +472,7 @@ export function mergeFallbacks(
     for (const key of ['input', 'contextWindow', 'maxTokens', 'reasoningEfforts'] as const) {
       const value = fallbacks[key]
       if (value === undefined) continue
+      if (key === 'reasoningEfforts' && hasConfiguredEfforts(provider, model.id)) continue
       if (model[key] !== undefined) continue
       if (Object.prototype.hasOwnProperty.call(model.sources, key)) continue
       ;(model as unknown as Record<string, unknown>)[key] = value
@@ -315,24 +490,31 @@ export function mergeFallbacks(
  * Writes levels that models.dev reported but could not yet write, now that the
  * engine catalog (S4) may have supplied the wire dialect.
  *
- * The dialect gate is unchanged: a level set is written only when a dialect is
- * explicit, exactly as for a catalog-sourced effort map. When no dialect exists the
- * levels are dropped with a note — the encyclopedia saying "this model offers
- * high/max" does not say how the gateway spells them, and guessing has already cost
- * a real 400 (issue #134).
+ * Deferred levels are applied only after the route/model API and serializer compat
+ * are known. Responses accepts a serializer mapping but unverified multi-level
+ * lists remain unknown because some gateways expose enable-only reasoning.
  * @param report - report to update in place.
  * @param deferred - levels parked by {@link mergeModelsDev}.
  * @returns the same report.
  */
-export function applyDeferredModelsDevLevels(report: ProbeReport, deferred: Map<string, ReasoningEfforts>): ProbeReport {
+export function applyDeferredModelsDevLevels(
+  report: ProbeReport,
+  deferred: Map<string, ReasoningEfforts>,
+  provider?: ProviderConfig,
+): ProbeReport {
   if (deferred.size === 0) return report
   for (const model of report.models) {
     const levels = deferred.get(model.id)
-    if (!levels || model.reasoningEfforts) continue
-    const dialect = pickDialect(model.compat)
-    if (dialect) {
-      model.reasoningEfforts = levels
-      model.sources.reasoningEfforts = 'models-dev'
+    if (!levels || model.reasoningEfforts || hasConfiguredEfforts(provider, model.id)) continue
+    const api = provider?.api ?? model.api
+    const compat = effectiveCompat(provider, model.id, model.compat)
+    if (canApplyReasoningEfforts(api, compat)) {
+      model.reasoningEfforts = normalizeReasoningEfforts(api, compat, levels, 'models-dev')
+      if (model.reasoningEfforts) {
+        model.sources.reasoningEfforts = 'models-dev'
+        continue
+      }
+      report.notes.push(`${model.id}: models.dev 档位无法证明 Responses 各等级语义不同，保持推理能力未知`)
       continue
     }
     report.notes.push(
@@ -348,6 +530,7 @@ export function applyDeferredModelsDevLevels(report: ProbeReport, deferred: Map<
   declared: string[],
   snapshot: CatalogSnapshot | undefined,
   api: string | undefined,
+  provider?: ProviderConfig,
 ): ProbeReport {
   const byId = new Map<string, ModelCapabilities>(report.models.map((model) => [model.id, model]))
   for (const id of declared) {
@@ -362,21 +545,33 @@ export function applyDeferredModelsDevLevels(report: ProbeReport, deferred: Map<
     if (match.providers.length > 0) report.notes.push(`${model.id}: 引擎目录命中 ${match.providers.join('/')}`)
     for (const conflict of match.conflicts) report.notes.push(`${model.id}: ${conflict}`)
     const capabilities = match.capabilities
-    // 方言优先（issue #134）：reasoningEfforts 只有在「pi-ai 知道该模型的方言」时才写。
-    // 目录里同名模型来自多个厂商、thinkingFormat 冲突或缺失时，pi-ai 会按探测默认
-    // （未知 baseURL → openai）序列化 reasoning_effort，真实网关可能直接 400。
-    const dialect = pickDialect(capabilities.compat)
-    if (dialect && !model.compat) {
-      model.compat = dialect
+    if (capabilities.api) model.api = capabilities.api
+    const explicitCompat = effectiveCompat(provider, model.id)
+    const resolvedCompatForGate = effectiveCompat(provider, model.id, capabilities.compat)
+    const explicitToggleDialect = resolvedCompatForGate?.thinkingFormat === 'mimo'
+    const catalogDialect = pickDialect(capabilities.compat)
+    if (catalogDialect) {
+      const missing: Record<string, unknown> = {}
+      for (const [key, value] of Object.entries(catalogDialect)) {
+        // A toggle serializer has no effort parameter, even when another catalog
+        // row for the same id claims that one is accepted.
+        if (explicitToggleDialect && key === 'supportsReasoningEffort') continue
+        if (explicitCompat?.[key] === undefined && model.compat?.[key] === undefined) missing[key] = value
+      }
+      if (Object.keys(missing).length > 0) model.compat = { ...model.compat, ...missing }
     }
-    if (capabilities.reasoningEfforts && !model.reasoningEfforts) {
-      if (dialect) {
-        model.reasoningEfforts = capabilities.reasoningEfforts
-        model.sources.reasoningEfforts = 'engine-catalog'
+    if (capabilities.reasoningEfforts && !model.reasoningEfforts && !hasConfiguredEfforts(provider, model.id)) {
+      const effectiveApi = provider?.api ?? capabilities.api
+      const resolvedCompat = effectiveCompat(provider, model.id, capabilities.compat)
+      if (canApplyReasoningEfforts(effectiveApi, resolvedCompat)) {
+        model.reasoningEfforts = normalizeReasoningEfforts(
+          effectiveApi, resolvedCompat, capabilities.reasoningEfforts, 'engine-catalog',
+        )
+        if (model.reasoningEfforts) model.sources.reasoningEfforts = 'engine-catalog'
       } else {
         report.notes.push(
-          `${model.id}: 目录未给出统一 thinkingFormat（方言不明）——跳过 reasoningEfforts 写入，`
-          + '避免按错误方言发送推理等级导致请求被拒；如需档位请在设置里显式声明 compat.thinkingFormat',
+          `${model.id}: API=${effectiveApi ?? 'unknown'} 的推理序列化信息不足`
+          + '——跳过 reasoningEfforts 写入；Completions 请显式声明 compat.thinkingFormat',
         )
       }
     }
@@ -408,7 +603,13 @@ function summarize(report: ProbeReport): string {
     if (model.input) parts.push('模态 ' + model.input.join('/'))
     if (model.contextWindow) parts.push('上下文 ' + model.contextWindow)
     if (model.maxTokens) parts.push('输出上限 ' + model.maxTokens)
-    if (model.reasoningEfforts) parts.push('推理等级 ' + Object.keys(model.reasoningEfforts).join('/'))
+    if (model.reasoningEfforts) {
+      if (model.sources.reasoningEfforts === 'protocol-profile' && model.compat?.thinkingFormat === 'mimo') {
+        parts.push('思考开关 关闭/开启')
+      } else {
+        parts.push('推理等级 ' + Object.keys(model.reasoningEfforts).join('/'))
+      }
+    }
     const sources = Object.entries(model.sources).map(([key, source]) => `${key}<-${source}`).join(' ')
     lines.push(`- ${model.id}: ${parts.length > 0 ? parts.join('，') : '未声明任何能力'}${sources ? ' [' + sources + ']' : ''}`)
   }
@@ -448,6 +649,30 @@ export function apply(ctx: Context, config: PluginConfig = {}) {
   const snapshot = loadCatalogSnapshot()
   if (snapshot) log?.info?.(`catalog snapshot: ${snapshot.source} / ${String(snapshot.modelCount ?? 0)} models`)
   else log?.info?.('catalog snapshot absent — engine-catalog stage disabled')
+
+  /**
+   * 引擎自带目录声明的网关 id 集合，即「内置 provider」。
+   *
+   * 与上游 llm-pi-ai 的判据同源：那边用 `catalog.has(provider)` 决定一条路由是内置还是
+   * 用户自建（`declared: !catalog.has(provider)`，见 llm-pi-ai/src/index.ts:139）。
+   * 本插件的快照正是从同一份 pi-ai 目录数据生成的，因此这里按 provider 字段重建同一集合。
+   */
+  const builtInProviders = new Set<string>()
+  for (const entries of Object.values(snapshot?.models ?? {})) {
+    for (const entry of entries) {
+      if (typeof entry.provider === 'string') builtInProviders.add(entry.provider)
+    }
+  }
+
+  /**
+   * 该路由是否是**非内置** provider —— A1 的适用范围。
+   *
+   * 内置 provider 的模型能力由引擎目录自己声明，补写只会与上游打架；快照缺席时无法
+   * 区分二者，一律返回 false：宁可少补，也不能把能力写进内置 provider 的模型里。
+   * @param route - settings 里的 provider 路由名。
+   * @returns 需要本插件补能力时为 true。
+   */
+  const isNonBuiltInRoute = (route: string): boolean => builtInProviders.size > 0 && !builtInProviders.has(route)
 
   /**
    * models.dev cache state, held per apply() call.
@@ -542,7 +767,7 @@ export function apply(ctx: Context, config: PluginConfig = {}) {
 
   // modelsDev 状态只有在 modelsDevPath/modelsDevStatus 声明之后才可读；放在这里而不是
   // 函数开头，是因为启动那一行 diag 要报告缓存状态（这次现场就是靠「缓存文件不存在」反推的）。
-  diag(`apply(): settings=${settings ? 'yes' : 'no'} catalog=${snapshot ? `${snapshot.source} models=${String(snapshot.modelCount ?? 0)}` : 'absent'} autoApply=${String(config.autoApply)} startupDelay=${String(config.startupDelaySeconds ?? 8)} modelsDev=${modelsDevStatus()} cache=${modelsDevPath}`)
+  diag(`apply(): settings=${settings ? 'yes' : 'no'} catalog=${snapshot ? `${snapshot.source} models=${String(snapshot.modelCount ?? 0)}` : 'absent'} autoApply=${String(config.autoApply)} modelsDev=${modelsDevStatus()} cache=${modelsDevPath}`)
 
   /** Resolves the route's API key: explicit settings value first, then the credential ref. */
   async function resolveConfig(route: string, sectionOverride?: unknown) {
@@ -603,64 +828,34 @@ export function apply(ctx: Context, config: PluginConfig = {}) {
     if (wantModelsDev) {
       const allowNetwork = options.allowModelsDevNetwork !== false
       const dev = await ensureModelsDev(options.refresh === true, allowNetwork)
-      mergeModelsDevInto(report, providerConfig.models ?? [], dev, deferred)
+      mergeModelsDevInto(report, providerConfig.models ?? [], dev, deferred, providerConfig)
     }
     if (source !== 'endpoint' && source !== 'modelsdev') {
-      mergeCatalog(report, providerConfig.models ?? [], snapshot, providerConfig.api)
-      applyDeferredModelsDevLevels(report, deferred)
+      mergeCatalog(report, providerConfig.models ?? [], snapshot, providerConfig.api, providerConfig)
+      applyDeferredModelsDevLevels(report, deferred, providerConfig)
     }
-    mergeFallbacks(report, providerConfig.models ?? [], config.fallbacks, config.fallbacks !== undefined)
-    if (options.active) {
-      if (!options.confirm) {
-        report.notes.push('active=true 但缺少 confirm=true（主动探测会消耗额度，需用户明确批准）——本次仅做被动发现')
-      } else {
-        const levels = options.levels && options.levels.length > 0 ? options.levels : ['low', 'medium', 'high']
-        const url = providerConfig.baseURL.replace(/\/+$/, '') + '/chat/completions'
-        const headers: Record<string, string> = {
-          'content-type': 'application/json',
-          ...(providerConfig.apiKey ? { authorization: `Bearer ${providerConfig.apiKey}` } : {}),
-          ...(providerConfig.headers ?? {}),
-        }
-        // 负控（决策 D7）：端点若连无效值都接受，则「接受某个等级」不构成证据。
-        const control = await probeReasoningEfforts({
-          url, headers, levels: ['__dsh_invalid__'], fetchImpl, timeoutMs: 15_000,
-          body: (level) => ({ model: report.models[0]?.id ?? '', messages: [{ role: 'user', content: 'ping' }], max_tokens: 1, reasoning_effort: level }),
-        })
-        const validates = control.rejected.length > 0
-        if (!validates) {
-          report.notes.push('负控失败：端点接受无效 reasoning_effort 值 → 接受性探测不可信，本次不据此写入等级（只保留被动/目录结论）')
-        } else {
-          for (const model of report.models) {
-            if (model.reasoningEfforts) continue
-            const result = await probeReasoningEfforts({
-              url, headers, levels, fetchImpl,
-              body: (level) => ({ model: model.id, messages: [{ role: 'user', content: 'ping' }], max_tokens: 1, reasoning_effort: level }),
-            })
-            if (result.efforts) {
-              model.reasoningEfforts = result.efforts
-              model.sources.reasoningEfforts = 'active-probe'
-            }
-            if (result.rejected.length > 0) report.notes.push(`${model.id}: 端点拒绝的等级 ${result.rejected.map((r) => r.level).join(', ')}`)
-            for (const item of result.inconclusive) report.notes.push(`${model.id}: 等级 ${item.level} 结果不确定（${item.reason}）`)
-          }
-        }
-      }
-    }
+    mergeFallbacks(report, providerConfig.models ?? [], config.fallbacks, config.fallbacks !== undefined, providerConfig)
+    applyMimoThinkingProfile(providerConfig, report)
+    await runConfirmedActiveProbe(providerConfig, report, {
+      ...options,
+      offline: skipNetwork,
+      fetchImpl,
+    })
     return { providerConfig, report }
   }
 
   const probeTool = defineTool({
     name: 'model_capability_probe',
     description:
-      'Discover capability metadata for a user-declared provider route, in source order: endpoint descriptor, vendor schema, models.dev encyclopedia, engine catalog. ' +
-      'Never inferred from URLs or names; unknown stays unknown. ' +
-      'Active probes spend quota, so they need active=true and confirm=true, and are discarded unless a negative control proves the endpoint validates the field. ' +
-      'apply=true writes the discovered fields back (missing fields only).',
+      'Discover capabilities for a user-declared route in source order: endpoint descriptor, vendor schema, models.dev, engine catalog. ' +
+      'Never infer from URL/name; unknown stays unknown. ' +
+      'Active probes are billable, require active=true and confirm=true, and use supported Responses or explicitly configured standard OpenAI Completions with a rejecting negative control. MiMo toggles are not effort probes. ' +
+      'apply=true fills missing fields only.',
     parameters: {
       provider: { type: 'string', required: true, description: 'llm-pi-ai provider route id, e.g. "my-gateway"' },
-      active: { type: 'boolean', description: 'Also run active reasoning-effort probes (default false)' },
-      confirm: { type: 'boolean', description: 'Explicit user approval for active probes (required when active=true)' },
-      levels: { type: 'array', items: { type: 'string' }, description: 'Candidate effort words for active probes (default low/medium/high)' },
+      active: { type: 'boolean', description: 'Run billable probes (default false)' },
+      confirm: { type: 'boolean', description: 'Required with active=true' },
+      levels: { type: 'array', items: { type: 'string' }, description: 'Candidate levels (default low/medium/high)' },
       apply: { type: 'boolean', description: 'Write discovered capabilities back to settings (missing fields only)' },
       offline: { type: 'boolean', description: 'Skip network entirely and use only the engine catalog (default false)' },
       source: { type: 'string', description: 'Source stage (default auto)' },
@@ -700,13 +895,12 @@ export function apply(ctx: Context, config: PluginConfig = {}) {
   const applyTool = defineTool({
     name: 'model_capability_apply',
     description:
-      'Discover and write back missing model-level capabilities for one user-declared provider route. ' +
-      'Only fills fields the route does not declare; never overwrites a user value. ' +
-      'Spends quota only with active=true and confirm=true.',
+      'Discover and fill missing model-level capabilities for a declared route; preserve user values. ' +
+      'Active probes are billable, require active=true and confirm=true, and use supported Responses or explicitly configured standard OpenAI Completions with a rejecting negative control. MiMo and offline mode never send effort probes.',
     parameters: {
       provider: { type: 'string', required: true, description: 'llm-pi-ai provider route id' },
-      active: { type: 'boolean', description: 'Also run active reasoning-effort probes (default false)' },
-      confirm: { type: 'boolean', description: 'Explicit approval for active probes' },
+      active: { type: 'boolean', description: 'Run billable probes (default false)' },
+      confirm: { type: 'boolean', description: 'Required with active=true' },
       offline: { type: 'boolean', description: 'Use only the engine catalog (default true for apply)' },
       source: { type: 'string', description: 'Source stage (default auto)' },
     },
@@ -741,48 +935,137 @@ export function apply(ctx: Context, config: PluginConfig = {}) {
   ctx.tools.register(applyTool)
   log?.info?.('model_capability_probe / model_capability_apply registered')
 
-  // 自动补给（决策 D5，对齐 model-sync 的启动轮）：延迟一轮，只做目录 + 被动，
-  // 只写「缺失且无歧义」的字段；失败静默落日志。
+  /**
+   * 手动补齐入口（A6）：用户已经在用的模型（在 A7 之前由启动轮/轮询补过、之后不再自动补）
+   * 需要一个显式触发点。
+   *
+   * 为什么是页面 + 受鉴权路由而不是新工具：A6 要求「复用现有设置区域，尽量不新增显眼独立
+   * 按钮」，且能力补齐是设置页动作、不是模型可见能力（用户裁定 7：仅用户平面）。
+   * 因此挂在既有的「开发者选项」dsh-dev-row 里，走 `/api/android/model-capability/fill`。
+   *
+   * 鉴权：与 linux-env 的 runtime-cache 同一道门（authorizeMobileRoute：connection 的
+   * Host/Origin/browser-session 优先，缺 connection 时回环 Host + 壳侧实时 controlToken），
+   * 并登记进 scripts/api-route-auth-policy.json（缺登记 -> check-api-route-auth.mjs 判红）。
+   *
+   * 与自动路径的差别：手动路径补该路由下**所有**缺失字段的模型（用户明确要求「把我现在
+   * 这些模型补齐」），但仍遵守字段级与不覆盖用户值；模型必须已在 settings 里声明
+   * （planModelPatch 不会凭空创建条目）。
+   */
+  // 可选依赖：用 ctx.inject 声明**可选**服务，而不是在 apply() 里裸读。
   //
-  // 回归场景（2026-09-10 用户口径）：用户在设置页「添加自定义供应商」后，
-  // 不重启、不手改 settings.yaml，思考档位就应出现。
+  // 为什么不能用 optionalService(ctx,'webServer')（2026-10-11 设备实锤）：cordis 的
+  // ctx.get(name) 默认 strict=true，只返回**已激活**（fiber.state===2）的实现；而装配顺序是
+  // 「我们的插件行早于 webserver 行」（scripts/profile-web.cordis.patch.yml:94-96
+  // vs dsh-web-app/cordis.patch.yml:150），故 apply() 执行那一刻 webServer 尚未提供，
+  // ctx.get 恒为 undefined -> 路由永不注册。真机 5/5 次引擎启动命中
+  // 「webServer 缺席：手动补齐路由未注册」，A6 在 web 上完全不可用。
+  // ctx.inject([...], cb) 是 cordis 惯用法：依赖（含后到的）可用后回调才跑；依赖永不到达
+  // （headless「mounts no Host, HTTP server」）则回调不跑，也不报错。它**不写进静态 inject
+  // 数组**，因此不会把 apply() 挡掉（上一轮 headless 问题的解法保留）。
+  const registerManualFill = (webServer: { register(registration: unknown): () => void }): void => {
+    if (!settings) return
+    const authOptions = () => ({
+      token: shellControlToken,
+      connection: optionalService<ConnectionRouteAuth>(ctx, 'connection'),
+    })
+    const sendJson = (res: MobileRouteResponse, code: number, payload: unknown): void => {
+      res.writeHead(code, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+      res.end(JSON.stringify(payload))
+    }
+    ctx.effect(() => webServer.register({
+      kind: 'exact',
+      path: MANUAL_FILL_ROUTE,
+      handler: async (req: MobileRouteRequest, res: MobileRouteResponse) => {
+        const rejection = authorizeMobileRoute(req, authOptions())
+        if (rejection !== undefined) {
+          sendMobileRouteRejection(res, rejection)
+          return
+        }
+        if (req.method !== 'POST') {
+          res.writeHead(405, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', allow: 'POST' })
+          res.end(JSON.stringify({ ok: false, error: 'POST only' }))
+          return
+        }
+        // 手动路径同样绝不联网：只读引擎目录 + 本地 models.dev 缓存。
+        const section = settings.describe({ namespaces: ['llm-pi-ai'] }).find((d) => d.ns === 'llm-pi-ai')
+        const providers = (section?.value as { providers?: Record<string, unknown> } | undefined)?.providers ?? {}
+        const routes = (config.routes ?? Object.keys(providers)).filter((route) => isNonBuiltInRoute(route))
+        const filled: Array<{ route: string; wrote: boolean; reason: string; changes: string[] }> = []
+        for (const route of routes) {
+          try {
+            const found = await discover(route, { offline: true, useCachedModelsDev: true, allowModelsDevNetwork: false }, section?.value)
+            if (!found) continue
+            const result = await applyModelPatch(settings, route, patchesFrom(found.report), logWithTrace)
+            filled.push({ route, wrote: result.wrote, reason: result.reason, changes: result.changes })
+            diag('manual fill ' + route + ': wrote=' + String(result.wrote) + ' reason=' + result.reason + ' changes=' + JSON.stringify(result.changes))
+          } catch (error) {
+            filled.push({ route, wrote: false, reason: (error as Error)?.message ?? String(error), changes: [] })
+            diag('manual fill ' + route + ' failed: ' + ((error as Error)?.message ?? String(error)))
+          }
+        }
+        sendJson(res, 200, {
+          ok: true,
+          routes: filled.length,
+          wrote: filled.filter((item) => item.wrote).length,
+          details: filled,
+        })
+      },
+    }))
+    log?.info?.('manual capability fill route registered: ' + MANUAL_FILL_ROUTE)
+  }
+  // 可选依赖：webServer 后到也一定会触发（web）；永不提供则回调不跑（headless）。
+  ctx.inject(['webServer'], (c) => {
+    const svc = optionalService<{ register(registration: unknown): () => void }>(c, 'webServer')
+    if (svc) registerManualFill(svc)
+    else diag('webServer 解析为空：手动补齐路由未注册（A6 入口不可用）')
+  })
+
+  // 补给只在**保存**时发生（A1/A7，2026-10-11）：唯一触发器是上游在设置写入后
+  // emit 的 settings/document-updated，没有任何定时器（既无启动轮，也无兜底轮询）。
   //
-  // 【T1 常驻 CPU（2026-09-25）】旧实现用「每 5 秒全量 describe 取签名」实现该回归，
-  // 实测代价是常驻 24-26% CPU（4 次 --cpu-prof：w3 24% / w4 26% / c3 25% / c4 24%，
-  // 证据 .deploy-tmp/boot-attribution/REPORT.md §5）。真因不在本插件的循环，
-  // 而在 describe 的实现：settings 服务没有「只读自有命名空间」的轻量路径，
-  // 每次 describe 都走 configEditor.configuration() → 对**全 profile 每个 entry**
-  // 重做 inherited() = flatten(composeEntries(全量层 patch)) + structuredClone。
-  // 单次 describe 实测 300-1500 ms inclusive（w3 七次调用合计 4218 ms）。
-  // **所以「把 poll 从 5s 调到 30s」只是把同样的全量重算摊薄，不改变单次成本**；
-  // 真正要减的是**describe 的调用次数**。三条并行手段：
-  //   ① 事件驱动：上游在「raw 段变化」时 emit settings/document-updated（出货
-  //      dsh-settings/lib/index.js:521-547 bumpRevision → emitDocumentUpdated，
-  //      经 ctx.events 共享总线派发）。这是**唯一能同时做到「即时」与「零轮询」**的路子。
-  //   ② 兜底轮询：默认 120s（从 5s 提高两个量级），只在上游事件面不可用时兜底。
-  //   ③ 每次 tick 只读一次描述符并在内部复用（旧实现同一 tick 内 describe 2-3 次：
-  //      signatureOf + routesToConsider + 每个 route 的 providerFromSettings）。
+  // 历史与代价（T1 常驻 CPU，2026-09-25；设备实证 2026-10-10）：旧实现先有「每 5 秒
+  // 全量 describe 取签名」，后改为「启动延迟一轮 + 120s 兜底轮询」。后者在真实设备上
+  // 留下每 120 秒一条 tick 日志、连续数日（$DSH_HOME/model-capability.log 实测 380KB），
+  // 而该设备当时 runAutoPass: routes=[] —— 零价值工作却常驻五年。
+  // 真因是 describe 本身就贵：settings 服务没有「只读自有命名空间」的轻量路径，每次
+  // describe 都走 configEditor.configuration() → 对全 profile 每个 entry 重做 inherited()
+  // + structuredClone（单次实测 300-1500ms）。所以「调大间隔」只是摊薄，不是消除；
+  // 用户口径要的是「不做定时扫描」，只有事件路径能满足。
   //
-  // 为什么用事件而不是「只保留轮询但调大间隔」：调大间隔会把「用户添加供应商 → 档位出现」
-  // 的延迟从秒级拉到分钟级，等于用功能退化换 CPU；而事件正是「设置变了」的权威信号，
-  // 既不轮询也不延迟。事件的**数据面**（为什么事件够用、以及与 settings.watch 的关系）
-  // 见下方 subscribeSettingsEvents 的注释。
+  // 为什么事件够用：上游 SettingsForms.write 每次用户保存都会 describe() 一次，而
+  // describe 在 raw 段变化时 emit settings/document-updated(ns, revision)
+  // （dsh-settings/src/index.ts:316-318、:337）。即**每一次保存必然产生该事件**。
+  // 事件只带 (ns, revision) 不带值，所以回调里仍要读一次描述符——这一次读是必要的，
+  // 且每次真实保存只发生一次。
+  //
+  // 收窄：事件不带「这次保存了哪些模型」，故用「上一轮描述符 vs 本轮描述符」按
+  // (route, modelId) 值敏感签名做 diff（signature.ts 的 modelSignatureParts），
+  // 只对本次新增或改动的模型做发现与写回。路由级键（baseURL/apiKey 等）的变化
+  // 不改模型集合，因此不触发任何模型补齐——那正是用户的意图，不是遗漏。
+  // 事件的**数据面**（为什么事件够用、以及与 settings.watch 的关系）见下方
+  // subscribeSettingsEvents 的注释。
   if (config.autoApply !== false && settings) {
-    const delayMs = Math.max(0, config.startupDelaySeconds ?? 8) * 1000
-    let signature = ''
-    /** 是否已建立签名基线：未建立时首轮直接跑，省掉一次无意义的比较读。 */
-    let baselineSet = false
     /** 本 tick 内共享的描述符：避免同一 tick 对 llm-pi-ai 重复 describe。 */
     let tickSection: unknown
     /** 事件已触发但本轮尚未消费时置真：tick 看到它即跑一轮，保证「先到的事件不丢」。 */
     let eventPending = false
     /** effect 是否已停止（deferrer 的回调在事务外跑，需自行判断存活）。 */
     const stoppedRef = { value: false }
+    /**
+     * 上一轮读到的每个路由下已声明模型的签名（route -> 模型签名的有序列表）。
+     *
+     * 首读只建立它、不写任何东西；之后每次保存都拿它与当轮比较，得出「这次保存新增或改动
+     * 了哪些模型」。未建立时（例如首次读取失败）一律不写——没有基线就无法区分
+     * 「这次新加的模型」与「用户早就在用的模型」，后者不该被自动改写。
+     */
+    let baselineModels: Map<string, string> | undefined
+    /** 仅首读建立基线；此后恒为 false（全插件没有任何定时重读）。 */
+    let needsBaselineRead = true
 
     /**
-     * 读一次 llm-pi-ai 描述符，并在**本 tick 内**复用给 routesToConsider / signatureOf /
-     * providerFromSettings / applyModelPatch。这是 T1 的第三条手段：旧实现在同一 tick 里
-     * describe 2-3 次，每次都付一次全量 configuration() + structuredClone。
+     * 读一次 llm-pi-ai 描述符，并在**本 tick 内**复用给签名 / providerFromSettings /
+     * applyModelPatch。旧实现在同一 tick 里 describe 2-3 次，每次都付一次全量
+     * configuration() + structuredClone（单次 300-1500ms），这是 T1 成本的主要来源。
      * @returns 描述符，读失败时 undefined（调用方按「无路由」处理）。
      */
     const readDescriptor = () => {
@@ -796,62 +1079,114 @@ export function apply(ctx: Context, config: PluginConfig = {}) {
       return tickSection === null ? undefined : tickSection as { ns: string; value: unknown; revision: number } | undefined
     }
 
-    const routesToConsider = (): string[] => {
+    const routesInSection = (): string[] => {
       // describe(options) 的 options 被实现忽略 → 必须按 ns 查找（不能用 [0]）
       const section = readDescriptor()?.value as { providers?: Record<string, unknown> } | undefined
       return config.routes ?? Object.keys(section?.providers ?? {})
     }
 
+    const routeValueOf = (route: string): unknown => {
+      const section = readDescriptor()?.value as { providers?: Record<string, unknown> } | undefined
+      return section?.providers?.[route]
+    }
+
+    /** 一个路由下已声明模型的签名（与 capabilitySignature 同源口径）。 */
+    const modelsOf = (route: string): ModelSignaturePart[] => modelSignatureParts(routeValueOf(route))
+
     /**
-     * 能力补给触发签名（0.14.0-preview / ST-03）：**值敏感**——含路由级键（baseURL/api 等）的规范化值
-     * 与模型级能力字段的值，结构增删同样改变签名。旧实现只记「字段有无」，换网关/手改配置不触发重跑。
-     * 见 src/signature.ts 与计划文档 §4.2 ST-03。
+     * 把当轮描述符录成「上一轮基线」：只记录、不写回。
+     * @param routes - 需要记录的路由。
+     * @returns 新的基线。
      */
-    const signatureOf = (): string => {
-      try {
-        return capabilitySignature(readDescriptor()?.value, config.routes)
-      } catch {
-        return ''
+    const snapshotBaseline = (routes: readonly string[]): Map<string, string> => {
+      const next = new Map<string, string>()
+      for (const route of routes) {
+        for (const part of modelsOf(route)) next.set(route + '\u0000' + part.signature, part.id)
       }
+      return next
+    }
+
+    /**
+     * 对比基线与当轮，算出**这次保存**新增或改动的模型。
+     *
+     * 口径与自触发签名一致（都走 modelSignatureParts）：模型条目任一声明字段变化即算改动，
+     * 而路由级键（apiKey / baseURL 等）不参与，因此「只换 key 或只改 baseURL 而模型集合
+     * 未变」不会触发任何补齐——那是用户的意图，不是遗漏。
+     * @param previous - 上一轮基线；undefined 表示还没有基线（首读，不做任何写回）。
+     * @param routes - 当轮要考察的路由。
+     * @returns 本次新增或改动模型的 route->条目 映射，以及被删除模型的诊断串。
+     */
+    const diffAgainstBaseline = (previous: Map<string, string> | undefined, routes: readonly string[]) => {
+      const added = new Map<string, ModelSignaturePart[]>()
+      const removed: string[] = []
+      if (!previous) return { added, removed }
+      for (const route of routes) {
+        const now = modelsOf(route)
+        const fresh: ModelSignaturePart[] = []
+        for (const part of now) {
+          if (!previous.has(route + '\u0000' + part.signature)) fresh.push(part)
+        }
+        if (fresh.length > 0) added.set(route, fresh)
+        // 模型被删掉同样意味着「模型集合变了」，但删模型不需要补齐，只记诊断。
+        const nowKeys = new Set(now.map((part) => route + '\u0000' + part.signature))
+        for (const key of previous.keys()) {
+          if (key.startsWith(route + '\u0000') && !nowKeys.has(key)) removed.push(key.slice(route.length + 1).replace('\u0000', ' '))
+        }
+      }
+      return { added, removed }
     }
 
     /** 来源戳：记录「该字段现在的值是我方写下的」，使新发现的值可刷新我方旧写入（用户手写值无戳）。 */
     const stamps = createStampStore()
 
-    const runAutoPass = async () => {
-      const routes = routesToConsider()
+    // settings.describe performs full profile/schema projection even with a namespace
+    // hint. Cached catalog parsing and the final fresh signature must run in separate
+    // event-loop turns so an offline pass cannot combine their synchronous cost.
+    const yieldAutoPass = () => new Promise<void>((resolve) => setImmediate(resolve))
+
+    /**
+     * 对「本次保存新增或改动的模型」做一次能力发现与写回。
+     *
+     * 只在 [savedIds] 里的模型上写回：未勾选的模型、以及用户早就配好在用的模型都不动
+     * （A1/A3/A5）。这是与旧实现的根本差别——旧实现每个 route 一律把该 route 下**全部**
+     * 模型重跑一遍补齐，用户改一个无关字段也会连带触碰所有模型。
+     *
+     * 非内置 provider 之外的路由不处理：内置 provider 的目录由引擎自己声明，
+     * 我们补写只会与上游打架。
+     * @param savedIds - 本次保存新增或改动的「route -> 模型 id 集合」。
+     * @returns 无。
+     */
+    const runAutoPass = async (savedIds: Map<string, Set<string>>) => {
+      const routes = [...savedIds.keys()].filter((route) => isNonBuiltInRoute(route))
       diag(`runAutoPass: routes=${JSON.stringify(routes)}`)
-      // L.2（2026-09-26）：**每个 route 各取一次描述符**。
-      // 旧实现只读一次就传给所有 route（:838 的 descriptor override），但任一 route 写成功后
-      // settings 的 revision 就会推进（服务端 revisions Map），于是后续 route 手里的 override
-      // 必然过期——它们只能靠重试兜底，而重试本身又被并发写者挤掉。
-      // 在循环内重取比「靠重试兜底」更正确：override 的语义是「刚读到的、还没被任何人改过」，
-      // 一旦本轮写过一次，它就**不再是**刚读到的了；在源头纠正比在下游反复撞墙便宜且可推理
-      // （重试次数有限，源头每轮只多一次 describe）。
-      const tickValue = readDescriptor()?.value
-      // L.2：本轮里已经写成功过吗？写成功才会推进 revision，才让手里的描述符过期。
-      // **不能无条件每个 route 重读**——那会给首轮多加一次 describe，破坏 T1 的
-      // 「每 tick describe 次数上界」判据（t1-poll-cost.test.mjs 的 E-P2-4 会判红，实测踩到）。
-      // 只在「本轮已经写过」之后才重读：首轮零额外开销，多路由时也只在必要时才多读一次。
+      if (routes.length === 0) return
+      // 每个 route 各取一次描述符快照：任一 route 写成功后 settings revision 就会推进，
+      // 之前取到的 override 便不再是「刚读到的、没被任何人改过」，因此重取而非靠重试兜底。
       let wroteThisPass = false
       for (const route of routes) {
+        await yieldAutoPass()
+        if (stoppedRef.value) return
         try {
-          // offline 保持既有「不联网」语义，useCachedModelsDev 让 S3 用缓存参与补给；
-          // allowModelsDevNetwork=false 保证 tick 绝不触发网络（T1 回归判据，见 t1-poll-cost.test.mjs）。
-          const found = await discover(route, { offline: true, useCachedModelsDev: true, allowModelsDevNetwork: false }, tickValue)
-          if (!found) continue
-          diag(`runAutoPass(${route}): models=${found.report.models.length} efforts=${JSON.stringify(found.report.models.map((m) => [m.id, m.reasoningEfforts ?? null]))}`)
-          // 自动补给写回全部缺失字段（不只是 reasoningEfforts）：S3/S5 的价值就是补长尾的
-          // contextWindow/maxTokens/input，只放 reasoningEfforts 会让这两个源在自动路径上形同虚设。
-          // 用户已有的值不会被动：planModelPatch 只填空，来源戳进一步保护我方旧写入。
-          const patches = patchesFrom(found.report)
-          diag(`runAutoPass(${route}): patches=${patches.length}`)
-          if (patches.length === 0) continue
-          // 只在「本轮已写过」之后重读：那时描述符才真的过期；否则沿用 tick 首次读到的。
           if (wroteThisPass) {
             tickSection = undefined
             readDescriptor()
           }
+          const tickValue = readDescriptor()?.value
+          // offline + useCachedModelsDev：绝不联网；allowModelsDevNetwork=false 保证
+          // 补给路径零网络（T1 回归判据，见 t1-poll-cost.test.mjs）。
+          const found = await discover(route, { offline: true, useCachedModelsDev: true, allowModelsDevNetwork: false }, tickValue)
+          if (!found) continue
+          // 只保留本次保存涉及的模型：discover 会把该 route 下所有声明模型都探一遍。
+          const wanted = savedIds.get(route) ?? new Set<string>()
+          const applicable = found.report.models.filter((model) => wanted.has(model.id))
+          if (applicable.length === 0) continue
+          diag(`runAutoPass(${route}): models=${applicable.length} efforts=${JSON.stringify(applicable.map((m) => [m.id, m.reasoningEfforts ?? null]))}`)
+          // 写回全部缺失字段（不只是 reasoningEfforts）：S3/S5 的价值就是补长尾的
+          // contextWindow/maxTokens/input，只放 reasoningEfforts 会让这两个源形同虚设。
+          // 用户已有的值不会被动：planModelPatch 只填空，来源戳进一步保护我方旧写入。
+          const patches = patchesFrom({ ...found.report, models: applicable })
+          diag(`runAutoPass(${route}): patches=${patches.length}`)
+          if (patches.length === 0) continue
           const descriptor = readDescriptor()
           const result = await applyModelPatch(settings, route, patches, logWithTrace, stamps, descriptor)
           if (result.wrote) wroteThisPass = true
@@ -864,20 +1199,17 @@ export function apply(ctx: Context, config: PluginConfig = {}) {
       }
     }
 
-    /**
-     * 一轮补给检查。`force` 为真时跳过签名短路（事件已经告诉我们「设置变了」，
-     * 不必再花一次 describe 去重新求签名——这正是省 CPU 的关键：事件路径下每轮
-     * 只 describe 一次，轮询路径才需要「先签名后决定」的两次读）。
-     * @param force - 事件驱动路径为 true。
-     */
-    // 轮询 tick 与事件 tick 可能并发；两者共用 tickSection（每 tick 的描述符缓存），
-    // 交叠会互相清掉对方的缓存并多做一次全量 describe。用一个在跑标志串行化：
-    // 跑动期间到达的请求只置 rerun，由当前这轮结束后补跑（不丢事件、不并发）。
+    /** 事件与首读共用一个在跑标志：跑动期间到达的保存只置 rerun，由本轮结束后补跑。 */
     let ticking = false
     let rerun = false
 
-    const tick = async (force = false) => {
+    /**
+     * 一次补给。唯一的**写**触发源是保存事件；无事件时这里最多只做一次只读基线。
+     * @param fromEvent - 本轮是否由 settings/document-updated 触发。
+     */
+    const tick = async (fromEvent: boolean) => {
       if (ticking) {
+        if (fromEvent) eventPending = true
         rerun = true
         return
       }
@@ -886,25 +1218,46 @@ export function apply(ctx: Context, config: PluginConfig = {}) {
         do {
           rerun = false
           tickSection = undefined
+          const isSave = fromEvent || eventPending
           eventPending = false
-          // 首轮（baseline 尚未建立）必须直接跑，不做「先取签名再比较」——
-          // signature 初值是空串，比较必然不等，那次 describe 是纯浪费
-          // （离线实测：启动轮 2 次 describe 里正好有 1 次是它）。
-          if (!force && baselineSet) {
-            const next = signatureOf()
-            diag(`tick: signature=${next.slice(0, 120)} changed=${next !== signature}`)
-            if (next === signature) break
-          } else {
-            diag(force ? 'tick: event-driven (settings/document-updated)' : 'tick: first pass (baseline)')
+          const routes = routesInSection()
+          if (needsBaselineRead) {
+            if (routes.length === 0) {
+              // describe 还没就绪或此刻确实没有任何路由：这次读不构成有效基线。
+              // 保持 needsBaselineRead 为真，留待下一次保存重建——宁可少补一次，
+              // 也不能拿空基线当「全是新模型」，那会把用户早就配好的模型全量改写。
+              diag('tick: baseline read saw no routes; will rebuild on the next save')
+              break
+            }
+            needsBaselineRead = false
+            baselineModels = snapshotBaseline(routes)
+            diag(`tick: baseline recorded routes=${routes.length} models=${baselineModels.size}`)
+            // 首次读到基线时，本轮拿到的是**保存之后**的状态，无从判断这次保存改了什么。
+            // 因此本轮一律不写（A7）；真正「加模型 → 档位出现」由下一次保存完成。
+            if (isSave) diag('tick: first baseline read, no write this round')
+            break
           }
-          await runAutoPass()
-          // 写回会改变签名，刷新一次基线避免下一轮重复执行
+          const previous = baselineModels
+          const { added, removed } = diffAgainstBaseline(previous, routes)
+          if (removed.length > 0) diag(`tick: models removed=${JSON.stringify(removed)}`)
+          if (!isSave || added.size === 0) {
+            // 无新增/改动即无事可做：仍要刷新基线（值可能变了但不在我们的关注字段上）。
+            baselineModels = snapshotBaseline(routes)
+            diag('tick: save observed, nothing to fill (no new or changed models)')
+            break
+          }
+          const saved = [...added].map(([route, parts]) => [route, new Set(parts.map((part) => part.id))] as const)
+          diag(`tick: save observed, added=${JSON.stringify(saved.map(([route, ids]) => [route, [...ids]]))}`)
+          // 先记录本次保存后的基线再写回：写回自身也会推进 revision 并发事件，
+          // 先记录才能让那个事件 diff 出 0 个模型、从而收敛（不自旋）。
+          baselineModels = snapshotBaseline(routes)
+          await runAutoPass(new Map(saved))
+          await yieldAutoPass()
+          if (stoppedRef.value) return
           tickSection = undefined
-          signature = signatureOf()
-          baselineSet = true
-          // 跑动期间设置又变了 → 再跑一轮（事件只来自真实写入，不会自旋）
+          baselineModels = snapshotBaseline(routes)
           if (eventPending) rerun = true
-          force = true
+          fromEvent = true
         } while (rerun)
       } finally {
         ticking = false
@@ -1001,6 +1354,7 @@ export function apply(ctx: Context, config: PluginConfig = {}) {
           eventPending = true
           // 必须经 deferrer 送出事务上下文，否则 tick 内的 settings.mutate 会被 hmr 拒绝（X1）。
           deferrer.defer(() => { if (!stoppedRef.value) void tick(true) })
+
         })
       } catch (error) {
         diag(`settings/document-updated 订阅失败（${(error as Error)?.message ?? String(error)}）→ 退化为轮询兜底`)
@@ -1015,41 +1369,34 @@ export function apply(ctx: Context, config: PluginConfig = {}) {
       // deferrer 必须在**事务外**预建：它的 async 资源不能带上 hmr 的事务上下文，
       // 否则事件回调里触发的写回仍会被 hmr 判为嵌套（见 createDeferrer）。
       const deferrer = createDeferrer()
-      // 先订阅再决定轮询间隔：事件可用时轮询只是「怕漏事件」的安全网，可以很稀；
-      // 事件不可用时轮询就是**唯一**触发器，稀到 120s 会把「添加供应商 → 档位出现」
-      // 的延迟从秒级退化到 2 分钟（功能退化）。因此间隔按事件面是否可用分两档取：
-      //   事件可用   -> 默认 120s（安全网；常态下永不触发）
-      //   事件不可用 -> 默认 30s （唯一触发器；把延迟与 CPU 折中）
-      // 两档都用 Math.max(30, ...) 钳下界：用户显式配 5s 会被钳到 30，
-      // 这是**有意**的，防止把 poll 配回过 5s 又打回 24-26% 常驻 CPU（见上方成本注释）。
+      // 全插件**没有任何定时器**（A7）：不排 setTimeout / setInterval，因此不会有一个
+      // 常驻 tick、也不会每分钟写一行日志。写入只由下面这个保存事件触发。
       const unsubscribe = subscribeSettingsEvents(deferrer)
-      const eventDriven = unsubscribe !== undefined
-      const fallbackSeconds = eventDriven ? 120 : 30
-      const pollMs = Math.max(30, config.pollIntervalSeconds ?? fallbackSeconds) * 1000
-      diag(`poll interval=${String(pollMs / 1000)}s eventDriven=${String(eventDriven)} modelsDev=${modelsDevStatus()}`)
+      diag(`event-driven=${String(unsubscribe !== undefined)} modelsDev=${modelsDevStatus()}`)
       // 【P2-S3 启动后台刷新（2026-09-26）】方案 §2.2 的降级链是「无缓存 -> 拉；有缓存且未陈旧 ->
       // 不拉；陈旧 -> 后台拉」。此前只实现了「显式调工具才拉」，于是干净安装上没人调工具 =>
       // 缓存永远不存在 => S3 永不自动生效（设备实测：models-dev.json 不存在、日志 0 命中）。
       // 这里补上缺失的一环：每个进程启动最多一次后台刷新。
       // 纪律：经 deferrer 送出（与 tick 同一条逃逸通道，避开 hmr 事务上下文）；
       //      仅陈旧/无缓存才真的拉；失败只记 diag、不阻断、不重试；
-      //      拉完写缓存，由既有的 tick 路径自然消费（tick 仍 0 网络）。
-      // 先于启动轮触发：这样首个 auto-pass 就大概率能读到刚拉下来的 S3 数据。
+      //      拉完写缓存，由既有的补给路径自然消费（补给路径仍 0 网络）。
+      // 这是**一次性**动作，不是轮询：发起处不排任何定时器。
       deferrer.defer(() => {
         if (stopped) return
         void refreshModelsDevOnStartup().then((outcome) => {
           diag(`models.dev 启动刷新结果=${outcome} 状态=${modelsDevStatus()}`)
         })
       })
-      // 启动轮与轮询轮也可能落在别的 hmr 事务里（例如启动期 profile 重载），
-      // 同样经 deferrer 送出，保证任何一路触发都能写回成功。
-      const startTimer = setTimeout(() => { if (!stopped) deferrer.defer(() => { if (!stopped) void tick() }) }, delayMs)
-      const interval = setInterval(() => { if (!stopped) deferrer.defer(() => { if (!stopped) void tick() }) }, pollMs)
+      // 首读基线：只读一次描述符、只记录当轮模型集合，绝不写回（A7）。
+      // 没有这一步，之后每次保存都无从判断「哪些模型是这次才加的」，只能全量重跑。
+      // 经 deferrer 送出（启动期 profile 重载等也可能落在别人的 hmr 事务里）。
+      // 刻意**不等**：等待需要定时器，而本插件的纪律是零定时器。设置服务此刻还没就绪
+      // 也无妨——tick 读到空路由时不登记基线（needsBaselineRead 保持为真），
+      // 下一次保存会自然把它补上，不需要任何重试或延迟。
+      deferrer.defer(() => { if (!stopped) void tick(false) })
       return () => {
         stopped = true
         stoppedRef.value = true
-        clearTimeout(startTimer)
-        clearInterval(interval)
         unsubscribe?.()
         deferrer.dispose()
       }

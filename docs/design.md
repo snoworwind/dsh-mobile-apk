@@ -80,11 +80,12 @@ MainActivity
  │   ├─ 可达 → WebView 加载 http://127.0.0.1:3080
  │   └─ 不可达 → guideView（品牌区/状态卡/操作区，入场 stagger 动画）
  ├─ WebView 配置: JS 启用 / DOM storage / file chooser / 系统栏避让（CSS 变量注入）
- ├─ AndroidBridge 注入: 20 个 @JavascriptInterface 方法（见 §2）
+ ├─ AndroidBridge 注入: 71 个 @JavascriptInterface 注解、70 个唯一方法名（`browserHostShow` 为重载）（见 §2；旧值 20 为历史漂移，2026-10-11 实测修正）
  ├─ 引擎监控: 3s 轮询（down → 测试界面，up → 恢复 WebUI）
  ├─ 看门狗: EngineService 5s 调度（引擎崩溃自动拉起）
  ├─ 返回键: 先 WebView.canGoBack，否则 finish
- └─ 更新入口: ACTION_UPDATE intent → runUpdate（manifest → 下载 → 校验 → 原子切换）
+ └─ 更新入口: 引导页/设置页 → `AndroidBridge.apkUpdate(action)` → ApkUpdateController（状态机 → 下载 → 校验 → 拉起系统安装器）
+     └─ 联调旁路（非用户可达）: ACTION_UPDATE intent → runUpdate（manifest → 下载 → 校验 → 原子切换；**无超时兜底**，见 known-gaps）
 
 ConsoleActivity: assets/console.html（快照内嵌 bash 交互终端，输出裁剪 2000 行）
 

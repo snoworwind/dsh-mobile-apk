@@ -25,6 +25,7 @@ class EngineService : Service() {
     val stopped = java.util.concurrent.atomic.AtomicBoolean(false)
     val startupQueued = java.util.concurrent.atomic.AtomicBoolean(false)
     val startupCaller = java.util.concurrent.atomic.AtomicReference<Thread?>(null)
+    val startupFuture = java.util.concurrent.atomic.AtomicReference<java.util.concurrent.ScheduledFuture<*>?>(null)
     val undoCaller = java.util.concurrent.atomic.AtomicReference<Thread?>(null)
     val watchdog = java.util.concurrent.atomic.AtomicReference<ScheduledExecutorService?>(null)
     val wakeOwner = WatchdogV2.WakeLockOwner()
@@ -39,6 +40,10 @@ class EngineService : Service() {
 
   override fun onCreate() {
     super.onCreate()
+    // Android's foreground-service deadline starts at startForegroundService().
+    // Promote before preferences, manager construction or other initialization;
+    // slow disk/class loading must not spend that deadline before notification.
+    startForeground(NOTIFICATION_ID, buildNotification())
     // review C9：userShutdown 是持久状态的进程内镜像——新进程必须先恢复磁盘上的真值，
     // 否则开机/系统重启后（START_STICKY 重投递或 BootReceiver 拉起）「用户已手动关停」被遗忘。
     userShutdown = isUserShutdownPersisted(this)
@@ -46,7 +51,6 @@ class EngineService : Service() {
     engineManager = EngineManager(this, EngineManager.ensurePickToken())
     serviceEpoch.set(ServiceEpoch())
     instance = this
-    startForeground(NOTIFICATION_ID, buildNotification())
     // 0.14.0-preview §6.2/§6.3：通知信道消费点 + 通知应答流（两者都是进程级幂等单例）。
     // 落在这里而不是 OverlayService：通知必须**独立于悬浮球开关**生存（§6.0 风险 2）。
     NotifyStore.start(this)
@@ -132,18 +136,24 @@ class EngineService : Service() {
   private fun scheduleStartup(epoch: ServiceEpoch, delayMs: Long) {
     if (!isEpochCurrent(epoch)) return
     try {
-      startupExecutor.schedule({
-        val caller = Thread.currentThread()
-        epoch.startupCaller.set(caller)
-        try { if (isEpochCurrent(epoch)) ensureEngine(epoch) }
-        catch (t: Throwable) {
-          if (isEpochCurrent(epoch)) {
-            epoch.startupQueued.set(false)
-            Log.e("dsh-engine", "service startup failed", t)
+      synchronized(epoch) {
+        val future = startupExecutor.schedule({
+          // A zero-delay task must not reschedule before its future has been installed.
+          synchronized(epoch) { if (!isEpochCurrent(epoch)) return@schedule }
+          val caller = Thread.currentThread()
+          epoch.startupCaller.set(caller)
+          try { if (isEpochCurrent(epoch)) ensureEngine(epoch) }
+          catch (t: Throwable) {
+            if (isEpochCurrent(epoch)) {
+              epoch.startupQueued.set(false)
+              Log.e("dsh-engine", "service startup failed", t)
+            }
           }
-        }
-        finally { epoch.startupCaller.compareAndSet(caller, null) }
-      }, delayMs, TimeUnit.MILLISECONDS)
+          finally { epoch.startupCaller.compareAndSet(caller, null) }
+        }, delayMs, TimeUnit.MILLISECONDS)
+        epoch.startupFuture.getAndSet(future)?.cancel(false)
+        if (!isEpochCurrent(epoch)) future.cancel(true)
+      }
     } catch (_: java.util.concurrent.RejectedExecutionException) {
       // Destruction can reject a queued retry. No effects or replacement teardown follow.
     }
@@ -152,6 +162,7 @@ class EngineService : Service() {
   private fun retireEpoch(epoch: ServiceEpoch) {
     serviceEpoch.compareAndSet(epoch, null)
     epoch.stopped.set(true)
+    epoch.startupFuture.getAndSet(null)?.cancel(true)
     epoch.startupCaller.getAndSet(null)?.interrupt()
     epoch.undoCaller.getAndSet(null)?.interrupt()
     epoch.watchdog.getAndSet(null)?.shutdownNow()
@@ -163,12 +174,10 @@ class EngineService : Service() {
     val ownership = ShizukuTransport.prepareStartupOwnership(applicationContext)
     if (!isEpochCurrent(epoch)) return
     if (startupOwnershipPending(ownership.optString("reason"))) {
-      val delay = epoch.ownershipRetry.nextDelayMs()
-      if (delay != null) scheduleStartup(epoch, delay)
-      else {
-        // No more automatic retries this epoch. A later external start may recheck settlement once.
-        epoch.startupQueued.set(false)
-        Log.i("dsh-root", "service startup remains deferred after bounded ownership retries")
+      val delay = epoch.ownershipRetry.nextDelayMs() ?: SLOW_OWNERSHIP_RECHECK_MS
+      scheduleStartup(epoch, delay)
+      if (delay == SLOW_OWNERSHIP_RECHECK_MS) {
+        Log.i("dsh-root", "service startup remains deferred; ownership recheck in " + delay + "ms")
       }
       return
     }
@@ -183,6 +192,11 @@ class EngineService : Service() {
     engineManager.recoverInterruptedRefresh()
     // Recovery can wait in root/Binder/disk; never install after that wait without a new epoch check.
     if (!isEpochCurrent(epoch)) return
+    if (engineManager.snapshotRecoveryBlocksRuntime()) {
+      Log.e("dsh-engine", "startup held: snapshot recovery journal remains unresolved")
+      epoch.startupQueued.set(false)
+      return
+    }
     WatchdogV2.acquireWakeLock(this, epoch.wakeOwner)
     if (!isEpochCurrent(epoch)) { WatchdogV2.releaseWakeLock(epoch.wakeOwner); return }
     val exec = Executors.newSingleThreadScheduledExecutor()
@@ -246,6 +260,7 @@ class EngineService : Service() {
                     portOwnedByApp = engineManager.engineProcessAlive(),
                     slowOnly = WatchdogV2.lastProbeTimedOut,
                   ),
+                  engine = engineManager,
                 )
               },
               callerCurrent = { isEpochCurrent(epoch) },

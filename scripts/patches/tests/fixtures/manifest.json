@@ -294,8 +294,35 @@
         "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-modules/package.json"
       },
       "patchIds": [
-        "combo-probe-P1"
+        "combo-probe-P1",
+        "client-registry-scan-C4"
       ]
+    },
+    "dsh-host-frontend-static-SN16": {
+      "source": "runtime-capture",
+      "engine": "0.2.0-rc.2",
+      "package": "@deepseek-ai/dsh-host-frontend-static@0.2.0-rc.2",
+      "provenance": {
+        "captureRecord": "evidence/capture.json",
+        "captureRecordSha256": "998224e32b7c7a8d81c235858dc3523903a5e7894eb31d094f0dd2b039bab638",
+        "evidence": "evidence/graph.json",
+        "evidenceSha256": "8f1db1880a88ad2f6d7cccb65b2b67711828f656aed2ea39cced540cebc4831b"
+      },
+      "files": [
+        "lib/index.js",
+        "package.json",
+        "evidence/capture.json",
+        "evidence/graph.json"
+      ],
+      "fileSha256": {
+        "lib/index.js": "19bb095c5175bd5dc6532aa97512e2013a132e5073558ba4b059b8ad5b0f19a2",
+        "package.json": "d9cced4ebc1ac19865d1b89dbd3a5901858203ca3e93e9840ecb9113e663a30b",
+        "evidence/capture.json": "998224e32b7c7a8d81c235858dc3523903a5e7894eb31d094f0dd2b039bab638",
+        "evidence/graph.json": "8f1db1880a88ad2f6d7cccb65b2b67711828f656aed2ea39cced540cebc4831b"
+      },
+      "targets": {},
+      "patchIds": [],
+      "reason": "Device failure witness with package identity and 59-to-69 graph evidence; canonical published-tarball fixture now provides the sole current G2 patch target. Runtime capture evidence and hashes remain verified."
     },
     "dsh-root-0.2.0-rc.2": {
       "source": "engine-tgz",
@@ -485,6 +512,7 @@
       },
       "patchIds": [
         "pi-upstream-streaming-020",
+        "mimo-thinking-toggle-056",
         "pi-toolcall-G2"
       ]
     },
@@ -566,6 +594,81 @@
       "patchIds": [
         "atomic-stale-lock-F4"
       ]
+    },
+    "dsh-llm-pi-ai-0.2.0-rc.2": {
+      "source": "engine-tgz",
+      "engine": "0.2.0-rc.2",
+      "package": "@deepseek-ai/dsh-llm-pi-ai@0.2.0-rc.2",
+      "provenance": {
+        "tarballFile": "deepseek-ai-dsh-llm-pi-ai-0.2.0-rc.2.tgz",
+        "tarballSha256": "684c9084556c650cb69ed48c9f8ebc3ca56dedb9a4077ed487eae46a0b3b21c4",
+        "inputKind": "published-tarball"
+      },
+      "files": [
+        "lib/index.js",
+        "package.json"
+      ],
+      "fileSha256": {
+        "lib/index.js": "d46dbc30aeb3414190000e6f8aeaaf994246b5e5c651de07639f4a7e92de37ef",
+        "package.json": "202c51795238f9ef8f3d57319bda831973eb91a0eb8661256aa6a75476e6e53f"
+      },
+      "targets": {
+        "lib/index.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm-pi-ai/lib/index.js",
+        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm-pi-ai/package.json"
+      },
+      "patchIds": [
+        "mimo-thinking-toggle-056"
+      ]
+    },
+    "dsh-typert-loader-0.2.0-rc.2": {
+      "source": "engine-tgz",
+      "engine": "0.2.0-rc.2",
+      "package": "@deepseek-ai/dsh-typert-loader@0.2.0-rc.2",
+      "provenance": {
+        "tarballFile": "deepseek-ai-dsh-typert-loader-0.2.0-rc.2.tgz",
+        "tarballSha256": "69aebbbf48718a6b33f0cfb76cb82bbb82adcbe51e27d5cb700c502deb682b5b",
+        "inputKind": "published-tarball"
+      },
+      "files": [
+        "lib/index.js",
+        "package.json"
+      ],
+      "fileSha256": {
+        "lib/index.js": "7543ff6113374e6bd21a3c0aece264dffada131d816533bdfb61adf6abbac00e",
+        "package.json": "5ec69734190f4ccd765e3584c5f676d55f61c71a5b96139cf882172c3245b7ae"
+      },
+      "targets": {
+        "lib/index.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-typert-loader/lib/index.js",
+        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-typert-loader/package.json"
+      },
+      "patchIds": [
+        "typert-registry-scan-C4"
+      ]
+    },
+    "dsh-host-frontend-static-0.2.0-rc.2": {
+      "source": "engine-tgz",
+      "engine": "0.2.0-rc.2",
+      "package": "@deepseek-ai/dsh-host-frontend-static@0.2.0-rc.2",
+      "provenance": {
+        "tarballFile": "deepseek-ai-dsh-host-frontend-static-0.2.0-rc.2.tgz",
+        "tarballSha256": "ff052d7fbccdde070a0539b92ca87d147a06908104fc79553d31d013e9953651",
+        "inputKind": "published-tarball"
+      },
+      "files": [
+        "lib/index.js",
+        "package.json"
+      ],
+      "fileSha256": {
+        "lib/index.js": "19bb095c5175bd5dc6532aa97512e2013a132e5073558ba4b059b8ad5b0f19a2",
+        "package.json": "0b66acd7aed6fc64683f253ecef3587fdd09c5a3503356887c0ee241243270b4"
+      },
+      "targets": {
+        "lib/index.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-host-frontend-static/lib/index.js",
+        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-host-frontend-static/package.json"
+      },
+      "patchIds": [
+        "client-index-loader-barrier-G2"
+      ]
     }
   },
   "capture": {
@@ -576,7 +679,7 @@
         "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-subprocess-local/lib/runner-launch-B2zsQ1Dz.js"
       ]
     },
-    "overlaySha256": "20d3c4b6cd1d01391272f8ec9a036590befcee9a5e3cb55263619982a0a4bfba",
-    "registrySha256": "d1953ba2c74ea40093253628963400c7a894498e98c1992e2fc3b4af6b21bc04"
+    "overlaySha256": "118ac224b49fcdef386b699acda44a08042033cc67bed8b1b4e4af88aef475c7",
+    "registrySha256": "97c8c0d0bf42d820c3440cf6af14a9763939580c6b82b2e6c7032e6aecb179b0"
   }
 }

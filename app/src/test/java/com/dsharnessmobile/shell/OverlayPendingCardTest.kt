@@ -133,15 +133,23 @@ class OverlayPendingCardTest {
 
   @Test
   fun `安装权限缺失时按钮必须复原为可点`() {
-    val code = codeOnly(source("GuidePageRenderer.kt"))
-    assertTrue("必须存在「授权后继续安装」这一可点态", code.contains("ds_apk_grant_install"))
-    val permIdx = code.indexOf("if (!UpdateChecker.canInstall(activity))")
-    assertTrue("必须有权限缺失分支", permIdx >= 0)
-    val body = code.substring(permIdx, (permIdx + 700).coerceAtMost(code.length))
-    assertTrue("权限缺失分支必须把按钮复原为可点", body.contains("enabled = true"))
-    val settleIdx = code.indexOf("fun settlePendingInstall()")
-    val settle = code.substring(settleIdx, (settleIdx + 600).coerceAtMost(code.length))
-    assertTrue("被拒返回后同样要把按钮复原为可点（文案说「再点按钮」就得真能点）", settle.contains("enabled = true"))
+    // 0.14.6 单一真源重构：安装/授权推进迁到 ApkUpdateController，渲染改由 renderApkUpdate 统一负责。
+    // 不变量**没变**（P0-3）：权限缺失时按钮必须是**可点**的「授权后继续安装」，被拒返回后同样可点。
+    val renderer = codeOnly(source("GuidePageRenderer.kt"))
+    assertTrue("必须存在「授权后继续安装」这一可点态", renderer.contains("ds_apk_grant_install"))
+    assertTrue("需授权相位必须渲染为可点", renderer.contains("STATE_NEED_PERMISSION"))
+    val permIdx = renderer.indexOf("STATE_NEED_PERMISSION")
+    val permBody = renderer.substring(permIdx, (permIdx + 400).coerceAtMost(renderer.length))
+    assertTrue("权限缺失分支必须把按钮复原为可点", permBody.contains("enabled = true"))
+
+    val controller = codeOnly(source("ApkUpdateAction.kt"))
+    val canIdx = controller.indexOf("if (!UpdateChecker.canInstall(activity))")
+    assertTrue("必须有权限缺失分支", canIdx >= 0)
+    val canBody = controller.substring(canIdx, (canIdx + 900).coerceAtMost(controller.length))
+    assertTrue("权限缺失必须拉起授权页并如实回报是否拉起", canBody.contains("requestInstallPermission(activity)"))
+    assertTrue("拉不起来必须落到如实失败态（不假装拉起过）", canBody.contains("KIND_INSTALLER_UNAVAILABLE"))
+    val settle = controller.substringAfter("fun settleAfterResume()").take(900)
+    assertTrue("被拒返回后必须收敛到可解释终态（不会是永远转圈）", settle.contains("onFailed") || settle.contains("install("))
   }
 
   // ── P0-4：存储授权「点了没反应」 ─────────────────────────────────────────

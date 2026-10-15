@@ -12,7 +12,7 @@
 //   node scripts/check-release-gates.mjs --list               # 打印声明的门禁集合
 //   node scripts/check-release-gates.mjs --run [--snapshot-dir <dir>]   # 顺序执行门禁集（发布链用）
 // 退出码：0 = 通过；1 = 接线缺口 / 门禁失败 / 树定位失败。
-import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join, dirname, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
@@ -46,11 +46,22 @@ const GATES = [
   // 0.14.2 T6：补丁测试的夹具必须与 contract.baseline 同代——夹具停在上一代时「补丁回归」是结构性假绿
   // （rc.1 实测：真树断 9 条而 16 个补丁测试全绿）。
   { script: 'check-patch-fixtures.mjs', ciApk: true, ciCoord: true, needsSnapshot: false },
+  // 0.14.5（上游对齐审计 C-1）：夹具同代**不等于**断言被跑过——26 个补丁回归里此前只有 6 个有入口，
+  // 其余只被 node --check 解析过。本门禁把全部 26 个真的串行跑起来，并对已知失败采用**带理由的显式白名单**：
+  // 存量失败如实记账，任何**新增**失败立刻判红。实测它当场逮到 ptc-android-native-A1 读 fixture 里不存在的 src/*.ts。
+  { script: 'check-patch-test-manifest.mjs', ciApk: true, ciCoord: true, needsSnapshot: false },
   { script: 'check-manifest-hardening.mjs', ciApk: true, ciCoord: false, needsSnapshot: false },
   { script: 'check-bounded-io.mjs', ciApk: true, ciCoord: false, needsSnapshot: false },
   // #222：所有 mobile-owned /api exact/prefix 路由必须在登记表中，并有本地 auth guard 或窄公开白名单。
   { script: 'check-api-route-auth.mjs', ciApk: true, ciCoord: false, needsSnapshot: false },
   { script: 'check-snapshot-fingerprint.mjs', ciApk: true, ciCoord: false, needsSnapshot: true },
+  // 0.14.7 / task-9 D-4：内嵌快照「真的能解压」门禁。输入 = APK 树内嵌 assets/snapshot.tar.xz（构建期就位），
+  // 判据 = 用与设备同一套 streaming 解码器完整解压一遍（两条构建链在 assemble 之后真跑；CI 无 jar 缓存时
+  // 显式 SKIP 计数，发布链 --require 判红）。needsSnapshot=false：它读的是 APK 树内嵌资产，不是 .deploy-tmp 的 tar。
+  // releaseSink=false：**不能**放在发布链的 2f 段（--run）——那一段跑在注入后快照上，而内嵌资产要等
+  // build-apk-engine.mjs assemble 复制进 APK 树才有；在 2f 跑它验的是上一次构建的残留甚至缺席。
+  // 真实执行点是本地链 assemble 之后的 per-ABI 段（见 scripts/build-apk-013.ps1），sink 断言会核验它确实被调用。
+  { script: 'check-snapshot-decode.mjs', ciApk: true, ciCoord: false, needsSnapshot: false, releaseSink: false, sink: 'local-chain' },
   // G.3（0.14.2-fx-2）下沉：它的输入是 plugins/*/lib（源码面产物），**不是发布 tar** ⇒ 留在发布链上
   // 只是把 43.3s 重复付一遍（apk CI 已真跑，见 pr-gate.yml「工具 output.schema」步）。releaseSink:false
   // 只把它从**发布链的 --run 段**移出，声明仍在（不删门禁），由 apk CI 承担执行。
@@ -356,6 +367,75 @@ for (const f of ['scripts/build-release.ps1', 'scripts/build-apk-013.ps1']) {
     broken.join(' | '))
 }
 
+// ── 3a-1. 公共库模块必须有真实消费者（0.14.8 D-6 补线）────────────────────────
+// 真因（本轮实锤）：scripts/lib/tar-extract-cache.mjs 立项于 0.14.2-fx-2 G.3（「12 条门禁各自解
+// 同一个 148MB 快照、合计 411.5 s」），134 行 + 13 单测 + 1 集成测试全绿，**消费者数为 0**——
+// 上线两个版本无人发现，因为「模块自带测试全绿」看起来与「模块在起作用」没有区别。
+//
+// 为什么现在才查出来（两个盲区叠加）：
+//   · check-patch-mirror 的 MIRROR_TOP 只断言「两仓同版」，不断言「有人用」——0 消费者的模块照样 PASS；
+//   · 唯一的「门禁被调用」断言（3a-2 / 3b）覆盖的是 GATES/RELEASE_GATES 里的**门禁脚本**，
+//     scripts/lib/** 这类**被 import 的基础设施**不在任何断言面上。
+//
+// 判据（结构性的，不是「提到过」）：scripts/lib/*.mjs 的基线名必须至少出现在一个
+//   ① 其他 scripts/*.mjs 或 scripts/**/*.mjs 的 import/from 行里；或
+//   ② 非注释代码行里点名（例：check-build-parallel-cap 断言 lib/shell.mjs 的常量）。
+// 豁免面必须**具名且带理由**（ALLOW_NO_CONSUMER），不得用模式批量放行——豁免表就是这条断言的判别力边界。
+const PUBLIC_LIB = join(ROOT, 'scripts', 'lib')
+const LIB_NO_CONSUMER_ALLOW = {
+  // 目前为空：本条断言上线时 scripts/lib 全部模块都有真实消费者（tar-extract-cache 已退役删除）。
+  // 新增条目必须写明「谁在用 / 为什么现在没有可判定的消费者」，否则等于把断言改松。
+}
+{
+  let libFiles = []
+  try {
+    libFiles = readdirSync(PUBLIC_LIB).filter((f) => f.endsWith('.mjs')).sort()
+  } catch { /* scripts/lib 缺席：由 3a 的可解析面兜底，不在此处判红 */ }
+  if (libFiles.length > 0) {
+    // 扫描面：scripts/ 全树（排除 lib 自身与 tests/，tests 是模块的测试面不是消费者面）。
+    const consumers = []
+    const collect = (dir) => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        if (entry.name === 'node_modules' || entry.name.startsWith('.')) continue
+        const p = join(dir, entry.name)
+        if (entry.isDirectory()) { if (p !== PUBLIC_LIB && entry.name !== 'tests') collect(p); continue }
+        if (entry.isFile() && entry.name.endsWith('.mjs')) consumers.push(p)
+      }
+    }
+    collect(join(ROOT, 'scripts'))
+    const texts = consumers.map((p) => ({ p, lines: readFileSync(p, 'utf8').replace(/\r\n/g, '\n').split('\n') }))
+    const orphans = []
+    for (const f of libFiles) {
+      if (LIB_NO_CONSUMER_ALLOW[f] !== undefined) continue
+      const base = f.replace(/\.mjs$/, '')
+      // 判定：模块名必须出现在**非注释**代码行里，形如 lib/<base>.mjs。两侧真实用法各一：
+      //   import { TAR } from './lib/shell.mjs'          （import 形态）
+      //   const CAP_MODULE = 'scripts/lib/shell.mjs'     （断言形态，check-build-parallel-cap）
+      // 前置字符限定为行首 / ' " ` ( 或 /——避免把 my-lib/x.mjs 这类子串误判成消费者（松断言）。
+      const needle = 'lib/' + base + '.mjs'
+      const refHit = (line) => {
+        let i = line.indexOf(needle)
+        while (i >= 0) {
+          const prev = i === 0 ? '' : line[i - 1]
+          if (prev === '' || prev === '/' || prev === "'" || prev === '"' || prev === '`' || prev === '(') return true
+          i = line.indexOf(needle, i + 1)
+        }
+        return false
+      }
+      const hit = texts.some(({ lines }) => lines.some((l) => {
+        const t = l.trim()
+        if (t.startsWith('//') || t.startsWith('*') || t.startsWith('/*')) return false   // 注释不算消费者
+        return refHit(l)
+      }))
+      if (!hit) orphans.push(f)
+    }
+    check('scripts/lib 公共模块均有真实消费者（' + String(libFiles.length) + ' 个模块，豁免 '
+      + String(Object.keys(LIB_NO_CONSUMER_ALLOW).length) + ' 个）', orphans.length === 0,
+      '零消费者（死基础设施；要么接线，要么按退役流程删除并解除镜像面注册）: ['
+      + orphans.join(', ') + ']　处置先例（退役：删模块 + 解注册镜像面）见 docs/0.14.8-DELIVERY-PLAN-2026-10-14.md §2.2')
+  }
+}
+
 // ── 3a-2. 下沉门的接管方断言（G.3，0.14.2-fx-2）─────────────────────────────
 // 移出发布链 --run 段的门禁**必须**在其声明的 sink 里被真实调用，否则就是「防线静默消失」。
 // 这是下沉动作的安全绳：任何 releaseSink:false 项若没人接管，本断言立刻判红。
@@ -452,16 +532,58 @@ let ran = 0
 // SKIP 合计（ST-31 / ST-16）：逐门禁捕获输出并解析 SKIP=n；发布链（--require）要求合计 = 0。
 let skipTotal = 0
 const perGateSkips = {}
+/**
+ * 逐门禁耗时记账（0.14.8 门禁优化 P1）。
+ *
+ * 为什么需要它：在本次改动之前，全仓关于「门禁多慢」的唯一事实是 2026-09-26 的一次性测量
+ * （发布链 --run 冷跑 322.2s、12 条产物门禁单跑 411.5s）。那组数字既过期（两个月），又是在
+ * 不同机器负载与不同快照下测的，**无法回归**——任何「优化后更快」的说法都只能靠一次性探针。
+ *
+ * 判据口径（避免把测量本身变成噪声源）：
+ *   · 只计**墙钟**（wall-clock），不做 CPU 时间——门禁的痛点就是等待，不是算力；
+ *   · 每条门禁**单独计时**（含其子进程 spawn 与全部输出）；
+ *   · 同时记录该门禁本次的 stdout+stderr 字节数——「耗时 / 产出」比才是优化的判据，
+ *     单独看耗时会把「本来就该慢的活」误判成浪费（实测 check-snapshot-secrets 67.7s 只产出 56 B）。
+ *   · 落盘 JSON 供回归对比，**不参与任何判据**（不设耗时阈值：阈值会把慢机器变成假红）。
+ */
+const gateTimings = []
 const runGate = (argvFor, label) => {
+  const t0 = Date.now()
   const r = spawnSync(process.execPath, argvFor, { cwd: ROOT, encoding: 'utf8', maxBuffer: 128 * 1024 * 1024 })
+  const elapsedMs = Date.now() - t0
   if (r.stdout) process.stdout.write(r.stdout)
   if (r.stderr) process.stderr.write(r.stderr)
   const m = /SKIP=(\d+)/.exec((r.stdout || '') + (r.stderr || ''))
   perGateSkips[label] = m !== null ? Number(m[1]) : 0
   if (m) skipTotal += Number(m[1])
+  const outBytes = Buffer.byteLength(r.stdout || '', 'utf8') + Buffer.byteLength(r.stderr || '', 'utf8')
+  gateTimings.push({ gate: label, ms: elapsedMs, exit: r.status, outBytes })
+  console.log('  [timing] ' + label.padEnd(46) + String(elapsedMs).padStart(8) + ' ms   out=' + outBytes + ' B')
   if (r.status !== 0) {
     console.error('CHECK-RELEASE-GATES FAILED：' + label + ' 退出码 ' + r.status + '，中止组装')
+    writeGateTimings('failed')
     process.exit(1)
+  }
+}
+/**
+ * 落盘逐门禁耗时（供回归对比）。
+ * 位置可用 DSH_GATE_TIMINGS_OUT 覆盖；缺省写到 .deploy-tmp/gate-timings/<时间戳>.json。
+ * 落盘失败**不影响判据**（只打印 WARN）——记账是观测面，不得成为新的失败点。
+ */
+function writeGateTimings(outcome) {
+  try {
+    const out = process.env.DSH_GATE_TIMINGS_OUT
+      || join(ROOT, '.deploy-tmp', 'gate-timings', new Date().toISOString().replace(/[:.]/g, '-') + '.json')
+    mkdirSync(dirname(out), { recursive: true })
+    const totalMs = gateTimings.reduce((s, g) => s + g.ms, 0)
+    const totalOut = gateTimings.reduce((s, g) => s + g.outBytes, 0)
+    writeFileSync(out, JSON.stringify({
+      at: new Date().toISOString(), outcome, strict: STRICT, snapshotDir: snapshotDir ?? null,
+      abis, totalMs, totalOutBytes: totalOut, gates: gateTimings,
+    }, null, 2))
+    console.log('  [timing] 合计 ' + totalMs + ' ms / ' + gateTimings.length + ' 条门禁，输出 ' + totalOut + ' B -> ' + relative(ROOT, out).replace(/\\/g, '/'))
+  } catch (e) {
+    console.log('  [timing] WARN 耗时记账落盘失败（不影响判据）：' + String(e && e.message).slice(0, 120))
   }
 }
 const snapshotTar = (abi) => join(resolve(snapshotDir), 'snapshot-' + abi + '.tar.xz')
@@ -479,6 +601,10 @@ for (const gate of RELEASE_GATES) {
   // （绝不冒充绿）。四条调用点已同改为默认档，本聚合入口与它们口径一致。
   // 注意：这里**不自动加 `--require-real`**——构建机/CI 无设备，强加会让发布链必然失败；
   // 「发布前必须在设备上真检」由设备门禁显式跑 `--require-real`（无产物即判红）承担。
+  // 内嵌快照可解压门禁（0.14.7 / task-9 D-4）：输入是 **APK 树内嵌** assets/snapshot.tar.xz。
+  // 发布链这里有一个时序陷阱：2f 段（--run --require）跑在「注入后快照」上，而内嵌资产要等
+  // build-apk-engine.mjs assemble 复制进去才有；本聚合入口若在那段跑，验的是**上一次**构建的残留。
+  // 故：严格档显式要求内嵌资产在场（缺席即判红，不得以 SKIP 结案）；非严格档按其自身计数 SKIP。
   if (gate === 'check-boot-budget.mjs') {
     runGate([join('scripts', gate)], gate + '(real-or-skip)')
     ran += 1
@@ -582,3 +708,6 @@ if (STRICT && overBudget.length > 0) {
 // 用 ALL_GATES.length 作分母会把已下沉的门禁算成「没执行」，读日志的人会误判成漏跑。
 console.log('CHECK-RELEASE-GATES --run PASSED（已执行 ' + ran + '/' + RELEASE_GATES.length + ' 项（发布段），SKIP=' + skipTotal
   + '；另有 ' + RELEASE_EXCLUDED.length + ' 项已下沉、不在本段：' + RELEASE_EXCLUDED.map((g) => g.script + '->' + g.sink).join(', ') + '）')
+// 0.14.8 P1：成功路径也落盘耗时（失败路径已在 runGate 内落盘）。
+writeGateTimings('passed')
+

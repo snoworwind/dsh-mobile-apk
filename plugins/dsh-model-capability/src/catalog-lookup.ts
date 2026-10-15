@@ -39,6 +39,8 @@ export interface CatalogSnapshot {
 }
 
 export interface CatalogCapabilities {
+  /** Only set when every matching catalog row names the same protocol. */
+  api?: string
   reasoningEfforts?: ReasoningEfforts
   input?: Modality[]
   contextWindow?: number
@@ -48,15 +50,49 @@ export interface CatalogCapabilities {
 
 export interface CatalogMatch {
   id: string
-  /** Provider ids whose catalog declares this exact model id. */
+  /** Provider ids whose catalog declares the matched model id. */
   providers: string[]
   /** Fields every declaring entry agrees on. */
   capabilities: CatalogCapabilities
   /** Human-readable disagreement notes; an empty list means unanimous. */
   conflicts: string[]
+  /**
+   * How [id] reached its entries. `not-found` and `ambiguous` both deliver no
+   * capabilities, and are distinct so a caller can report why.
+   */
+  resolution: CatalogResolution
+  /**
+   * Folded-tier candidates when {@link CatalogResolution} is `ambiguous`: the
+   * catalog keys that collided, sorted. Empty otherwise.
+   */
+  ambiguousIds: string[]
 }
 
+/**
+ * How a model id resolved to catalog entries.
+ *
+ * The tiers are ordered and stop at the first that yields candidates: an exact
+ * id is never normalized, because folding an id that is already an exact key can
+ * only turn a decidable lookup into an ambiguous one.
+ */
+export type CatalogResolution =
+  /** L1: the id is a catalog key verbatim. */
+  | 'exact'
+  /** L2: exactly one catalog key equals the id case-insensitively. */
+  | 'case-folded'
+  /** L3: exactly one catalog key equals the id after folding case and separators. */
+  | 'separator-folded'
+  /** L4: the id names no catalog key. */
+  | 'not-found'
+  /** L2/L3 found more than one candidate, so no entry is privileged. */
+  | 'ambiguous'
+
 const KNOWN_MODALITIES: Modality[] = ['text', 'image', 'audio', 'pdf']
+
+/** L3 normalization: case folded, then `- _ . / ` and spaces removed. */
+function foldSeparators(id: string): string {
+  return id.toLowerCase().replace(/[-_.\/\s]+/g, '')
+}
 
 function toModality(value: unknown): Modality | undefined {
   if (typeof value !== 'string') return undefined
@@ -98,17 +134,80 @@ function keyOf(value: unknown): string {
 }
 
 /**
+ * Resolve one model id to the catalog key(s) that describe it, in four ordered
+ * tiers that stop at the first with candidates.
+ *
+ * L1 is a verbatim key lookup, so the overwhelming majority of ids resolve
+ * without normalization. L2 folds case and L3 additionally folds the separators
+ * vendors disagree about (`-`, `_`, `.`, `/`, space); each is used only when it
+ * leaves **exactly one** candidate. More than one is ambiguity, not a tie to
+ * break: the folded keys here carry genuinely different capabilities (measured
+ * 2026-10-11: 37 of the 1046 shipped keys collide on case alone), and a wrong
+ * reasoning level or modality is written into the user's configuration where
+ * nothing surfaces it. Folding separators adds further collisions on top, which
+ * the same rule discards.
+ *
+ * `Object.hasOwn` rather than a plain index: model ids are user-controlled
+ * strings, and a bare `models[id]` returns inherited `Object.prototype`
+ * members for ids like `constructor` (measured: a `TypeError` from calling
+ * `.filter` on a function). Such an id names no catalog entry.
+ *
+ * @param models - the snapshot's id-keyed entry table.
+ * @param id - the model id as the user declared it.
+ * @returns the matched key and tier, or the reason none was used.
+ */
+function resolveCatalogKey(
+  models: Record<string, CatalogEntry[]>,
+  id: string,
+): { key: string; resolution: CatalogResolution } | { resolution: CatalogResolution; candidates: string[] } {
+  if (Object.hasOwn(models, id)) return { key: id, resolution: 'exact' }
+  const keys = Object.keys(models)
+  const fold = id.toLowerCase()
+  const caseHits = keys.filter((key) => key.toLowerCase() === fold)
+  if (caseHits.length === 1) return { key: caseHits[0], resolution: 'case-folded' }
+  if (caseHits.length > 1) return { resolution: 'ambiguous', candidates: caseHits.sort() }
+  const bare = foldSeparators(id)
+  // An id of only separators folds to nothing, which would otherwise match a key
+  // that also folds to nothing: that is a name with no content, not a model.
+  if (bare === '') return { resolution: 'not-found', candidates: [] }
+  const separatorHits = keys.filter((key) => foldSeparators(key) === bare)
+  if (separatorHits.length === 1) return { key: separatorHits[0], resolution: 'separator-folded' }
+  if (separatorHits.length > 1) return { resolution: 'ambiguous', candidates: separatorHits.sort() }
+  return { resolution: 'not-found', candidates: [] }
+}
+
+/**
  * Looks one model id up across the snapshot. When [api] is given, only entries
- * for that wire family are considered (a hand-declared route may name its api).
+ * explicitly describing that wire family are considered; an absent API cannot
+ * safely inherit protocol-specific serialization data.
+ *
+ * The id is resolved to a catalog key before [api] filters rows, so a protocol
+ * mismatch still reports the resolution it reached (`providers` stays empty)
+ * rather than silently implying the id is unknown.
  */
 export function lookupCatalog(snapshot: CatalogSnapshot | undefined, id: string, api?: string): CatalogMatch {
-  const match: CatalogMatch = { id, providers: [], capabilities: {}, conflicts: [] }
+  const match: CatalogMatch = { id, providers: [], capabilities: {}, conflicts: [], resolution: 'not-found', ambiguousIds: [] }
   if (!snapshot?.models) return match
-  const entries = (snapshot.models[id] ?? []).filter((entry) => {
+  const resolved = resolveCatalogKey(snapshot.models, id)
+  if ('candidates' in resolved) {
+    match.resolution = resolved.resolution
+    match.ambiguousIds = resolved.candidates
+    if (resolved.candidates.length > 0) {
+      match.conflicts.push(`目录中 ${resolved.candidates.length} 个大小写/分隔符变体同时命中（${resolved.candidates.join(' / ')}），身份不确定——不采用任何一条`)
+    }
+    return match
+  }
+  match.resolution = resolved.resolution
+  const entries = snapshot.models[resolved.key].filter((entry) => {
     if (!api) return true
-    return entry.api === undefined || entry.api === api
+    return entry.api === api
   })
   if (entries.length === 0) return match
+  const apis = [...new Set(entries.map((entry) => entry.api).filter((value): value is string => typeof value === 'string'))]
+  const hasMissingApi = entries.some((entry) => typeof entry.api !== 'string')
+  if (api !== undefined) match.capabilities.api = api
+  else if (apis.length === 1 && !hasMissingApi) match.capabilities.api = apis[0]
+  else if (apis.length > 1 || hasMissingApi) match.conflicts.push(`api conflict: ${apis.join('/') || 'unknown'}`)
   match.providers = entries.map((entry) => entry.provider)
 
   const unanimous = <T>(values: Array<T | undefined>, label: string): T | undefined => {

@@ -73,6 +73,43 @@ function audit(fixturesDir, testsDir, baseline, sourceCommit = null, registry = 
       }
     } else if (meta.source === 'synthetic') {
       if (!String(meta.reason ?? '').trim()) out.push(`合成夹具必须写明 reason（为什么不用真产物）: ${dir}`)
+    } else if (meta.source === 'runtime-capture') {
+      if (meta.engine !== baseline) out.push(`运行时夹具未随版: ${dir} engine=${meta.engine} != contract.baseline=${baseline}`)
+      const files = meta.files ?? []
+      if (!files.length || new Set(files).size !== files.length) out.push('运行时夹具文件集为空/重复: ' + dir)
+      for (const f of files) {
+        if (typeof f !== 'string' || f.startsWith('/') || f.includes('\\') || f.split('/').some(part => part === '..' || part === '.')) {
+          out.push('运行时夹具文件路径不安全: ' + dir + '/' + f); continue
+        }
+        const path = join(fixturesDir, dir, f)
+        if (!existsSync(path)) out.push('夹具文件缺席: ' + dir + '/' + f)
+        else if (meta.fileSha256?.[f] !== sha256(readFileSync(path))) out.push('夹具文件实际 hash 与捕获记录不符: ' + dir + '/' + f)
+      }
+      if (!files.includes('package.json')) out.push('运行时夹具缺包身份清单: ' + dir)
+      else if (existsSync(join(fixturesDir, dir, 'package.json'))) {
+        const pkg = JSON.parse(readFileSync(join(fixturesDir, dir, 'package.json'), 'utf8'))
+        if (meta.package !== pkg.name + '@' + pkg.version || pkg.version !== baseline) out.push('运行时夹具包身份/版本与台账不符: ' + dir)
+      }
+      const provenance = meta.provenance ?? {}
+      const safeLocalPath = path => typeof path === 'string' && path.length > 0 && !path.startsWith('/')
+        && !path.includes('\\') && !path.split('/').some(part => part === '..' || part === '.')
+      for (const [label, path, digest] of [
+        ['captureRecord', provenance.captureRecord, provenance.captureRecordSha256],
+        ['evidence', provenance.evidence, provenance.evidenceSha256],
+      ]) {
+        if (!safeLocalPath(path) || !files.includes(path)) { out.push(`运行时夹具 ${label} 路径不安全/未登记: ${dir}`); continue }
+        const absolute = join(fixturesDir, dir, path)
+        if (!existsSync(absolute) || digest !== sha256(readFileSync(absolute)) || meta.fileSha256?.[path] !== digest) {
+          out.push(`运行时夹具 ${label} 文件/hash 不符: ${dir}`)
+        }
+      }
+      if (safeLocalPath(provenance.captureRecord) && existsSync(join(fixturesDir, dir, provenance.captureRecord))) {
+        const record = JSON.parse(readFileSync(join(fixturesDir, dir, provenance.captureRecord), 'utf8'))
+        if (record.engine !== meta.engine || record.package !== meta.package || !files.includes(record.capturedFile)
+          || record.sourceSha256 !== meta.fileSha256?.[record.capturedFile]) {
+          out.push(`运行时夹具捕获凭据与包/源码 hash 不符: ${dir}`)
+        }
+      }
     } else if (meta.source === 'superseded') {
       // 上一代夹具：只允许作为「等删除」的登记项存在，任何测试再引用它就是假绿回归。
       if (!String(meta.reason ?? '').trim()) out.push(`代弃夹具必须写明 reason: ${dir}`)
@@ -105,7 +142,7 @@ function audit(fixturesDir, testsDir, baseline, sourceCommit = null, registry = 
       targets = [...discovered, ...(patch.additionalTargets ?? [])]
     }
     for (const target of targets) {
-      const captured = Object.values(declared).filter(meta => meta.source === 'engine-tgz' && meta.engine === baseline
+      const captured = Object.values(declared).filter(meta => ['engine-tgz', 'runtime-capture'].includes(meta.source) && meta.engine === baseline
         && Object.entries(meta.targets ?? {}).some(([inner, capturedTarget]) => capturedTarget === target && meta.files?.includes(inner)))
       if (captured.length !== 1) out.push('登记补丁目标必须恰有一份当前真夹具: ' + patch.id + ' ' + target)
     }

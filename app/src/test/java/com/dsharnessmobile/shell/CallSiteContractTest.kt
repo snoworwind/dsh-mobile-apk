@@ -606,8 +606,10 @@ class BootDiagnosticsContractTest {
   @Test
   fun webViewVersionIsReadBack() {
     val code = codeOnly(source("MainActivity.kt"))
-    assertTrue("§2.4：必须读内核包", code.contains("WebView.getCurrentWebViewPackage()"))
+    assertTrue("§2.4：必须经 shim 读内核版本", code.contains("WebViewShim.providerVersionName()"))
     assertTrue("§2.4：必须解析 major", code.contains("currentWebViewMajor()"))
+    // 原始调用收进 shim（单面真源）：MainActivity 不得再自带 getCurrentWebViewPackage 副本。
+    assertFalse("§2.4：provider 回读不得散在各调用点", code.contains("getCurrentWebViewPackage"))
   }
 
   /** §2.4：版本必须落 webview-version 诊断（落盘面）。 */
@@ -655,6 +657,90 @@ class BootDiagnosticsContractTest {
    * 该函数依赖 `Context`（`context.filesDir` / `context.assets`），纯 JVM 行为测试拿不到，
    * 故按本类口径断言**真源表达式**；撤掉守卫即红。
    */
+  /**
+   * D3（0.14.6）：安全模式启动必须**先停本壳托管的旧引擎**再走启动流。
+   *
+   * 缺陷形态（真机）：enterSafeMode 此前只调 activity.startEngineFlow()，而那条路先探活、
+   * 探到旧引擎仍在就 early-return 并 showWeb()——从不经过 EngineManager.startEngine，
+   * 于是两道既有闸门（快照新鲜度 / live 树完整性）一次都不执行，旧进程继续服务**旧 manifest**
+   * （含刚被摘掉的第三方插件条目），页面再次报同样的失败并连环报错，安全模式根本没生效。
+   * 这是 0.14.4 已修的 DEVICE-FINDING-3 的同族形态（startEngine 不带 force ⇒ 早退 ⇒ 旧清单）。
+   *
+   * 该缺陷纯 JVM 行为测试覆盖不到（要 Activity/Context 真跑一次启动流），故按本类口径断言源码契约：
+   * 撤掉这次改动（把调用点换回 startEngineFlow()）即红。
+   */
+  @Test
+  fun safeModeRestartStopsTheOwnedEngineBeforeStarting() {
+    val renderer = codeOnly(source("GuidePageRenderer.kt"))
+    val tail = memberBody(renderer, "private fun enterSafeMode()")
+    assertTrue(
+      "D3：安全模式的重启动作必须走 restartOwnedEngineForSafeMode()（先停旧引擎再启动）",
+      tail.contains("activity.engineFlow.restartOwnedEngineForSafeMode()"),
+    )
+    assertFalse(
+      "D3：不得退回裸 startEngineFlow()——旧引擎仍在时它会 early-return，安全模式不生效",
+      tail.contains("activity.startEngineFlow()"),
+    )
+    // 真源表达式：先停、再启；且停止失败不得继续 spawn。
+    val flow = codeOnly(source("EngineStartFlow.kt"))
+    val body = memberBody(flow, "private fun performSafeModeRestart()")
+    assertTrue(
+      "D3：必须先调用 stopOwnedEngine()（只停本壳持有句柄的子进程）",
+      body.contains("engine.stopOwnedEngine()"),
+    )
+    assertTrue(
+      "D3：停失败/未归属时必须收口返回，不得继续 spawn",
+      body.contains("if (!stopped)") && body.contains("safe-mode-restart-not-owned"),
+    )
+    assertTrue(
+      "D3：停成功后必须归零重试计数与刷新账本（与手动重试同口径）",
+      body.contains("engineRetryCount = 0") && body.contains("clearRefreshLedger()"),
+    )
+    assertTrue(
+      "D3：判据必须走纯函数 safeModeRestartDecision（可 JVM 反证）",
+      body.contains("safeModeRestartDecision("),
+    )
+    // 放行面/拒绝面的如实文案（D4/D5）住在 applySafeModeRestartHint，不在本线程体里——
+    // 故作独立的成员体断言，避免把「取错函数体」当成判据失败（本次我自己踩过一次）。
+    val hintBody = memberBody(flow, "private fun applySafeModeRestartHint(")
+    assertTrue(
+      "D3：放行面切 Starting 相位（不是任何就绪态）",
+      hintBody.contains("GuidePhase.Starting"),
+    )
+    assertTrue(
+      "D3：放行面必须给如实文案（safeModeRestartHint）",
+      hintBody.contains("safeModeRestartHint(decision)"),
+    )
+    assertTrue(
+      "D3：拒绝面停在可读错误页（Error 相位保留安全模式出口）",
+      hintBody.contains("GuidePhase.Error"),
+    )
+  }
+
+  /**
+   * D3 的第二条反证：判据与动作**不得**在 UI 线程上原地执行。
+   *
+   * liveRuntimeComplete() 要遍历运行时树（文件系统 IO）、stopOwnedEngine() 内含最长 1s 探活；
+   * enterSafeMode 的 postDelayed 回调运行在主线程上，原地调用就是一条真实 ANR 路径。
+   */
+  @Test
+  fun safeModeRestartLeavesTheUiThread() {
+    val flow = codeOnly(source("EngineStartFlow.kt"))
+    val entry = memberBody(flow, "internal fun restartOwnedEngineForSafeMode()")
+    assertTrue(
+      "D3：阻塞的判据与停止动作必须搬离 UI 线程（daemon Thread）",
+      entry.contains("Thread {") && entry.contains("isDaemon = true"),
+    )
+    assertTrue(
+      "D3：线程体必须是独立的 performSafeModeRestart()，不在 UI 线程上直接执行",
+      entry.contains("performSafeModeRestart()"),
+    )
+    assertFalse(
+      "D3：入口方法本身不得直接调用阻塞的 liveRuntimeComplete()/stopOwnedEngine()",
+      entry.contains("liveRuntimeComplete()") || entry.contains("stopOwnedEngine()"),
+    )
+  }
+
   @Test
   fun phoneControlSeedingToleratesAnAbsentSkillFile() {
     val body = memberBody(

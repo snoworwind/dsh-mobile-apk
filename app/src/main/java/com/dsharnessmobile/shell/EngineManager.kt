@@ -75,6 +75,7 @@ class EngineManager(private val context: Context, private val pickToken: String?
     }
   }
 
+
   /** Read once per manager; missing/invalid metadata is an explicit packaging failure, not freshness. */
   private val bundledSnapshotFingerprint by lazy {
     val raw = try {
@@ -91,6 +92,32 @@ class EngineManager(private val context: Context, private val pickToken: String?
   internal fun snapshotFingerprintProblem(): SnapshotFingerprintPolicy.Bundled? =
     bundledSnapshotFingerprint.takeIf { it.failureCode != null }
 
+  /**
+   * 0.14.7 / task-9：**解码之前的**内嵌资产摘要预检。
+   *
+   * 为什么必须有（与 D-1 是互补的两条，不能互相取代）：
+   *  - D-1 记的是「预检通过、解码仍失败」时那条 CorruptedInputException 的全栈（真因在解码器内部）；
+   *  - 本预检记的是「连字节都对不上声明值」——它把真因从解码器内部提到**输入本身**，并给出
+   *    expected/actual/bytes 三项，使下一次真机失败在 boot-fail.log 里自证，
+   *    不必再连设备 pull base.apk 做字节比对。
+   *
+   * 成本纪律：**流式**读 + 固定 64KB 缓冲，既不一次性读进内存（194MB），也不解码（只需一遍顺序 IO）。
+   * 返回 null 表示「预检通过或声明值不可用」——声明值缺失/非法已由 [snapshotFingerprintProblem] 归类，此处不重复判。
+   */
+  private fun bundledAssetDigestProblem(): Pair<String, String>? {
+    val declared = bundledFingerprint().takeIf { it.isNotEmpty() } ?: return null
+    val actual = try {
+      SnapshotBundledAsset.digest(open = { context.assets.open(BUNDLED_SNAPSHOT_ASSET) })
+    } catch (t: Throwable) {
+      // 连资产都打不开：这不是解码器报错，而是资产缺席/不可读，必须与「摘要不一致」分开归类。
+      Log.e(TAG, "bundled snapshot asset could not be read for digest precheck", t)
+      return SnapshotBundledAsset.CODE_UNREADABLE to
+        ("内嵌运行时快照资产无法读取（" + BUNDLED_SNAPSHOT_ASSET + "）：" + t.javaClass.name + ": "
+          + (t.message ?: "无消息") + "。本次解码未开始即被拦下，现有用户数据未改动。")
+    }
+    return SnapshotBundledAsset.verdict(declared, actual)
+  }
+
   private fun bundledFingerprint(): String = bundledSnapshotFingerprint.fingerprint.orEmpty()
 
   private fun fingerprintFile(): File = File(context.filesDir, ".snapshot-fingerprint")
@@ -100,11 +127,30 @@ class EngineManager(private val context: Context, private val pickToken: String?
    * Upgrade lesson (v0.10.5→v0.10.6): engineReady only checked node existence, so an upgrade never
    * re-extracted → old plugins kept running (injection-guard fixes etc. never took effect).
    */
-  fun snapshotFresh(): Boolean = SnapshotFingerprintPolicy.fresh(
-    nodeExists = nodeBin.exists(),
-    bundled = bundledSnapshotFingerprint,
-    committed = liveFingerprint(),
-  )
+  fun snapshotFresh(): Boolean {
+    val committed = liveFingerprint()
+    if (SnapshotFingerprintPolicy.fresh(nodeBin.exists(), bundledSnapshotFingerprint, committed)) return true
+    // Compatibility for an online update created before purpose-aware transaction markers existed.
+    // The pending marker plus preserved usr-old is its only on-disk probation evidence.
+    if (nodeBin.exists() && File(context.filesDir, ".update-pending").exists() &&
+      SnapshotFs.exists(File(context.filesDir, "usr-old"))) return true
+    val online = readOnlineSnapshotIdentity()
+    return SnapshotFingerprintPolicy.onlineFresh(
+      nodeBin.exists(), bundledFingerprint(), committed, online?.first, online?.second,
+    )
+  }
+
+  private fun readOnlineSnapshotIdentity(): Pair<String, String>? {
+    return try {
+      val fields = File(context.filesDir, ONLINE_SNAPSHOT_NAME).readLines()
+        .mapNotNull { line -> line.indexOf('=').takeIf { it > 0 }?.let { line.substring(0, it) to line.substring(it + 1) } }
+        .toMap()
+      val base = fields["base"] ?: return null
+      val archive = fields["archive"] ?: return null
+      if (!Regex("[0-9a-fA-F]{64}").matches(base) || !Regex("[0-9a-fA-F]{64}").matches(archive)) return null
+      base.lowercase(java.util.Locale.ROOT) to archive.lowercase(java.util.Locale.ROOT)
+    } catch (_: Throwable) { null }
+  }
 
   /**
    * Upgrade/snapshot change: extract the embedded snapshot into a staging directory, then
@@ -156,10 +202,14 @@ class EngineManager(private val context: Context, private val pickToken: String?
     onStage: (String) -> Unit = {},
   ): Boolean {
     val filesDir = context.filesDir
+    if (!beginSnapshotTransaction()) {
+      lastRefreshFailure = IllegalStateException("another runtime transaction is already in progress")
+      lastRefreshFailureCode = "snapshot-transaction-in-flight"
+      return false
+    }
     val fingerprint = bundledFingerprint()
     val startedAt = System.currentTimeMillis()
     val stage = SnapshotTransaction.stageRoot(filesDir)
-    EngineManager.snapshotRefreshing.set(true)
     try {
       onStage("正在检查上次更新…")
       applyRecovery(SnapshotTransaction.recover(filesDir, stage, usrDir, homeDir))
@@ -190,20 +240,54 @@ class EngineManager(private val context: Context, private val pickToken: String?
           Log.e(TAG, "snapshot refresh aborted: unusable staging residue at " + stage.absolutePath
             + " -> " + discarded.joinToString(", "))
           onStage("上次更新的残留目录无法清理，请清应用数据后重试")
+          // D-1：这条 return false 同样是「只有布尔值」的静默失败支（旧实现只 onStage 一句文案，
+          // 真因 = 哪些条目删不掉、哪些条目改名挪不开，全部只存在于 logcat）。
+          lastRefreshFailure = SnapshotFsException(
+            CODE_STAGE_RESIDUE, emptyList(),
+            "上次更新的残留目录既删不掉也移不开（stage=" + stage.absolutePath + "，未删除项="
+              + discarded.joinToString(", ") + "）；现有用户数据未改动，需清理应用数据后重试。",
+          )
+          lastRefreshFailureCode = CODE_STAGE_RESIDUE
           return false
         }
         Log.w(TAG, "snapshot refresh: residue stage moved aside to " + orphan.name
           + " -> " + discarded.joinToString(", "))
       }
       SnapshotFs.createDirectories(stage)
-      if (!extractSnapshotTo(stage, onProgress)) {
+      // 0.14.7 / task-9：**摘要预检**必须在解码之前。理由见 [bundledAssetDigestProblem]：
+      // 没有它时，资产字节损坏的唯一线索是解码器内部的 CorruptedInputException（真因在解码器里，
+      // 输入本身对不上声明值这件事反而看不见）；有了它，boot-fail.log 直接给出 expected/actual/bytes。
+      bundledAssetDigestProblem()?.let { (code, detail) ->
+        Log.e(TAG, "snapshot refresh refused before decoding: " + code + " -> " + detail)
+        onStage(detail)
+        lastRefreshFailure = SnapshotFsException(code, emptyList(), detail)
+        lastRefreshFailureCode = code
         SnapshotFs.deletePath(stage)
-        Log.e(TAG, "snapshot refresh: extract failed; live runtime untouched")
         return false
       }
-      if (!stagedRuntimeComplete(stage)) {
-        SnapshotFs.deletePath(stage)
-        Log.e(TAG, "snapshot refresh: staged runtime incomplete; live runtime untouched")
+      if (!SnapshotRefreshStage.extractAndValidate(
+          stage,
+          extract = { extractSnapshotTo(it, onProgress) },
+          validate = ::stagedRuntimeComplete,
+        )) {
+        Log.e(TAG, "snapshot refresh: extraction failed or staged runtime incomplete; live runtime untouched")
+        // 【0.14.7 / task-9 D-1】解压/校验以布尔值回报失败时，**真因必须有人写**。
+        // 旧实现只在这里 return false：extractSnapshotTo 的 catch 只写了 Log.e（易失的 logcat），
+        // 异常对象从未挂到 lastRefreshFailure ⇒ 调用方（EngineStartFlow:863-864）只能拿到 null
+        // ⇒ boot-fail.log 落成 error=none(boolean-failure-path)、stack=none，排障者拿不到真因。
+        // 现在由 extractSnapshotTo 负责把异常挂上（它同时覆盖「校验失败」这一支）。
+        if (lastRefreshFailure == null) {
+          val missing = RuntimeTree.missingEntries(
+            root = File(stage, "usr"),
+            profileDir = File(stage, "home/.dsh/profiles/web"),
+          )
+          lastRefreshFailure = SnapshotFsException(
+            SnapshotBundledAsset.CODE_STAGE_INCOMPLETE, emptyList(),
+            "内嵌运行时快照解压完成但 staged 运行时缺件（missing=" + missing.joinToString(", ")
+              + "）；本次未换树，现有用户数据未改动。",
+          )
+          lastRefreshFailureCode = SnapshotBundledAsset.CODE_STAGE_INCOMPLETE
+        }
         return false
       }
 
@@ -277,7 +361,7 @@ class EngineManager(private val context: Context, private val pickToken: String?
       }
       return false
     } finally {
-      EngineManager.snapshotRefreshing.set(false)
+      endSnapshotTransaction()
     }
   }
 
@@ -411,6 +495,11 @@ class EngineManager(private val context: Context, private val pickToken: String?
   var pendingRecoveryFailure: String? = null
     private set
 
+  internal fun snapshotRecoveryBlocksRuntime(): Boolean = SnapshotRecoveryNotice.blocksRuntimeStart(
+    pendingRecoveryFailure,
+    SnapshotTransaction.readMarker(context.filesDir) != null,
+  )
+
   /**
    * Resolves a transaction interrupted by a kill, an OEM cleaner or a low-memory restart.
    * Cheap when nothing is pending (one stat) and safe to call on every start.
@@ -420,11 +509,12 @@ class EngineManager(private val context: Context, private val pickToken: String?
    */
   fun recoverInterruptedRefresh() {
     // Another refresh/recovery owns the stage/previous trees right now: never race it.
-    if (!EngineManager.snapshotRefreshing.compareAndSet(false, true)) return
+    if (!beginSnapshotTransaction()) return
     // 提到 try 之外：catch 里要用它做「marker 是否真的还在」的对账（0.14.1 块K ②）。
     val filesDir = context.filesDir
     try {
       val marker = SnapshotTransaction.readMarker(filesDir)
+      if (onlineUpdateActive.get()) return
       if (marker == null) {
         // No marker: only a stale stage directory can survive (a rollback that was
         // interrupted before it deleted the stage).
@@ -466,8 +556,28 @@ class EngineManager(private val context: Context, private val pickToken: String?
         }
       }
     } finally {
-      EngineManager.snapshotRefreshing.set(false)
+      endSnapshotTransaction()
     }
+  }
+
+  private fun beginSnapshotTransaction(): Boolean = synchronized(EngineManager.transactionStateLock) {
+    SnapshotTransaction.canBeginFactoryTransaction(snapshotRefreshing.get(), onlineUpdateActive.get()) &&
+      snapshotRefreshing.compareAndSet(false, true)
+  }
+
+  private fun endSnapshotTransaction() = synchronized(EngineManager.transactionStateLock) {
+    snapshotRefreshing.set(false)
+  }
+
+  internal fun beginOnlineUpdateTransaction(): Boolean = synchronized(EngineManager.transactionStateLock) {
+    SnapshotTransaction.canBeginOnlineTransaction(
+      factoryBusy = snapshotRefreshing.get(),
+      onlineBusy = onlineUpdateActive.get(),
+      markerPresent = SnapshotTransaction.readMarker(context.filesDir) != null,
+      previousRuntimePresent = SnapshotFs.exists(SnapshotTransaction.previousRoot(context.filesDir)),
+      stageResiduePresent = SnapshotFs.exists(SnapshotTransaction.stageRoot(context.filesDir)),
+    ) &&
+      onlineUpdateActive.compareAndSet(false, true)
   }
 
   private fun applyRecovery(recovery: SnapshotTransaction.Recovery) {
@@ -482,12 +592,24 @@ class EngineManager(private val context: Context, private val pickToken: String?
         Log.w(TAG, "interrupted refresh discarded (staged runtime was never activated)")
       }
       SnapshotTransaction.Outcome.ROLLED_BACK -> {
+        if (recovery.fingerprintToRestore != null) {
+          writeFingerprint(recovery.fingerprintToRestore)
+          File(context.filesDir, ".update-pending").delete()
+          File(context.filesDir, ".update-pending-at").delete()
+          onlineUpdateActive.set(false)
+        }
         Log.w(TAG, "interrupted refresh rolled back to the previous factory runtime")
       }
       SnapshotTransaction.Outcome.ROLLED_FORWARD -> {
         val fingerprint = recovery.fingerprintToCommit
         if (!fingerprint.isNullOrEmpty()) writeFingerprint(fingerprint)
+        if (recovery.onlineUpdateCommit && !fingerprint.isNullOrEmpty()) {
+          writeOnlineSnapshotIdentity(bundledFingerprint(), fingerprint)
+          File(context.filesDir, ".update-pending").delete()
+          File(context.filesDir, ".update-pending-at").delete()
+        }
         SnapshotTransaction.finish(context.filesDir)
+        if (recovery.onlineUpdateCommit) onlineUpdateActive.set(false)
         Log.w(TAG, "interrupted refresh completed (runtime was already activated)")
       }
       // 【D-3 / 审查 §7.7.5】回滚未完整落地：marker **已保留**（下次启动先重试），
@@ -558,6 +680,22 @@ class EngineManager(private val context: Context, private val pickToken: String?
       target.writeText(fingerprint)
       SnapshotFs.deletePath(tmp)
     }
+  }
+
+  private fun writeOnlineSnapshotIdentity(base: String, archive: String) {
+    val target = File(context.filesDir, ONLINE_SNAPSHOT_NAME)
+    val tmp = File(context.filesDir, ONLINE_SNAPSHOT_NAME + ".tmp")
+    tmp.writeText("base=$base\narchive=$archive\n")
+    SnapshotFs.move(tmp, target)
+  }
+
+  private fun commitOnlineUpdateIfPending(): Boolean {
+    val markerFile = SnapshotTransaction.markerFile(context.filesDir)
+    val marker = SnapshotTransaction.readMarker(context.filesDir) ?: return false
+    if (marker.purpose != SnapshotTransaction.Purpose.ONLINE_UPDATE || marker.phase != SnapshotTransaction.Phase.SWAPPED) return false
+    SnapshotTransaction.writeMarker(context.filesDir, marker.copy(phase = SnapshotTransaction.Phase.ONLINE_COMMITTED))
+    applyRecovery(SnapshotTransaction.recover(context.filesDir, SnapshotTransaction.stageRoot(context.filesDir), usrDir, homeDir))
+    return !SnapshotFs.exists(markerFile)
   }
 
   /**
@@ -698,18 +836,39 @@ class EngineManager(private val context: Context, private val pickToken: String?
   /**
    * Extract the bundled snapshot archive into [stage]. The live tree is never a
    * destination: extraction is only ever performed inside the transaction stage.
+   *
+   * 【0.14.7 / task-9 D-1 + D-2】**真因必须挂到 [lastRefreshFailure]**：旧实现在 catch 里只写
+   * `Log.e`（只进易失的 logcat），随后 `return false` —— 调用方（EngineStartFlow 的失败分支）
+   * 只能拿到布尔值，于是 boot-fail.log 落成 `error=none(boolean-failure-path)`、`stack=none`。
+   * 真机现场那条 `org.tukaani.xz.CorruptedInputException: Compressed data is corrupt` 因此**零落盘**，
+   * 排障只能靠 logcat 反查。现在异常对象与稳定错误码都挂在这里，由既有链路一路写进 boot-fail.log。
+   *
    * @param onProgress bytesDone, bytesTotal.
    * @returns true on success.
    */
   private fun extractSnapshotTo(stage: File, onProgress: (Long, Long) -> Unit): Boolean {
+    // D-2（0.14.7 / task-9）：取 fd.length 用的 AssetFileDescriptor **必须关闭**。
+    // 旧实现 `val fd = context.assets.openFd(...)` 从不 close —— 真机 logcat 里那句
+    // "A resource failed to call close." 就是它。AssetFileDescriptor 持有真实的 ParcelFileDescriptor，
+    // 而这条路径在「每次启动都失败、每次重试」的形态下会被反复走到（真机正是这种形态），
+    // 泄漏是**按启动次数累积**的。用 use{} 保证异常路径同样关闭；长度先取出来再进解压。
+    val assetLength = try {
+      context.assets.openFd(BUNDLED_SNAPSHOT_ASSET).use { it.length }
+    } catch (t: Throwable) {
+      // 取不到长度不是致命：totalBytes 只用于进度显示（0 = 未知）。摘要预检已单独归类「资产不可读」。
+      Log.w(TAG, "could not read bundled snapshot asset length; continuing with unknown total", t)
+      0L
+    }
     return try {
-      val fd = context.assets.openFd("snapshot.tar.xz")
-      SnapshotExtractor.extract(
-        context.assets.open("snapshot.tar.xz"), fd.length, stage, onProgress, runtimeRoot = context.filesDir,
-      )
+      context.assets.open(BUNDLED_SNAPSHOT_ASSET).use { input ->
+        SnapshotExtractor.extract(input, assetLength, stage, onProgress, runtimeRoot = context.filesDir)
+      }
       true
     } catch (t: Throwable) {
       Log.e(TAG, "snapshot extract failed", t)
+      // D-1 的落点：异常 + 归类码。`extract` 抛出的若是解码器异常，类名与栈原样保留在 cause 链上。
+      lastRefreshFailure = t
+      lastRefreshFailureCode = (t as? SnapshotFsException)?.code ?: CODE_EXTRACT_FAILED
       false
     }
   }
@@ -887,25 +1046,7 @@ class EngineManager(private val context: Context, private val pickToken: String?
     if (isSymlink(privateDir)) {
       Files.delete(privateDir.toPath())
     }
-    if (!publicDir.isDirectory) return
-    if (privateDir.isDirectory) {
-      if (privateDir.listFiles()?.isNotEmpty() == true) {
-        // Conflict: the private entity wins; the public copy is kept aside for review.
-        val backup = uniqueBackup(publicDir)
-        if (!publicDir.renameTo(backup)) {
-          throw java.io.IOException("failed to backup public dir " + publicDir.absolutePath)
-        }
-        Log.w(TAG, "private " + privateDir.absolutePath + " exists; public kept as " + backup.absolutePath)
-        return
-      }
-      SnapshotFs.deletePath(privateDir)
-    }
-    privateDir.parentFile?.mkdirs()
-    copyTreeVerified(publicDir, privateDir)
-    SnapshotFs.deletePath(publicDir)
-    if (SnapshotFs.exists(publicDir)) {
-      throw java.io.IOException("failed to delete public source " + publicDir.absolutePath)
-    }
+    ReverseMigration.migrateDir(privateDir, publicDir)
   }
 
   /** File-level reverse migration: drop the private symlink, copy the public file back, then delete the public source. */
@@ -1050,16 +1191,6 @@ class EngineManager(private val context: Context, private val pickToken: String?
 
   private fun isSymlink(file: File): Boolean = Files.isSymbolicLink(file.toPath())
 
-  private fun uniqueBackup(publicFile: File): File {
-    var candidate = File(publicFile.parentFile, publicFile.name + ".public-backup")
-    var i = 1
-    while (candidate.exists()) {
-      candidate = File(publicFile.parentFile, publicFile.name + ".public-backup-" + i)
-      i++
-    }
-    return candidate
-  }
-
   private fun uniquePrivateBackup(privateFile: File): File {
     var candidate = File(privateFile.parentFile, privateFile.name + ".private-backup")
     var i = 1
@@ -1068,26 +1199,6 @@ class EngineManager(private val context: Context, private val pickToken: String?
       i++
     }
     return candidate
-  }
-
-  /** Recursively copy a directory tree, verifying the file count and total size. */
-  private fun copyTreeVerified(src: File, dst: File) {
-    dst.mkdirs()
-    src.listFiles()?.forEach { f ->
-      val target = File(dst, f.name)
-      if (f.isDirectory) {
-        copyTreeVerified(f, target)
-      } else {
-        f.copyTo(target, overwrite = true)
-      }
-    }
-    val srcFiles = src.walkBottomUp().filter { it.isFile }.toList()
-    val dstFiles = dst.walkBottomUp().filter { it.isFile }.toList()
-    val srcSize = srcFiles.sumOf { it.length() }
-    val dstSize = dstFiles.sumOf { it.length() }
-    if (srcFiles.size != dstFiles.size || srcSize != dstSize) {
-      throw java.io.IOException("copy verification failed for " + src.absolutePath)
-    }
   }
 
   /**
@@ -1180,9 +1291,11 @@ class EngineManager(private val context: Context, private val pickToken: String?
     // （打包指纹不可用 / termux-exec 预载库缺失）会把**上一次**的 live-runtime 码与确诊项留下
     // 来 ⇒ 调用方（错误页主按钮）会拿陈旧码去花掉那次重抽取，诊断包也会出现
     // 「有 confirmed/evidence 却没有 code」的自相矛盾字段。
+    lastStartRefusal = null
     lastStartRefusalCode = null
     lastStartRefusalConfirmed = emptyList()
     snapshotFingerprintProblem()?.let { problem ->
+      lastStartRefusalCode = REFUSAL_RUNTIME_UNAVAILABLE
       lastStartRefusal = problem.failureCode + ": " + problem.detail
       return false
     }
@@ -1198,6 +1311,7 @@ class EngineManager(private val context: Context, private val pickToken: String?
     val preload = File(usrDir, "lib/libtermux-exec-ld-preload.so")
     if (!preload.exists()) {
       Log.e(TAG, "engine start failed: termux-exec preload missing at " + preload.absolutePath)
+      lastStartRefusalCode = REFUSAL_RUNTIME_UNAVAILABLE
       lastStartRefusal = "termux-exec 预载库缺失（" + preload.absolutePath + "）"
       return false
     }
@@ -1237,6 +1351,32 @@ class EngineManager(private val context: Context, private val pickToken: String?
       LogCollector.log(TAG, "engine start refused (live runtime incomplete) evidence=" + lastStartRefusalEvidence)
       return false
     }
+    // Persisted profile state can predate the current Hard manifest (for example, a bundle
+    // selection missing from an older migration). Reconcile before *every* spawn decision, even
+    // when the extracted snapshot fingerprint is already fresh. Only exact installed identities
+    // from the trusted manifest may be added; user Soft selections and pins remain intact.
+    val hard = PluginMounts.ensureHard(context, PluginMounts.currentFingerprint(context))
+    if (hard == null) {
+      lastStartRefusalCode = REFUSAL_HARD_BUNDLE_SELECTION
+      lastStartRefusal = "当前版本 Hard 插件清单缺失或与运行时快照不匹配；拒绝启动引擎，profile 未修改"
+      Log.e(TAG, "engine start refused: " + lastStartRefusal)
+      return false
+    }
+    val hardBundleRepair = PluginMounts.ensureHardBundlesSelected(
+      File(homeDir, ".dsh/profiles/web/package.json"),
+      File(usrDir, "lib/node_modules/@deepseek-ai/dsh/node_modules"),
+      hard,
+    )
+    if (hardBundleRepair.failure != null) {
+      lastStartRefusalCode = REFUSAL_HARD_BUNDLE_SELECTION
+      lastStartRefusal = "Hard bundle profile 校验/修复失败；拒绝启动引擎，" + hardBundleRepair.failure
+      Log.e(TAG, "engine start refused: " + lastStartRefusal)
+      return false
+    }
+    if (hardBundleRepair.changed) {
+      LogCollector.log(TAG, "required Hard factory bundles added to web profile; engine restart required")
+    }
+    val restartForHardBundleRepair = hardBundleRepair.changed
     // 通过闸门 A：码与确诊项已在入口清过（见函数头注释），此处无需重复。
     // 取证字段**刻意不清**：它是只增的现场记录，供诊断包读取。
     val now = System.currentTimeMillis()
@@ -1251,6 +1391,7 @@ class EngineManager(private val context: Context, private val pickToken: String?
     lastAvailability = availability
     if (availability == EngineProbe.EngineAvailability.PORT_FOREIGN) {
       val refusal = "本机 3080 端口由未归属到本壳的进程占用；为保护该进程，本次不杀、不重启、不拉起引擎"
+      lastStartRefusalCode = REFUSAL_PORT_FOREIGN
       lastStartRefusal = refusal
       LogCollector.log(TAG, "engine start refused (PORT_FOREIGN; force=$force)")
       Log.w(TAG, refusal)
@@ -1260,12 +1401,12 @@ class EngineManager(private val context: Context, private val pickToken: String?
     val engineUsable = availability == EngineProbe.EngineAvailability.OUR_PROCESS ||
       availability == EngineProbe.EngineAvailability.OUR_HTTP
     val degradedHttp = engineUsable && WatchdogV2.degradedHttpTripped()
-    if (!force && engineUsable && !degradedHttp) {
+    if (!force && !restartForHardBundleRepair && engineUsable && !degradedHttp) {
       STARTING.set(false)
       LogCollector.log(TAG, "engine start skipped (existing engine usable: " + availability + ")")
       return true
     }
-    if ((force || degradedHttp) && availability == EngineProbe.EngineAvailability.OUR_HTTP && !managedProcessAlive) {
+    if ((force || restartForHardBundleRepair || degradedHttp) && availability == EngineProbe.EngineAvailability.OUR_HTTP && !managedProcessAlive) {
       lastStartRefusal = "引擎 HTTP 响应可归属，但本壳没有可安全停止的子进程句柄；拒绝盲目重启"
       LogCollector.log(TAG, "engine restart refused (owned HTTP without tracked process handle)")
       STARTING.set(false)
@@ -1278,6 +1419,8 @@ class EngineManager(private val context: Context, private val pickToken: String?
       // 只停止持有句柄的本壳子进程；未归属监听器绝不通过名称匹配清理。
       if (!killExistingEngine()) {
         lastAvailability = EngineProbe.classifyPreSpawnPort(EngineProbe.portReachable(250))
+        if (lastAvailability == EngineProbe.EngineAvailability.PORT_FOREIGN)
+          lastStartRefusalCode = REFUSAL_PORT_FOREIGN
         lastStartRefusal = "旧引擎停止后 3080 仍被占用；本次拒绝 spawn，避免覆盖未知监听器"
         LogCollector.log(TAG, "engine start refused: listener remained after owned-child cleanup")
         return false
@@ -1306,6 +1449,7 @@ class EngineManager(private val context: Context, private val pickToken: String?
       val preSpawnAvailability = EngineProbe.classifyPreSpawnPort(EngineProbe.portReachable(300))
       if (preSpawnAvailability != EngineProbe.EngineAvailability.DOWN) {
         lastAvailability = preSpawnAvailability
+        lastStartRefusalCode = REFUSAL_PORT_FOREIGN
         lastStartRefusal = "最终 spawn 前复查发现 3080 已被占用；按外部监听处理，本次只拒绝一次且不重试"
         LogCollector.log(TAG, "engine start refused at final pre-spawn recheck (PORT_FOREIGN)")
         return false
@@ -1318,6 +1462,7 @@ class EngineManager(private val context: Context, private val pickToken: String?
       if (!started.isAlive && EngineProbe.portReachable(250)) {
         engineProcess = null
         lastAvailability = EngineProbe.EngineAvailability.PORT_FOREIGN
+        lastStartRefusalCode = REFUSAL_PORT_FOREIGN
         lastStartRefusal = "3080 在最终复查与引擎 bind 之间被其他进程抢占；已停止本次启动且不会清理外部进程"
         LogCollector.log(TAG, "engine spawn lost EADDRINUSE race; classified PORT_FOREIGN, no retry")
         return false
@@ -1327,6 +1472,7 @@ class EngineManager(private val context: Context, private val pickToken: String?
       LogCollector.log(TAG, "engine started")
       true
     } catch (t: Throwable) {
+      lastStartRefusalCode = startupExceptionCode(t)
       Log.e(TAG, "engine start failed", t)
       LogCollector.log(TAG, "engine start FAILED: " + (t.message ?: t.javaClass.simpleName))
       // 0.13.1 W3：失败现场镜像到共享目录（此前 engine.log 只在私有域，外界拿不到）。
@@ -1335,6 +1481,27 @@ class EngineManager(private val context: Context, private val pickToken: String?
     } finally {
       STARTING.set(false)
     }
+  }
+
+  /** Only syscall evidence classifies storage failures; arbitrary exception prose stays unknown. */
+  internal fun startupExceptionCode(error: Throwable): String? {
+    val causes = generateSequence(error) { it.cause }.take(16).toList()
+    val errno = causes.filterIsInstance<android.system.ErrnoException>().firstOrNull()?.errno
+    if (errno == android.system.OsConstants.ENOSPC) return REFUSAL_STORAGE_FULL
+    if (errno == android.system.OsConstants.EACCES || errno == android.system.OsConstants.EPERM) {
+      // Exec policy denial and public storage denial are NOT evidence that app-private data is unwritable.
+      val privateWriteDenied = listOf(context.filesDir, homeDir).any { dir ->
+        dir.isDirectory && try {
+          !android.system.Os.access(dir.absolutePath, android.system.OsConstants.W_OK or android.system.OsConstants.X_OK)
+        } catch (e: android.system.ErrnoException) {
+          e.errno == android.system.OsConstants.EACCES || e.errno == android.system.OsConstants.EPERM
+        } catch (_: SecurityException) {
+          false
+        }
+      }
+      if (privateWriteDenied) return REFUSAL_PRIVATE_STORAGE_DENIED
+    }
+    return null
   }
 
   /** The active web profile owns migrated settings; legacy YAML is used only before a profile exists. */
@@ -1426,22 +1593,38 @@ class EngineManager(private val context: Context, private val pickToken: String?
    *
    * 引擎可被**任何**路径拉起（Activity 启动流 / EngineService 看门狗 / ConsoleActivity），
    * 所以「Web 端口首次应答」的观测挂在 spawn 点而不是某一条启动流里，否则看门狗重启的世代
-   * 永远没有 t_listen。单线程、有界 90s（与冷启动预算同量级）后自然退出；每 500ms 一次
-   * portReachable(500)（loopback，自带 Proxy.NO_PROXY）。
+   * 永远没有 t_listen。单线程、有界 [LISTEN_WATCH_WINDOW_MS]（与冷启动预算同量级）后自然退出。
+   *
+   * **0.14.8 修尺子（自适应步进）**：旧实现是「固定 sleep(500) + portReachable(500)」，
+   * 于是 t_listen 的量化误差恒为 [0,500)（均值 250ms）——而 loopback 上「无人监听」是**立即
+   * refused**，固定节拍不为任何真实开销买单，纯粹是采样栅格。现按 [nextListenProbeDelayMs]
+   * 步进（20ms 起步、1.5 几何退避、[LISTEN_PROBE_MAX_STEP_MS] 封顶），单次 connect 预算同步
+   * 压到 [LISTEN_PROBE_CONNECT_TIMEOUT_MS] 并再对剩余窗口取 min（超时值只影响异常情形：
+   * 丢包/防火墙；connect 超时传 0 在 Java Socket 上是**无限等待**，故必须 ≥ 1）。
+   *
+   * 窗口、线程名、markListen 幂等与 daemon 属性全部保持不变。
    */
   private fun watchEngineListen() {
     Thread {
-      val deadline = System.currentTimeMillis() + 90_000L
-      while (System.currentTimeMillis() < deadline) {
-        if (EngineProbe.portReachable(500)) {
+      val deadline = System.currentTimeMillis() + LISTEN_WATCH_WINDOW_MS
+      var attempt = 0
+      while (true) {
+        val remaining = deadline - System.currentTimeMillis()
+        if (remaining <= 0L) return@Thread
+        val connectTimeoutMs = minOf(LISTEN_PROBE_CONNECT_TIMEOUT_MS, remaining).toInt()
+        if (EngineProbe.portReachable(connectTimeoutMs)) {
           LogCollector.markListen(context)
           return@Thread
         }
+        val step = nextListenProbeDelayMs(attempt)
+        // 下一次探测会落到窗口之外：不必先睡满再判——否则线程会越过 deadline 才退出。
+        if (step >= remaining) return@Thread
         try {
-          Thread.sleep(500)
+          Thread.sleep(step.toLong())
         } catch (_: InterruptedException) {
           return@Thread
         }
+        attempt++
       }
     }.apply { isDaemon = true; name = "dsh-engine-listen-watch" }.start()
   }
@@ -1574,16 +1757,22 @@ class EngineManager(private val context: Context, private val pickToken: String?
     // 为什么也进诊断包（而不只进 boot-diag.log）：老设备白屏时页面跑不起来，用户必须能**自助**取到
     // 「我的 WebView 版本够不够」这一个结论，而不必先跑到页面上看。
     // 字段名与 MainActivity 在 boot-diag.log 里用的**逐字一致**，便于两处对账。
-    // 取值口径同源：WebView.getCurrentWebViewPackage()?.versionName + 首个点分段数字。
+    // 取值口径同源：统一走 WebViewShim（provider 回读唯一实现）。
     try {
-      val pkg = android.webkit.WebView.getCurrentWebViewPackage()
-      val ver = pkg?.versionName ?: ""
-      val major = Regex("(\\d+)\\.").find(ver)?.groupValues?.get(1)?.toIntOrNull() ?: -1
-      sb.append("webview_package: ").append(pkg?.packageName ?: "").append('\n')
-      sb.append("webview_version: ").append(ver).append('\n')
+      val providerVersion = WebViewShim.providerVersionName()
+      // 这里的「读不到」哨兵保留 -1（显式缺席）；与 MainActivity 判据侧的 0 口径不同是有意的：
+      // 判据侧 0 不冒充通过，诊断包侧 -1 强调「连版本名都没拿到」。
+      val chromiumVersion = MainActivity.observedChromiumVersion
+      val major = if (chromiumVersion.isEmpty()) -1 else WebViewShim.majorOf(chromiumVersion)
+      sb.append("webview_package: ").append(WebViewShim.providerPackageName()).append('\n')
+      // provider 缺席（无 WebView ROM / 升级窗口）与「版本串解析失败」含义不同，单列一项。
+      sb.append("webview_provider_available: ").append(WebViewShim.providerAvailable()).append('\n')
+      sb.append("webview_provider_version: ").append(providerVersion).append('\n')
+      sb.append("webview_version: ").append(chromiumVersion).append('\n')
       sb.append("webview_major: ").append(major).append('\n')
       // 语法下限 94（Chromium 94 起才有类静态块 static{}；低于它入口 chunk 解析即整体不执行 = 纯白无字）。
-      sb.append("syntax_floor_ok: ").append(major >= MainActivity.WEBVIEW_SYNTAX_FLOOR_MAJOR).append('\n')
+      val syntaxFloor = WebViewShim.syntaxFloorStatus(chromiumVersion, MainActivity.WEBVIEW_SYNTAX_FLOOR_MAJOR)
+      sb.append("syntax_floor_ok: ").append(syntaxFloor).append('\n')
     } catch (_: Throwable) {
       // 诊断本身不得成为故障源；字段缺席好过抛异常。
     }
@@ -1878,6 +2067,14 @@ class EngineManager(private val context: Context, private val pickToken: String?
     return false
   }
 
+  /** Activity boot polling also waits for another manager's accepted pre-spawn request.
+   * This is separate from process liveness: watchdog/ownership callers must never
+   * treat an in-flight request as evidence that a child exists. */
+  internal fun engineBootMayContinue(): Boolean = observeBootContinuation(
+    startupInProgress = { STARTING.get() },
+    processAlive = { engineProcessAlive() },
+  )
+
   /**
    * Terminate only the tracked child process. We intentionally do not use pkill: a process-name
    * match cannot prove ownership and could kill an unrelated listener. The port must be observed
@@ -1928,32 +2125,77 @@ class EngineManager(private val context: Context, private val pickToken: String?
       updateHealthTicks = 0
       return
     }
-    if (healthy) {
+    val marker = SnapshotTransaction.readMarker(context.filesDir)
+    if (marker?.phase == SnapshotTransaction.Phase.UNKNOWN || marker?.purpose == SnapshotTransaction.Purpose.UNKNOWN) {
+      updateHealthTicks = 0
+      Log.e(TAG, "update health confirmation blocked by unknown transaction marker; recovery source retained")
+      return
+    }
+    if (marker?.purpose == SnapshotTransaction.Purpose.ONLINE_UPDATE &&
+      marker.phase == SnapshotTransaction.Phase.ONLINE_COMMITTED) {
+      applyRecovery(SnapshotTransaction.recover(context.filesDir, SnapshotTransaction.stageRoot(context.filesDir), usrDir, homeDir))
+      return
+    }
+    val acceptedHealth = if (healthy && marker?.purpose == SnapshotTransaction.Purpose.ONLINE_UPDATE) {
+      // HTTP readiness alone can commit a candidate whose required Android/product loaders
+      // failed to register. Reuse the same read-only inventory + preset + session/catalog
+      // proof used by Soft promotion; provider execution/permissions are intentionally excluded.
+      val hard = PluginMounts.ensureHard(context, marker.fingerprint)
+      hard != null && EngineProbe.completeSoftHealth(context, hard)
+    } else healthy
+    if (acceptedHealth) {
       updateHealthTicks++
       if (updateHealthTicks >= UPDATE_CONFIRM_TICKS) {
+        if (SnapshotTransaction.readMarker(context.filesDir)?.purpose == SnapshotTransaction.Purpose.ONLINE_UPDATE) {
+          try {
+            if (!commitOnlineUpdateIfPending()) {
+              Log.e(TAG, "online runtime health confirmation could not finalize transaction; journal retained")
+              return
+            }
+          } catch (t: Throwable) {
+            Log.e(TAG, "online runtime health confirmation failed; journal retained", t)
+            return
+          }
+        } else {
+          // Migrate the legacy pending-update fingerprint into the explicit freshness record before
+          // clearing its only probation marker. Keep usr-old as the legacy recovery source.
+          val committed = liveFingerprint()
+          if (bundledFingerprint().isNotEmpty() && Regex("[0-9a-fA-F]{64}").matches(committed)) {
+            try { writeOnlineSnapshotIdentity(bundledFingerprint(), committed) } catch (t: Throwable) {
+              Log.e(TAG, "legacy online update identity migration failed; pending state retained", t)
+              return
+            }
+          }
+        }
         pending.delete()
         File(context.filesDir, ".update-pending-at").delete()
-        // 审查 I-9 点名：usr-old 里的绝对链此时已指向**新** usr 树，跟随删除会穿进 live 运行时。
-        SnapshotFs.deletePath(File(context.filesDir, "usr-old"))
         updateHealthTicks = 0
-        LogCollector.log(TAG, "update confirmed: old runtime cleaned (usr-old removed)")
+        LogCollector.log(TAG, "update confirmed")
       }
     } else {
       updateHealthTicks = 0
       val at = File(context.filesDir, ".update-pending-at").takeIf { it.exists() }?.readText()?.trim()?.toLongOrNull()
       if (at != null && System.currentTimeMillis() - at > UPDATE_ROLLBACK_MS) {
-        rollbackToOld()
-        pending.delete()
-        File(context.filesDir, ".update-pending-at").delete()
+        if (rollbackToOld()) {
+          pending.delete()
+          File(context.filesDir, ".update-pending-at").delete()
+        }
       }
     }
   }
 
   /** Swap the current runtime back to the kept previous one; restarts the engine from it. */
-  private fun rollbackToOld() {
+  private fun rollbackToOld(): Boolean {
+    val marker = SnapshotTransaction.readMarker(context.filesDir)
+    if (marker?.purpose == SnapshotTransaction.Purpose.ONLINE_UPDATE) {
+      if (!rollbackOnlineRuntime()) return false
+      lastStartAttemptAt = 0
+      try { startEngine() } catch (_: Throwable) { }
+      return true
+    }
     val usr = File(context.filesDir, "usr")
     val old = File(context.filesDir, "usr-old")
-    if (!old.exists()) return
+    if (!old.exists()) return false
     try {
       val broken = File(context.filesDir, "usr-broken")
       SnapshotFs.deletePath(broken)
@@ -1963,14 +2205,44 @@ class EngineManager(private val context: Context, private val pickToken: String?
         EngineManager.lastStartAttemptAt = 0 // allow an immediate restart (no cooldown stall)
         try { startEngine() } catch (_: Throwable) {
         }
+        return true
       } else {
         // Rollback of the rollback: the failed old-swap left no usr — put the broken new one back.
         if (!usr.exists() && broken.exists()) broken.renameTo(usr)
         Log.e(TAG, "update rollback failed; usr restored from usr-old: " + usr.exists())
+        return false
       }
     } catch (t: Throwable) {
       Log.e(TAG, "update rollback threw", t)
+      return false
     }
+  }
+
+  internal fun rollbackOnlineRuntime(): Boolean {
+    val marker = SnapshotTransaction.readMarker(context.filesDir)
+      ?.takeIf { it.purpose == SnapshotTransaction.Purpose.ONLINE_UPDATE } ?: return false
+    val result = SnapshotTransaction.rollbackOnlineUpdate(
+      context.filesDir, SnapshotTransaction.stageRoot(context.filesDir), usrDir, homeDir, marker,
+    )
+    if (!result.ok) {
+      Log.e(TAG, "online update rollback failed; journal and previous runtime retained: " + result.failures.joinToString(", "))
+      return false
+    }
+    SnapshotTransaction.clearMarker(context.filesDir)
+    if (marker.priorFingerprint.isNotEmpty()) writeFingerprint(marker.priorFingerprint)
+    File(context.filesDir, ".update-pending").delete()
+    File(context.filesDir, ".update-pending-at").delete()
+    onlineUpdateActive.set(false)
+    updateHealthTicks = 0
+    return true
+  }
+
+  internal fun abortOnlineUpdate(): Boolean {
+    val marker = SnapshotTransaction.readMarker(context.filesDir)
+      ?.takeIf { it.purpose == SnapshotTransaction.Purpose.ONLINE_UPDATE } ?: return true
+    val recovery = SnapshotTransaction.recover(context.filesDir, SnapshotTransaction.stageRoot(context.filesDir), usrDir, homeDir)
+    applyRecovery(recovery)
+    return SnapshotTransaction.readMarker(context.filesDir) == null
   }
 
   /**
@@ -2112,6 +2384,11 @@ description: 手机操控纪律：无障碍语义树优先、ref 语义点击/�
      *  slowest observed boot with margin. */
     const val START_COOLDOWN_MS = 90_000L
 
+  const val REFUSAL_PORT_FOREIGN = "port-foreign"
+  const val REFUSAL_PRIVATE_STORAGE_DENIED = "private-storage-denied"
+  const val REFUSAL_STORAGE_FULL = "storage-full"
+  const val REFUSAL_RUNTIME_UNAVAILABLE = "runtime-unavailable"
+
   /**
    * 拒绝启动原因码：live 运行时树残缺（issue #309）。
    *
@@ -2119,6 +2396,9 @@ description: 手机操控纪律：无障碍语义树优先、ref 语义点击/�
    * 调用方（EngineStartFlow 的拒启分支）据此触发一次删指纹 + 清账本的恢复动作。
    */
   const val REFUSAL_LIVE_RUNTIME_INCOMPLETE = "live-runtime-incomplete"
+
+  /** Refusal code: Hard bundle ownership or installed identity could not be proven safely. */
+  const val REFUSAL_HARD_BUNDLE_SELECTION = "hard-bundle-selection-unverified"
 
     /** Process handle shared by every EngineManager in the application process. */
     @Volatile
@@ -2134,6 +2414,22 @@ description: 手机操控纪律：无障碍语义树优先、ref 语义点击/�
      *  review C13：改 CAS（AtomicBoolean）——旧实现「if (设位) return; … 设位」的 check-then-set
      *  在刷新入口与恢复入口之间无互斥，两个线程可同时通过检查并同时操作 stage/previous。 */
     val snapshotRefreshing = java.util.concurrent.atomic.AtomicBoolean(false)
+    val onlineUpdateActive = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    private val transactionStateLock = Any()
+    private const val ONLINE_SNAPSHOT_NAME = ".online-snapshot"
+
+    /** 内嵌快照资产文件名（唯一出处）——摘要预检与解压必须指向**同一份**资产。 */
+    private const val BUNDLED_SNAPSHOT_ASSET = "snapshot.tar.xz"
+
+    /**
+     * 解压支的失败码（D-1）：解压本身抛异常时由 [extractSnapshotTo] 记真因与栈；
+     * 本条只用于「解压没抛错、但 staged 运行时缺件」这一支——它此前连异常对象都没有。
+     */
+    private const val CODE_EXTRACT_FAILED = "snapshot-extract-failed"
+
+    /** 上次残留目录既删不掉也移不开（D-1 的另一条静默 return false）。 */
+    private const val CODE_STAGE_RESIDUE = "snapshot-stage-residue"
 
     /** Last real start time (epoch ms); the watchdog cooldown-window baseline. */
     @Volatile
@@ -2183,6 +2479,63 @@ internal fun uvThreadPoolSize(cores: Int): Int = minOf(8, cores.coerceAtLeast(1)
 internal fun pnpmStoreDir(homeDir: File): String =
   File(File(File(homeDir, ".local"), "share"), "pnpm/store").absolutePath
 
+/**
+ * P-AC-04 修尺子（0.14.8）：监听观察窗口，与冷启动预算同量级；窗口本身**不改**。
+ *
+ * 观察者（[EngineManager.watchEngineListen]）在窗口内自适应步进，窗口外自然退出；
+ * 该常量是窗口的唯一真源，同时被调度函数用于「剩余窗口」的计算。
+ */
+internal const val LISTEN_WATCH_WINDOW_MS: Long = 90_000L
+
+/**
+ * 单次 TCP connect 预算（P-AC-04 修尺子）。
+ *
+ * loopback 上「端口无人监听」是**立即 refused**，这个值只在异常情形（丢包 / 防火墙 /
+ * 半开连接）才成为实际耗时。旧实现取 500ms = 与固定节拍同量级，等于把最坏情形写进预算；
+ * 压到 150ms 后异常情形的单次代价有界，且远大于 loopback 的 refused 延迟。
+ * **不得为 0**：Java 的 Socket.connect(addr, 0) 是无限等待。
+ */
+internal const val LISTEN_PROBE_CONNECT_TIMEOUT_MS: Long = 150L
+
+/**
+ * 探测步长上限（P-AC-04 修尺子）。
+ *
+ * 步长早期密、后期疏：上限越小，栅格越细、t_listen 的量化误差越小，代价是 90s 窗口内的
+ * connect 次数（100ms 上限 ≈ 904 次 ≈ 10 次/秒；loopback refused 微秒级，可忽略）。
+ *
+ * 取 100 而非 500 的实测依据：500ms 栅格的采样滞后均值 247ms / 最大 497ms，100ms 栅格降到
+ * 均值 49ms / 最大 97ms——旧实现的读数与真实监听时刻之间就隔着这一段，而设备实测
+ * t_listen_ms 全程在 5~15s 间波动（没有「只在前段才需要精度」这回事）。
+ */
+internal const val LISTEN_PROBE_MAX_STEP_MS: Int = 100
+
+/** 首次探测后等待的步长（第 0 次退避）：小步起步，让窗口前段的读数不被 500ms 栅格量化。 */
+internal const val LISTEN_PROBE_START_STEP_MS: Int = 20
+
+/** 步长几何增长比（1.5 ⇒ 20/30/45/67… 再封顶到 [LISTEN_PROBE_MAX_STEP_MS]）。 */
+internal const val LISTEN_PROBE_GROWTH: Double = 1.5
+
+/**
+ * 自适应探测调度（P-AC-04 修尺子）：第 [attempt] 次探测**之后**应等待的毫秒数。
+ *
+ * 旧实现是固定 500ms 轮询，于是 t_listen 的量化误差恒为 [0,500)（均值 250ms；设备实测
+ * t_listen_ms 在 8052~14866ms 间跳变，其中含这段采样栅格）。步长序列 20/20/30/45/67/100…
+ * 抽成**顶层纯函数**（而非
+ * private 成员）是为了让调度口径能被 JVM 单测直接钉住——[EngineManager] 需要 Context，
+ * 单测拿不到。
+ *
+ * 契约（[EngineListenProbeScheduleTest] 逐条锁死）：
+ * - attempt <= 0 一律返回 [LISTEN_PROBE_START_STEP_MS]（负值不得被放大成步长）；
+ * - 步长单调不回退，且恒落在 [LISTEN_PROBE_START_STEP_MS, LISTEN_PROBE_MAX_STEP_MS]；
+ * - 有限次退避后**精确**封顶到上限（不因浮点误差停在上限下方）；
+ * - 序列总和覆盖整个 [LISTEN_WATCH_WINDOW_MS]，且覆盖所用探测次数有界。
+ */
+internal fun nextListenProbeDelayMs(attempt: Int): Int {
+  if (attempt <= 0) return LISTEN_PROBE_START_STEP_MS
+  val grown = LISTEN_PROBE_START_STEP_MS * Math.pow(LISTEN_PROBE_GROWTH, (attempt - 1).toDouble())
+  return if (grown >= LISTEN_PROBE_MAX_STEP_MS) LISTEN_PROBE_MAX_STEP_MS else grown.toInt()
+}
+
 /** 诊断镜像的单份上限（#211.3）：只需现场尾部；内存峰值从 3× 整份压到 3× 上限内。 */
 internal const val MIRROR_LOG_LIMIT_BYTES: Long = 2L * 1024 * 1024
 
@@ -2220,3 +2573,11 @@ internal fun mirrorLogBounded(src: File, dst: File, limitBytes: Long = MIRROR_LO
     false
   }
 }
+
+/** Observe startup before liveness so publishing a child then releasing the start
+ * guard cannot create a false DEAD result. A second ordered pass also covers a
+ * new winner that acquired and released the guard during the first process read. */
+internal fun observeBootContinuation(
+  startupInProgress: () -> Boolean,
+  processAlive: () -> Boolean,
+): Boolean = startupInProgress() || processAlive() || startupInProgress() || processAlive()

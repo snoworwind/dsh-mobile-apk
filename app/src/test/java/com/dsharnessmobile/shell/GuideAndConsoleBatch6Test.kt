@@ -333,9 +333,16 @@ class GuideAndConsoleBatch6Test {
       checker.contains("fun requestInstallPermission(activity: android.app.Activity): Boolean"),
     )
     assertTrue("两条路径都成功才回 true", checker.contains("return true") && checker.contains("return false"))
-    val renderer = codeOnly(source("GuidePageRenderer.kt"))
-    assertTrue("调用方必须按结果分支", renderer.contains("if (opened)"))
-    assertTrue("拉不起来时给可执行的替代路径", renderer.contains("R.string.ds_apk_permission_page_failed"))
+    // 0.14.6 单一真源重构：安装/授权推进迁到 ApkUpdateController（渲染只在 renderApkUpdate 里按状态出文案）。
+    // 不变量**没变**（S1-10）：必须按「授权页是否真的拉起」分支，拉不起来要给可执行替代路径 —— 不得谎报。
+    val controller = codeOnly(source("ApkUpdateAction.kt"))
+    assertTrue("调用方必须按结果分支", controller.contains("val opened = UpdateChecker.requestInstallPermission(activity)"))
+    assertTrue("拉起成功才进「需授权」相位", controller.contains("if (opened)"))
+    assertTrue(
+      "拉不起来时必须如实失败并给可执行的替代路径",
+      controller.contains("这个系统没有「安装未知应用」授权页"),
+    )
+    assertFalse("拉不起来不得当成已拉起", controller.contains("if (opened) state.onNeedPermission() else state.onNeedPermission()"))
   }
 
   // ── S1-11 / S1-12：通知权限 ──────────────────────────────────────────────

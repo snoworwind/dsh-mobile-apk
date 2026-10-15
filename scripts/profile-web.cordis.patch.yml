@@ -1,3 +1,5 @@
+# gateway/client 由继承的 base/typert-gateway 唯一行提供，不在此重复 insert。
+# 0.14.7 的 host-fiber 时序适配随 client-registry-scan-C4 注入；controllers 全部保留。
 # Android adaptation (M1.1 final form): dsh-shell-termux replaces the temporary patch v2.
 # Protection boundary = Termux app domain (SELinux u0_aXXX) + approval flow;
 # sandboxMode explicitly declares workspace-write (permission-presets mount prerequisite), enforcement honestly reported as partial.
