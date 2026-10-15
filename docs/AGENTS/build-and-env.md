@@ -32,6 +32,8 @@ java -classpath gradle/wrapper/gradle-wrapper.jar org.gradle.wrapper.GradleWrapp
 
 开发期按 AGENTS §2.2 选择测试，文档生成块用 `node scripts/check-maintenance-docs.mjs --write` 更新，再不带参数检查；该维护提示不替代功能门禁。最终完整验收与发布资格仍由双 ABI、设备三层及覆盖升级证据决定。
 
+来源链产物的复核面固定在交付目录：APK 一份，加 `verify-source-apk.sh`、`SHA256SUMS.txt`、内嵌快照的归一化摘要，以及 workflow 上传清单同款的 `evidence/`。`bc6637f` 的 arm64 产物按此复核通过：APK 内 `assets/snapshot.tar.xz` 与打包门禁实际校验的那份快照逐字节相同（同一 SHA-256），解包重跑 `normalize-snapshot.mjs` 得到的语义摘要与链条记录一致，内嵌引擎为固定的 0.2.0-rc.2；「未取 LFS」的判据是隔离检出里 `base/*.tar.xz` 仍为 133 字节指针、APK 内无基座归档载荷，运行时由已验签的 Termux 仓库包组装。复核三签时必须显式 `--min-sdk-version 18`（默认按清单 minSdk 26 会把在场的 v1 报成 false，见 [gotchas.md](gotchas.md) 坑 325）；宿主 npm 缓存路径会在 WSL 内落成 `D:/` 目录，不参与注入（坑 326）。字节级可复现不成立，判据是语义归一化摘要；该产物未做设备验收。
+
 > grep 用法：`grep -n "门禁\|Fast\|abi" docs/AGENTS/build-and-env.md`。
 >
 > **当前 0.14.5 重构真值**：本轮目标、GitHub Issue 与用户反馈台账、构建/设备证据统一见[重构计划](../../../docs/REFACTOR-2026-10-05.md)。项目地图与更新协议见 `AGENTS.md`；本页只维护构建、验证和环境事实。

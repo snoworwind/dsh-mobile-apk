@@ -1975,3 +1975,23 @@ EngineBootContinuationTest用latch驱动真实观察函数：winner持CAS但无�
 **修法**：只补已核对的四个包名，不为未知包提供通配豁免。保留认证包的 c-ares/Node 版权全文、resolv-conf 的官方 Public Domain 声明，并将 ICU 精确发布标签的完整 Unicode 及第三方 notices 固化到仓库 LICENSES，重生成实际版本 notices。候选中的许可文档替换必须逐成员记录原始/替换哈希，程序载荷沿用已验证的来源构建；全部原始 APK 门禁仍须对最终候选执行。各全文路径与上游 URL 只在 [gpl-compliance.md](gpl-compliance.md) 登记。
 
 **证据与边界**：原门禁先以四条缺项反证失败，补登记后对同一实际已注入快照通过，日志 `.deploy-tmp/source-license-check.log`；许可来源及全文 SHA-256 记录 `.deploy-tmp/source-license-evidence.json`。原 Windows 工作树的固定 Shizuku 许可 CRLF 曾触发精确字节校验失败，只恢复为 Git 中 LF 字节，Git 内容差异为空，判据未改；`.gitattributes` 对 LICENSES 原文禁用行尾转换并保留上游空白，避免再把字节校验输入改写。实际 APK 许可文本、修复后的运行时文档与最终签名结果仍以后续交付报告为准；未做设备验证。
+
+325. **apksigner 默认按清单 minSdk 判 v1，会把在场的 JAR 签名报成 false**
+
+**现象**：独立复核 `bc6637f` 产物时，`apksigner verify --verbose --print-certs <apk>` 打出 `Verified using v1 scheme (JAR signing): false`，而同一 APK 内 `META-INF/CERT.SF` 与 `META-INF/CERT.RSA` 都在场，仓库 `scripts/check-apk-signatures.mjs` 也报 `v1=true`。按前者字面读会得出「三签缺一」的相反结论，进而去重签或改门禁。
+
+**真因**：apksigner 的 verify 默认从 APK 清单取 minSdkVersion（本包 26）。API 24 起 JAR 签名不再是安装必需，兼容性报告于是把 v1 标为 false——那是「不适用」，不是「验签失败」。判据本身没错，是调用方没给验证下限。
+
+**修法**：复核与门禁必须显式传 `--min-sdk-version 18`（`check-apk-signatures.mjs` 的 `VERIFY_MIN_SDK` 常量即此值，注释已写明）；「v1 是否真的在」另用两条独立证据交叉——APK 内 `META-INF/*.SF` + `*.RSA` 在场，以及 `jarsigner -verify -strict` 打出 `jar verified`。
+
+**复验证据**：交付目录 `out/source-audit-bc6637f/`（本机，未入库）的 `verify.log`：同一 APK 在不加下限时 v1=false，加 `--min-sdk-version 18` 后 v1/v2/v3 全 true；`jarsigner -verify -strict` 报 `jar verified`；证书指纹 `1dde9d98…45bcbd` 与记录一致。
+
+326. **宿主 npm 缓存路径在 WSL 里落成 `D:/` 目录，混进插件子仓工作树**
+
+**现象**：WSL 来源链的隔离检出里，插件子仓目录下多出 `dsh-client-ui-responsive/D:/coding/dsh-mobile/.npm-cache/…`、`dsh-shell-termux/D:/coding/dsh-mobile/.npm-cache/…`，`git status` 显示为未跟踪，看起来像构建产物被污染或镜像漂移。
+
+**真因**：宿主 Windows 的 npm 缓存配置（`D:\coding\dsh-mobile\.npm-cache`）经 WSL interop 传进 Linux 侧，npm 把该串当成相对路径，于是 `D:` 成了目录名。它是构建环境残留，不是仓库内容。
+
+**修法**：无需改仓库；这类目录不参与插件注入（注入按 `scripts/plugin-dirs.json` 的 `lib/**` 清单走）。要避免生成，在 WSL 侧显式设 `npm_config_cache=$HOME/.npm`。清理时不要把 `?/D:` 当产物提交。
+
+**复验证据**：`out/source-audit-bc6637f/verify.log` 的 V8 行 `PASS snapshot contains no build-host npm cache or 'D:' stray directories`（对最终 APK 内嵌快照扫描 `.npm-cache` 与 `D:` 计数为 0），以及 `evidence/environment.txt` 里记录的同一份 `git status`。
