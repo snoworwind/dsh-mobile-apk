@@ -1933,3 +1933,15 @@ EngineBootContinuationTest用latch驱动真实观察函数：winner持CAS但无�
 **修法**：`writeBootDiag` 在组装完整单行后脱敏；boot-fail 与显式健康记录在共享有界追加器落盘前再次脱敏；`writeBootFail` 的 logcat 保留脱敏后的 stage/detail/异常类型摘要，不再传入 Throwable。完整异常栈继续保存在应用私有 `boot-fail.log`，并在文件边界脱敏。调用方仍须避免写入其他凭据；当前 `EngineAuth.redact` 只覆盖 URL query 的 `token=` 值，不是通用秘密扫描器。
 
 **检查状态**：`node scripts/check-code-map.mjs` 与 `node scripts/check-kotlin-comments.mjs` 通过；静态核对 `writeBootDiag`、`writeBootFailTo`、`writeBootFailOkTo` 的落盘路径及 logcat 调用，确认其出口均经过脱敏且失败栈不再作为 Throwable 传给 `Log.e`。Windows Java 24 下编译目标在 Gradle 配置阶段报 `Type T not present`；WSL Java 17 重试因未找到 Android SDK 而退出，均未执行 Kotlin 编译。本轮未新增或运行测试、未做设备验收、未构建 APK；日志内的 token 回归仍需在获准测试后验证。
+
+320. **客户端插件失败的调用方直接写 logcat，会绕过诊断收集器脱敏**
+
+**现象**：即使坑 319 的 `writeBootFail` 已脱敏，页面 `[dsh-boot-failed]` 契约行中的 `/?token=...` 仍可能出现在 logcat。
+
+**真因**：生产链 `MainActivity.onConsoleMessage` → `EngineStartFlow.onClientPluginTreeFailed` 先调用安全的 `writeBootFail`，随后为保留页面现场又直接 `Log.e` 输出 `folded.take(400)`。集中出口的修复无法覆盖调用方另开的输出通道，文件安全与 logcat 泄漏可以同时发生。
+
+**修法**：对契约行先调用 `EngineAuth.redact`，再截断到 400 字符；同一诊断副本供文件 detail 与直接 logcat 使用。原文仍只存入原有内存字段，供 failedIds 解析和恢复编排使用。脱敏能力边界同坑 319，不宣称覆盖其他格式的凭据。
+
+**检查状态**：WSL Java 17、工程 Gradle 8.11.1 与 API 36 下 `:app:compileDebugKotlin --no-daemon --parallel` 成功（`.deploy-tmp/wsl-client-failure-compile.log`，16 个任务中 1 个执行、15 个复用）；输入为 `dad75c2` 加本次 `EngineStartFlow.kt` 修改，该文件 SHA-256 为 `809bbad0272799905e992e6e6d7895614f820012970279092ed843616664eb59`。基线 `dad75c2` 在同环境已先执行全量主源码编译，16 个任务全部执行成功（`.deploy-tmp/wsl-android-compile.log`），因此坑 319 先前的 SDK 编译阻塞已解除。静态核对两个输出均使用 `diagnosticLine`，原文仍写入恢复字段；未新增或运行测试、未做设备验收、未构建 APK。编译环境与可重复命令见 [build-and-env.md](build-and-env.md)。
+
+执行地图、Kotlin 注释与维护文档静态检查通过，日志分别为 `.deploy-tmp/wsl-client-failure-{code-map,kotlin-comments,maintenance}.log`；`git diff --check` 通过。这些是编译和结构证据，不能证明设备 logcat 中的实际脱敏行为。

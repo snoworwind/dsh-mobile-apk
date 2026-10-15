@@ -158,7 +158,7 @@ sequenceDiagram
 | 高 | K07 | `create()` 幂等判定在锁外、`setSurface` 失败被吞、`VdisplayHost.onMain` 无 catch | `app/src/main/java/com/dsharnessmobile/shell/VdisplayController.kt:322`、`app/src/main/java/com/dsharnessmobile/shell/VdisplayController.kt:495`、`app/src/main/java/com/dsharnessmobile/shell/VdisplayHost.kt:207-213` | 并发双建屏；查看器槽位被占但画面黑；主线程异常打穿 | 未修（S-8 同族） |
 | 高 | K10 | 前台延后通知原本只在内存，来源偏移却已推进 | `NotifySuppressQueue.encodeJournal/commitJournal/restore`、`NotifyStore.drain/start` | 进程回收后的恢复与崩溃重复窗口 | fx2 已实现有界私有日志和提交失败不消费；JVM 自检通过，真实进程回收验收待第三阶段 |
 | 高 | K05 | 壳侧范围门比引擎侧宽 3 个 op（`state`/`webSnapshot`/`webAction`） | `app/src/main/java/com/dsharnessmobile/shell/DeviceControlService.kt:678` | 默认 `virtual-only` 范围下相关 op 必然误拒 | 未修 |
-| 高 | K02 | 启动诊断必须在文件与 logcat 出口脱敏 | `app/src/main/java/com/dsharnessmobile/shell/LogCollector.kt:465-481`、`:528-537`、`:753-766` | 页面 URL、诊断 detail 与异常消息可能携带 launch token | **源码已修（2026-10-15）**：boot-diag 与 boot-fail 文件写入统一脱敏；logcat 只记脱敏摘要，不再附原始 Throwable。未运行测试或设备验收；`EngineAuth.redact` 当前覆盖 URL query token |
+| 高 | K02 | 启动诊断必须在文件与 logcat 出口脱敏 | `app/src/main/java/com/dsharnessmobile/shell/LogCollector.kt:465-481`、`:528-537`、`:753-766`、`EngineStartFlow.kt:335-341` | 页面 URL、诊断 detail 与异常消息可能携带 launch token；调用方另打 logcat 会绕过集中出口 | **源码已修（2026-10-15）**：boot-diag 与 boot-fail 文件写入统一脱敏；客户端失败的 detail 与 logcat 共用先脱敏再截断的副本，原文仅供恢复编排。完整 Kotlin 主源码编译通过；未运行测试或设备验收；`EngineAuth.redact` 当前覆盖 URL query token，见坑 319、320 |
 | 高 | K03 | 自动回滚目标取自**崩溃那次启动自己建的**快照（快照在建/挂载阶段就写，早于健康判定），于是「回滚成功」而状态没变好；跨版本还会把上一次安装的配置写回 | `app/src/main/java/com/dsharnessmobile/shell/UndoGate.kt:240`、`:194`、`vendor/dsh-undo-savepoint/lib/core.mjs:1180`（快照创建点；0.4.9 起实现由 index.js 拆到 core.mjs，原 index.js:2198 锚点已随追版失效） | 坏插件仍被挂载、引擎仍起不来而 `undo-gate.log` 报 `executed ok`；升级后若新版本从未健康启动，回滚会把新版本的补丁/挂载项静默删掉（新 APK + 旧配置） | 已修（2026-09-21：known-good 由壳侧探活健康定义 + 安装指纹护栏；设备验收 PASS=9） |
 | 高 | K03 | 整份配置回滚会**静默吞掉用户在最后一次健康启动之后装的插件**（挂载清单是一整份文件） | `app/src/main/java/com/dsharnessmobile/shell/PluginMounts.kt:41`、`UndoGate.kt:279` | 用一个坏插件换掉用户全部插件的装配状态 | **已改（2026-09-21 用户拍板）**：清单式——硬清单随版本并集（强制保留）+ 软清单记「当前清单被证明可用」；能点名则**只拔那一块**（其余条目与注释逐字节不动），点不出名且清单变过则拒绝回滚 |
 | 高 | K03 | 刷新失败路径不判 `rollback` 返回值即清 marker；残留 `previous` 会被下次失败路径当回滚源 | `app/src/main/java/com/dsharnessmobile/shell/EngineManager.kt:196-198` | 回滚结果被掩盖，坏树可能被「回滚」成更坏状态 | 未修（D-3 实效性缺口） |
@@ -427,6 +427,7 @@ sequenceDiagram
 | K02 | 控制载体 ControlCarrier | 随前台引擎服务起停，a11y 关着也承载 browser*/vd* | EngineService.kt:43 |
 | K02 | ConsoleSession | 复用 usrDir 与 shellEnv 起交互 shell，不起第二个引擎 | ConsoleSession.kt:33-50 |
 | K02 | 门禁 check-boot-budget | files/boot-segments.log 是该门禁的唯一产物 | LogCollector.kt:395-424 |
+| K02 | 页面失败诊断与恢复 | onClientPluginTreeFailed 的文件 detail 和直接 logcat 共用脱敏后截断的 diagnosticLine；原文保留于恢复字段，供后续回撤编排 | EngineStartFlow.kt:330-341、LogCollector.kt:528-537 |
 | K03 | 引导与启动 | refreshSnapshot 的进度/失败文案与恢复前置由启动流拉起，刷新期 snapshotRefreshing 闸门禁止拉引擎 | app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt:427 |
 | K03 | 引擎探活与看门狗 | 每 5 秒一拍 onEngineProbe 驱动 .update-pending 的 usr-old 确认或回退 | app/src/main/java/com/dsharnessmobile/shell/EngineService.kt:348 |
 | K03 | 引擎总管 EngineManager | 事务/残渣/空间的调用方，也是 usr、home、.snapshot-fingerprint 的持有者 | app/src/main/java/com/dsharnessmobile/shell/EngineManager.kt:99 |

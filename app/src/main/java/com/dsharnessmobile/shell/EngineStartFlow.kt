@@ -332,12 +332,13 @@ internal class EngineStartFlow(private val activity: MainActivity) {
     clientPluginFailureRawLine = folded
     val ids = LogCollector.clientFailedIdsOf(folded)
     clientPluginFailureReasonText = if (ids.isEmpty()) "未点名具体条目" else "条目 " + ids.joinToString(",")
-    // ① 失败终态落盘（writeBootFail 内部另有一条 Log.e；下面这条把「契约行原文」也带进 logcat）。
+    // ① 文件与 logcat 都只接收脱敏后的诊断副本；恢复逻辑仍保留上面的契约原文。
+    val diagnosticLine = EngineAuth.redact(folded).take(400)
     val detail = "客户端插件装配失败（页面侧契约行 " + LogCollector.PAGE_PLUGIN_FAIL_PREFIX + "）：failedIds=" +
-      (if (ids.isEmpty()) "-" else ids.joinToString(",")) + " 原文=" + folded.take(400)
+      (if (ids.isEmpty()) "-" else ids.joinToString(",")) + " 原文=" + diagnosticLine
     LogCollector.writeBootFail(activity, "client-plugin-tree-failed", detail)
     Log.e("dsh-shell", "client plugin tree failed: failedIds=" + (if (ids.isEmpty()) "-" else ids.joinToString(",")) +
-      " line=" + folded.take(400))
+      " line=" + diagnosticLine)
     // ② latch：此后所有「把 WebUI 推回前台」的自动路径都必须让路。
     clientPluginTreeFailed = true
     // ③ 呈现：前台立刻切错误相位；非前台挂起，由 MainActivity.onResume 消费。

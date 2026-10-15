@@ -2,6 +2,20 @@
 
 维护文档生成区按内容比较，兼容 Windows CRLF 检出；换行归一化只用于比较，生成区完整性和内容要求不变。根因与检查范围见 [gotchas.md](gotchas.md) 坑 318。
 
+## 安全加固分支的 WSL 编译环境（2026-10-15）
+
+WSL Ubuntu 使用 Java 17.0.20.1、工程 wrapper Gradle 8.11.1；Linux SDK 安装在 `$HOME/.local/share/android-sdk`，含 command-line tools 22.0、`platforms;android-36` revision 2 与 `build-tools;35.0.0`。命令行工具来自 [Android 官方下载页](https://developer.android.com/studio#command-tools)，下载包 `commandlinetools-linux-15859902_latest.zip` 的 SHA-256 已核对为 `4e4c464f145a7512b57d088ac6c278c03c9eea610886b35a5e0804e74eedf583`。安装后删除下载包及解压暂存目录，SDK 与依赖缓存保留供后续编译。
+
+```bash
+cd /mnt/d/forGithub/dsh-mobile-apk
+export ANDROID_HOME="$HOME/.local/share/android-sdk"
+export ANDROID_SDK_ROOT="$ANDROID_HOME"
+java -classpath gradle/wrapper/gradle-wrapper.jar org.gradle.wrapper.GradleWrapperMain \
+  --no-daemon --parallel --console=plain :app:compileDebugKotlin
+```
+
+直接调用 wrapper JAR 可避免 Windows CRLF 检出的 `gradlew` 在 Linux 报 `/bin/sh^M`，无需改写受版本控制的脚本。本轮实际编译另用临时 Gradle init 将 build 与 project cache 放在 WSL 的 `$HOME/.cache/dsh-mobile-apk-build`，减少 D 盘临时占用；任务与编译输入不变。初次完整编译基线为 `dad75c2`，16 个任务全部执行并成功，日志 `.deploy-tmp/wsl-android-compile.log`；客户端失败日志补修后的输入及结果见 [gotchas.md](gotchas.md) 坑 320。AGP 对 SDK XML 版本的兼容警告及 Kotlin 编译警告保留在原始日志，不计为零警告构建。仅编译主源码，不执行测试、不打包 APK。
+
 ## 应用内更新功能退役（2026-10-15）
 
 用户明确要求在加固分支移除应用内更新。对应专用测试随实现退役，混合测试类只移除更新用例；Kotlin 数量基线的定点调整及原因登记于 `scripts/kotlin-test-baseline.json` 的 `featureRetirements`。数量门禁算法未改。本轮按用户限定只编译和静态检查，未运行测试；UI 自包含副本需重新生成 `lib` 产物。

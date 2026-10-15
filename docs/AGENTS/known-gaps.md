@@ -13,8 +13,8 @@
 
 | 项 | 当前事实 | 结论 / 后续 |
 |---|---|---|
-| 本批修复验收范围 | 用户要求仅编译和静态检查；输入广播、raw shell 范围门与认证 HTTP 加固见坑 312–316；应用内更新已按用户要求整体移除，见坑 317；启动诊断 token 出口脱敏见坑 319 | 未新增或运行测试，未做 CDP/ADB 验收；不记功能验收通过，不具备发布结论；分支维护方式见宗旨文档 |
-| Android 工程编译环境 | 当前 Windows Java 24 下 Gradle 8.11.1 配置阶段报 `Type T not present`；WSL Java 17 中未发现 Android SDK，Gradle 报 `SDK location not found`；[兼容表](https://docs.gradle.org/current/userguide/compatibility.html) | 本轮 Windows 与 WSL 均尝试 `:app:compileDebugKotlin --no-daemon`，都在 Kotlin 编译任务执行前失败；诊断脱敏源码没有新编译证据。历史依赖占位编译不能替代当前工程构建 |
+| 本批修复验收范围 | 用户要求仅编译和静态检查；输入广播、raw shell 范围门与认证 HTTP 加固见坑 312–316；应用内更新已按用户要求整体移除，见坑 317；启动诊断 token 出口脱敏见坑 319、320 | WSL 完整 Kotlin 主源码编译通过；未新增或运行测试，未做 CDP/ADB 验收；不记功能验收通过，不具备发布结论；分支维护方式见宗旨文档 |
+| Android 工程编译环境 | WSL 已安装独立 Linux Android SDK，Java 17 下 `:app:compileDebugKotlin` 成功；Windows Java 24 的 Gradle 配置失败仍是该环境的限制，未改工程版本规避 | SDK 路径、重复命令及证据入口见 [build-and-env.md](build-and-env.md) 的 WSL 编译小节；编译器仍有弃用 API 与可空接收者等警告，编译成功不等于运行时验收 |
 | raw shell 策略边界 | 范围门检查提交文本中的静态命令与显示选择器，不具备完整 shell 沙箱的能力 | 不应将文本扫描视作任意可执行程序行为的安全证明；本批只收紧已定位的绕过路径，运行时效果仍待验收 |
 
 ## 本轮仍需收口
