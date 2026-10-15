@@ -9,6 +9,14 @@
 - 恢复与用户数据：[PERSISTENT-DATA.md](PERSISTENT-DATA.md)；协调仓 `docs/RECOVERY-ARCH-0.14.5.md`。当前实现以源码和冻结后的证据为准。
 - 三层验收：[emulator-test-protocol.md](emulator-test-protocol.md)。旧包、热推或仅静态审计不能代替最终双 ABI 包的代码/CDP/ADB 用户层验收。
 
+## 安全加固分支（2026-10-15）
+
+| 项 | 当前事实 | 结论 / 后续 |
+|---|---|---|
+| 本批修复验收范围 | 用户要求仅编译和静态检查；输入广播与 raw shell 范围门修复见坑 312–314 | 未新增或运行测试，未做 CDP/ADB 验收；不记功能验收通过，不具备合并或发布结论 |
+| Android 工程编译环境 | 当前为 Java 24，仓库 Gradle 8.11.1 在配置阶段报 `Type T not present`；[Gradle 兼容表](https://docs.gradle.org/current/userguide/compatibility.html) 从 8.14 起支持 Java 24 | 完整 Android 工程编译未通过。Kotlin 2.0.21 对实际 `ShellOps.kt` 配合依赖接口占位声明的独立编译通过；它只证明该文件的语法与局部类型检查，不替代工程编译 |
+| raw shell 策略边界 | 范围门检查提交文本中的静态命令与显示选择器，不具备完整 shell 沙箱的能力 | 不应将文本扫描视作任意可执行程序行为的安全证明；本批只收紧已定位的绕过路径，运行时效果仍待验收 |
+
 ## 本轮仍需收口
 
 | 项 | 当前事实 | 必须取得的结论 |

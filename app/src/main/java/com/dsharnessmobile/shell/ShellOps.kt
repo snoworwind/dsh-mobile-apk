@@ -32,25 +32,31 @@ internal object ShellOps {
   /** 命令词家族：每个家族自带「哪种拼写才算它的目标屏」（与引擎侧 `SCREEN_COMMAND_FAMILIES` 同表）。 */
   private data class ScreenFamily(val name: String, val pattern: Regex, val targetFlags: List<String>)
 
-  private val ALL_DISPLAY_FLAGS = listOf("-d", "--display", "--display-id")
 
   private val SCREEN_FAMILIES = listOf(
-    ScreenFamily("screencap", Regex("""\bscreencap\b""", RegexOption.IGNORE_CASE), ALL_DISPLAY_FLAGS),
-    ScreenFamily("screenrecord", Regex("""\bscreenrecord\b""", RegexOption.IGNORE_CASE), ALL_DISPLAY_FLAGS),
+    ScreenFamily("screencap", Regex("""\bscreencap\b""", RegexOption.IGNORE_CASE), listOf("-d")),
+    ScreenFamily("screenrecord", Regex("""\bscreenrecord\b""", RegexOption.IGNORE_CASE), listOf("--display-id")),
     ScreenFamily(
       "input",
-      Regex("""\binput[ \t]+(?:tap|swipe|roll|draganddrop|motionevent|text|keyevent|keycombination)\b""",
+      Regex("""\binput\b""",
         RegexOption.IGNORE_CASE),
-      ALL_DISPLAY_FLAGS,
+      listOf("-d"),
     ),
-    ScreenFamily("wm", Regex("""\bwm[ \t]+(?:size|density|overscan)\b""", RegexOption.IGNORE_CASE), ALL_DISPLAY_FLAGS),
+    ScreenFamily("wm", Regex("""\bwm[ \t]+(?:size|density)(?=[ \t]|$)""", RegexOption.IGNORE_CASE), listOf("-d")),
+    ScreenFamily("wm-unscoped", Regex("""\bwm[ \t]+(?!(?:size|density)(?=[ \t]|$))[^ \t]+""", RegexOption.IGNORE_CASE), emptyList()),
     // `uiautomator dump` 没有目标屏参数：dump 的是**默认屏**的语义树 ⇒ 无法自证，恒拒。
     ScreenFamily("uiautomator", Regex("""\buiautomator\b""", RegexOption.IGNORE_CASE), emptyList()),
     ScreenFamily("dumpsys", Regex("""\bdumpsys[ \t]+(?:window|display|input)\b""", RegexOption.IGNORE_CASE), emptyList()),
-    // `am` 的显示参数是 `--display`；`-d` 是 Intent data，**不得**作为目标屏凭据。
-    ScreenFamily("am", Regex("""\bam[ \t]+(?:start|start-activity|force-stop|kill)\b""", RegexOption.IGNORE_CASE),
-      listOf("--display", "--display-id")),
-    ScreenFamily("monkey", Regex("""\bmonkey\b""", RegexOption.IGNORE_CASE), listOf("--display", "--display-id")),
+    // `am` / `cmd activity` 的启动显示参数是 `--display`；`-d` 是 Intent data，**不得**作为目标屏凭据。
+    ScreenFamily("am", Regex("""\bam[ \t]+(?:start(?=[ \t]|$)|start-activity(?=[ \t]|$)|start-in-vsync(?=[ \t]|$))""", RegexOption.IGNORE_CASE),
+      listOf("--display")),
+    ScreenFamily("am-unscoped", Regex("""\bam[ \t]+(?:force-stop|kill|instrument|startservice|start-service|startforegroundservice|startfgservice|start-foreground-service|start-fg-service|broadcast)\b""", RegexOption.IGNORE_CASE),
+      emptyList()),
+    ScreenFamily("cmd-activity", Regex("""\bcmd[ \t]+activity[ \t]+(?:start(?=[ \t]|$)|start-activity(?=[ \t]|$)|start-in-vsync(?=[ \t]|$))""", RegexOption.IGNORE_CASE),
+      listOf("--display")),
+    ScreenFamily("cmd-activity-unscoped", Regex("""\bcmd[ \t]+activity[ \t]+(?:force-stop|kill|startservice|start-service|startforegroundservice|startfgservice|start-foreground-service|start-fg-service|broadcast|instrument)\b""", RegexOption.IGNORE_CASE),
+      emptyList()),
+    ScreenFamily("monkey", Regex("""\bmonkey\b""", RegexOption.IGNORE_CASE), emptyList()),
   )
 
   /** SurfaceFlinger 的虚拟屏 token 行 / 其后的 name= 行（设备实测形态，见坑 147）。 */
@@ -61,30 +67,43 @@ internal object ShellOps {
   /** 嵌套执行体再切一层的深度上限（与引擎侧 `MAX_NESTING` 相同）。 */
   private const val MAX_NESTING = 4
 
-  /** `sh -c '<内层>'` 形式（含 `/system/bin/sh`、`busybox sh`、`su` 等包装）。 */
+  /** 只有实际命令头的固定 `sh -c` 启动形式可以提供可检查载荷。 */
   private val SHELL_C_PAYLOAD = Regex(
-    """(?:^|[ \t])(?:[^\s]*/)?(?:sh|bash|mksh|ash|dash|zsh|busybox|toybox|su)[ \t]+(?:-[^\s]+[ \t]+)*-c[ \t]+([\s\S]*)$""",
+    """^[ \t]*(?:(?:[A-Za-z_][A-Za-z0-9_]*=[^\s]+)[ \t]+)*(?:(?:env|command)[ \t]+)?(?:/system/bin/)?sh[ \t]+-c[ \t]+([\s\S]*)$""",
   )
   /** Opaque script executors cannot be safely classified by command-word matching in restricted screen scopes. */
   private val OPAQUE_EXECUTION = Regex(
-    """(?:^|[ \t])(?:eval|source|xargs|trap|awk|gawk|mawk|perl|python(?:[0-9.]*)?|node(?:js)?|ruby|php|lua|tclsh|js)(?:[ \t]|$)|(?:^|[ \t])\.(?:[ \t]|$)|(?:^|[ \t])find[ \t]+[^\n]*[ \t]-(?:exec|ok)(?:dir)?(?:[ \t]|$)|(?:^|[ \t])tar[ \t]+[^\n]*[ \t]--to-command(?:[ =]|$)""",
+    """^(?:(?:[A-Za-z_][A-Za-z0-9_]*=[^\s]+)[ \t]+)*(?:eval|source|xargs|trap|awk|gawk|mawk|perl|python(?:[0-9.]*)?|node(?:js)?|ruby|php|lua|tclsh|js|alias|hash|read|run-as|runcon|chroot|app_process|dalvikvm|\.)(?:[ \t]|$)|(?:^|[ \t])find[ \t]+[^\n]*[ \t]-(?:exec|ok)(?:dir)?(?:[ \t]|$)|(?:^|[ \t])tar[ \t]+[^\n]*[ \t]--to-command(?:[ =]|$)""",
     RegexOption.IGNORE_CASE,
   )
   private val SHELL_INTERPRETER = Regex(
-    """(?:^|[ \t])(?:(?:[^\s]*/)?(?:sh|bash|mksh|ash|dash|zsh|busybox|toybox|su))(?=[ \t]|$)""",
+    """^(?:[^\s]*/)?(?:sh|bash|mksh|ash|dash|zsh|busybox|toybox|su)(?=[ \t]|$)""",
     RegexOption.IGNORE_CASE,
   )
   private val SCREEN_COMMAND_HEAD = Regex(
-    """^(?:(?:[A-Za-z_][A-Za-z0-9_]*=[^\s]+)[ \t]+)*(?:(?:[^\s]*/)?(?:screencap|screenrecord|input|uiautomator|wm|dumpsys|am|monkey))(?=[ \t]|$)""",
+    """^(?:(?:[A-Za-z_][A-Za-z0-9_]*=[^\s]+)[ \t]+)*(?:(?:[^\s]*/)?(?:screencap|screenrecord|input|uiautomator|wm|dumpsys|am|monkey|cmd[ \t]+(?:activity|window)))(?=[ \t]|$)""",
     RegexOption.IGNORE_CASE,
   )
   private val SCREEN_COMMAND_WORD = Regex(
-    """\b(?:screencap|screenrecord|input|uiautomator|wm|dumpsys|am|monkey)\b""",
+    """\b(?:screencap|screenrecord|input|uiautomator|wm|dumpsys|am|monkey|cmd[ \t]+(?:activity|window))\b""",
     RegexOption.IGNORE_CASE,
   )
   private val COMMAND_LAUNCHER_HEAD = Regex(
-    """^(?:(?:[A-Za-z_][A-Za-z0-9_]*=[^\s]+)[ \t]+)*(?:command|exec|env|nohup|nice|timeout|setsid)(?=[ \t]|$)""",
+    """^(?:(?:[A-Za-z_][A-Za-z0-9_]*=[^\s]+)[ \t]+)*(?:command|builtin|exec|env|nohup|nice|timeout|setsid|time|!)(?=[ \t]|$)""",
     RegexOption.IGNORE_CASE,
+  )
+  private val SAFE_SHELL_LAUNCHER_HEAD = Regex("""^(?:env|command)[ \t]+(?:/system/bin/)?sh[ \t]+-c[ \t]""")
+  private val TRUSTED_SHELL_PATH_HEAD = Regex("""^/system/bin/sh[ \t]+-c[ \t]""")
+  private val SHELL_CONTROL_HEAD = Regex("""^(?:(?:[A-Za-z_][A-Za-z0-9_]*=[^\s]+)[ \t]+)*(?:if|then|elif|else|fi|while|until|for|select|case|esac|do|done|function|coproc)(?=[ \t]|$)""")
+  private val OPAQUE_DISPLAY_API = Regex("""\b(?:cmd[ \t]+window|wm[ \t]+dump-visible-window-views|(?:am|cmd[ \t]+activity)[ \t]+instrument)\b""", RegexOption.IGNORE_CASE)
+  /** A command found by path may be a user-written script that hides screen access from this text scan. */
+  private val EXECUTABLE_PATH_HEAD = Regex(
+    """^[^ \t]*/[^ \t]*(?=[ \t]|$)""",
+  )
+  private val COMMAND_GLOB_HEAD = Regex("""^[^ \t]*[*?\[]""")
+  /** Search paths, shell startup files and loader hooks can execute code absent from this command. */
+  private val EXECUTION_ENV_OVERRIDE = Regex(
+    """(?:^|[ \t])(?:(?:export|declare|typeset|local|readonly)[ \t]+(?:-[A-Za-z]+[ \t]+)*)?(?:PATH|ENV|BASH_ENV|SHELLOPTS|BASHOPTS|ZDOTDIR|LD_[A-Z0-9_]+)[ \t]*=""",
   )
 
   /**
@@ -205,13 +224,20 @@ internal object ShellOps {
     // 走完整判定（不做「无命令词即放行」的短路）：短路会把 `deny-unparsed`（引号不闭合）也一并
     // 放行——而那条恰恰是「看不懂就不放行」的 fail-closed 面。SF token 反查的开销由
     // screenVerdictWithRegistry 的**惰性谓词**化解，不靠短路省。
-    if (screenVerdictWithRegistry(context, command) == ScreenCommandVerdict.ALLOW) return null
+    val verdict = screenVerdictWithRegistry(context, command)
+    if (verdict == ScreenCommandVerdict.ALLOW) return null
+    val guidance = if (verdict == ScreenCommandVerdict.DENY_UNPARSED) {
+      "本条命令含无法安全解析的 shell 语法、脚本执行器或屏幕命令别名，无法核对目标屏，故拒绝。" +
+        "请改为直接、可静态核对的命令后重试。"
+    } else {
+      "命令里显式指定的目标屏须为**已注册虚拟屏**（DisplayManager displayId 或该屏的 SurfaceFlinger token），" +
+        "且参数须使用该命令支持的拼写与位置；本条命令未能通过核对，故拒绝。请确认虚拟屏仍在活跃状态" +
+        "（android_vdisplay_create / vdInfo），或由用户在设置中修改范围后重试。"
+    }
     return JSONObject()
       .put("__error", "用户当前开放屏幕范围为 virtual-only，不允许经特权 shell 读取或操作真实屏幕"
-        + "（screencap / screenrecord / uiautomator / input / wm / dumpsys window|display|input / am / monkey）。"
-        + "命令里显式指定的目标屏若确为**已注册虚拟屏**（DisplayManager displayId 或该屏的 SurfaceFlinger token）即可放行；"
-        + "本条命令的目标屏未能与壳侧注册表核对上，故拒绝。请确认虚拟屏仍在活跃状态"
-        + "（android_vdisplay_create / vdInfo），或由用户在设置中修改范围后重试。")
+        + "（screencap / screenrecord / uiautomator / input / wm / dumpsys window|display|input / am / cmd activity / monkey）。"
+        + guidance)
       .put("reason", "screen-out-of-scope")
       .put("op", "shExec")
   }
@@ -224,11 +250,12 @@ internal object ShellOps {
     val parsed = splitCommandSegments(command)
     if (parsed.unparsed) return false
     for (segment in parsed.segments) {
-      val bare = stripQuotedText(segment)
+      val bare = scopeCommandText(segment) ?: ""
       val options = displayOptionsIn(bare)
       val normalized = stripDisplayOptions(bare)
       val families = SCREEN_FAMILIES.filter { it.pattern.containsMatchIn(normalized) }
       for (family in families) {
+        if (hasUncertifiedSelector(bare, family)) return false
         val relevant = options.filter { it.first in family.targetFlags }
         if (family.targetFlags.isEmpty() && options.isNotEmpty()) return false
         if (relevant.any { it.second != "0" }) return false
@@ -244,9 +271,9 @@ internal object ShellOps {
    */
   internal fun commandTargetsRealScreen(command: String): Boolean = screenFamiliesIn(command).isNotEmpty()
 
-  /** 归一化（剥引号文本 + 抹目标屏参数）后命中的命令词家族名。 */
+  /** 归一化（还原静态参数 + 抹目标屏参数）后命中的命令词家族名。 */
   internal fun screenFamiliesIn(command: String): List<String> =
-    SCREEN_FAMILIES.filter { it.pattern.containsMatchIn(stripDisplayOptions(stripQuotedText(command))) }
+    SCREEN_FAMILIES.filter { it.pattern.containsMatchIn(stripDisplayOptions(scopeCommandText(command) ?: "")) }
       .map { it.name }
 
   /**
@@ -328,7 +355,7 @@ internal object ShellOps {
     val parsed = splitCommandSegments(command)
     if (parsed.unparsed) return ScreenCommandVerdict.DENY_UNPARSED
     for (segment in parsed.segments) {
-      val bare = stripQuotedText(segment)
+      val bare = scopeCommandText(segment) ?: ""
       val options = displayOptionsIn(bare)
       val normalized = stripDisplayOptions(bare)
       val families = SCREEN_FAMILIES.filter { it.pattern.containsMatchIn(normalized) }
@@ -338,6 +365,7 @@ internal object ShellOps {
         continue
       }
       for (family in families) {
+        if (hasUncertifiedSelector(bare, family)) return ScreenCommandVerdict.DENY_UNCERTIFIED_TARGET
         if (family.targetFlags.isEmpty()) return ScreenCommandVerdict.DENY_UNCERTIFIED_TARGET
         val owned = options.filter { it.first in family.targetFlags }.map { it.second }
         // 该家族必须在**本段内**自证：参数缺席、或任一值不属于已注册虚拟屏 → 拒（不得只认证其中一个）。
@@ -501,9 +529,19 @@ internal object ShellOps {
     }
     if (pending.isNotEmpty()) unparsed = true
     if (segments.any { segment ->
-        val bare = stripQuotedText(segment).trimStart()
-        OPAQUE_EXECUTION.containsMatchIn(bare) ||
-          (SHELL_INTERPRETER.containsMatchIn(bare) && !SHELL_C_PAYLOAD.containsMatchIn(segment))
+        val view = scopeCommandText(segment)
+        if (view == null) true else {
+          val head = view.split(' ').dropWhile { Regex("""^[A-Za-z_][A-Za-z0-9_]*=""").containsMatchIn(it) }.joinToString(" ")
+          OPAQUE_EXECUTION.containsMatchIn(head) ||
+            head.substringBefore(' ') == "__shell_argument__" ||
+            OPAQUE_DISPLAY_API.containsMatchIn(head) ||
+            SHELL_CONTROL_HEAD.containsMatchIn(head) ||
+            COMMAND_GLOB_HEAD.containsMatchIn(head) ||
+            (EXECUTABLE_PATH_HEAD.containsMatchIn(head) && !TRUSTED_SHELL_PATH_HEAD.containsMatchIn(head)) ||
+            (COMMAND_LAUNCHER_HEAD.containsMatchIn(head) && !(SAFE_SHELL_LAUNCHER_HEAD.containsMatchIn(head) && SHELL_C_PAYLOAD.containsMatchIn(segment))) ||
+            EXECUTION_ENV_OVERRIDE.containsMatchIn(view) ||
+            (SHELL_INTERPRETER.containsMatchIn(head) && !SHELL_C_PAYLOAD.containsMatchIn(segment))
+        }
       }) unparsed = true
     return ParsedCommand(segments.filter { it.isNotBlank() }, unparsed)
   }
@@ -611,12 +649,102 @@ internal object ShellOps {
   }
 
   /**
-   * 把**引号内文本与转义字符**替换成 shell 真正会执行的字面量：
-   *  - 引号段整体抹成空白（引号内不是命令词，也不是参数——`echo "screencap"` 不执行它）；
-   *  - `\x` 解成 `x`（shell 会消掉反斜杠：`input \-d 0 tap 1 2` 实际执行的就是 `input -d 0 tap 1 2`）。
-   *
-   * 与引擎侧 `stripQuotedText` 同规则。
+   * 还原静态 shell 参数，引用参数仍是一个词；注释和重定向文件名不参与目标认证。
+   * 不支持的控制语法与描述符重定向返回 null，由调用方 fail-closed。
+   * 与引擎侧 scopeCommandText 同规则。
    */
+  private fun scopeCommandText(text: String): String? {
+    val words = ArrayList<String>()
+    val word = StringBuilder()
+    var active = false
+    var redirect = false
+    var quote: Char? = null
+    fun flush() {
+      if (!active) return
+      if (redirect) redirect = false else {
+        val value = word.toString()
+        val assignment = Regex("""^[A-Za-z_][A-Za-z0-9_]*=""").find(value)?.value ?: ""
+        words.add(if (Regex("[ \\t\\r\\n]").containsMatchIn(value)) assignment + "__shell_argument__" else value)
+      }
+      word.setLength(0)
+      active = false
+    }
+    var i = 0
+    while (i < text.length) {
+      val ch = text[i++]
+      if (quote == '\'') {
+        if (ch == '\'') quote = null else word.append(ch)
+        continue
+      }
+      if (ch == '\\') {
+        if (i >= text.length) return null
+        val next = text[i++]
+        if (next == '\n') continue
+        if (quote == '"' && next !in listOf('$', '"', '\\', 96.toChar())) word.append('\\')
+        word.append(next)
+        active = true
+        continue
+      }
+      if (quote == '"') {
+        if (ch == '"') quote = null else word.append(ch)
+        continue
+      }
+      if (ch == '\'' || ch == '"') { quote = ch; active = true; continue }
+      if (ch == '#' && !active) break
+      if (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r') { flush(); continue }
+      if (ch == '<' || ch == '>') {
+        if (active && Regex("[0-9]+").matches(word)) { word.setLength(0); active = false } else flush()
+        if (redirect) return null
+        if (i < text.length && text[i] == ch) {
+          if (ch == '<') return null
+          i += 1
+        }
+        if (i < text.length && text[i] in "&|(>") return null
+        redirect = true
+        continue
+      }
+      if (ch in "(){};&|") return null
+      word.append(ch)
+      active = true
+    }
+    if (quote != null) return null
+    flush()
+    return if (redirect) null else words.joinToString(" ")
+  }
+
+  private fun hasUncertifiedSelector(text: String, family: ScreenFamily): Boolean {
+    val words = text.split(' ')
+    var i = 0
+    while (i < words.size) {
+      val word = words[i]
+      if (word == "-d" && (family.name.startsWith("am") || family.name.startsWith("cmd-activity"))) {
+        i += 2
+        continue
+      }
+      if (family.name == "wm" && word == "-u") return true
+      if (word in listOf("-d", "--display", "--display-id")) {
+        if (word !in family.targetFlags || !Regex("[0-9]+").matches(words.getOrNull(i + 1) ?: "")) return true
+        var at = words.indexOf(if (family.name == "cmd-activity") "activity" else family.name)
+        if (at < 0) return true
+        when (family.name) {
+          "input" -> {
+            at += 1
+            if (Regex("^(?:keyboard|dpad|gamepad|touchscreen|mouse|stylus|trackball|touchpad|touchnavigation|joystick)$").matches(words.getOrNull(at) ?: "")) at += 1
+            if (i != at) return true
+          }
+          "wm" -> if (i != at + 2 && i != at + 3) return true
+          "am", "cmd-activity" -> if (i != at + 2) return true
+          "screencap" -> if (!words.subList(at + 1, i).all { it == "-p" || it == "-h" }) return true
+          "screenrecord" -> if (i != at + 1) return true
+        }
+        i += 1
+      } else if (Regex("^-d.+|^--display").containsMatchIn(word)) return true
+      i += 1
+    }
+    return false
+  }
+
+  /** 仅用于动态展开前缀检测的去引用视图；真实参数认证使用 scopeCommandText。 */
   internal fun stripQuotedText(text: String): String {
     val out = StringBuilder()
     var i = 0
@@ -732,7 +860,9 @@ internal object ShellOps {
    * 数值化即失真（见坑 147）。与引擎侧 `adbCommandDisplayTokens` 的取法一致。
    */
   internal fun commandDisplayTokens(command: String): List<String> =
-    displayOptionsIn(command).map { it.second }
+    splitCommandSegments(command).let { parsed ->
+      if (parsed.unparsed) emptyList() else parsed.segments.flatMap { displayOptionsIn(scopeCommandText(it) ?: "").map { option -> option.second } }
+    }
 
   /**
    * 落一条审计。

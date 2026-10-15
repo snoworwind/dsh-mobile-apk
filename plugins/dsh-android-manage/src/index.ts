@@ -31,6 +31,10 @@ import { cacheFromV2, decodeV2, isV2Payload, type V2Decoded } from './protocol-v
 import { detailRecord, pageRows, writeDetailStore } from './detail-store.js'
 import { resolveVirtualDisplayToken, vdTokenMissingText } from './vd-shot.js'
 
+// Keyboard auth is carried in Intent extras, so the broadcast must never be
+// resolved against other apps that may register the same legacy ADBKeyboard action.
+const ADB_KEYBOARD_RECEIVER = 'com.dsharnessmobile.shell/.AdbKeyboardReceiver'
+
 /**
  * 0.13.8 #183：键盘广播来源校验 nonce 参数（壳侧 AdbKeyboardReceiver 私有文件，
  * 引擎与壳同 uid 可读）。文件缺失（旧壳 / 桌面宿主）返回空串 = 不带 auth 参数，
@@ -1998,8 +2002,8 @@ return String(value.text ?? '') + (lines.length > 0 ? '\n' + lines.join('\n') : 
         // 同 uid 可读，随广播 --es auth 携带；API 34+ 壳侧另有 sentFromUid 白名单兜底。
         const authArg = adbKeyboardAuthArg()
         const parts: string[] = []
-        if (clear) parts.push(`am broadcast -a ADB_CLEAR_TEXT${authArg}`)
-        if (raw) parts.push(`am broadcast -a ADB_INPUT_TEXT${authArg} --es msg '${raw.replace(/'/g, `'\\''`)}'`)
+        if (clear) parts.push(`am broadcast -n ${ADB_KEYBOARD_RECEIVER} -a ADB_CLEAR_TEXT${authArg}`)
+        if (raw) parts.push(`am broadcast -n ${ADB_KEYBOARD_RECEIVER} -a ADB_INPUT_TEXT${authArg} --es msg '${raw.replace(/'/g, `'\\''`)}'`)
         let r: { ok: boolean; stdout: string; guidance?: string } = { ok: true, stdout: '' }
         for (const p of parts) {
           r = await priv.execAdbShell(p)
@@ -2021,8 +2025,8 @@ return String(value.text ?? '') + (lines.length > 0 ? '\n' + lines.join('\n') : 
           await new Promise((resolve) => setTimeout(resolve, 260))
           readBack = await read()
           if (readBack !== null && readBack !== raw) {
-            await priv.execAdbShell(`am broadcast -a ADB_CLEAR_TEXT${authArg}`).catch(() => undefined)
-            await priv.execAdbShell(`am broadcast -a ADB_INPUT_TEXT${authArg} --es msg '${raw.replace(/'/g, `'\\''`)}'`).catch(() => undefined)
+            await priv.execAdbShell(`am broadcast -n ${ADB_KEYBOARD_RECEIVER} -a ADB_CLEAR_TEXT${authArg}`).catch(() => undefined)
+            await priv.execAdbShell(`am broadcast -n ${ADB_KEYBOARD_RECEIVER} -a ADB_INPUT_TEXT${authArg} --es msg '${raw.replace(/'/g, `'\\''`)}'`).catch(() => undefined)
             await new Promise((resolve) => setTimeout(resolve, 320))
             readBack = await read()
           }

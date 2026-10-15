@@ -150,6 +150,8 @@ sequenceDiagram
 | 高 | K08 | 浏览器截图只写不删、`health` 恒 `ok`、失败原因串上一轮 `lastError` | `app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt:1565`、`app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt:1581`、`app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt:1589` | 长任务磁盘累积（全页 PNG）；截图失败原因误导 | 未修（S-6/F-7） |
 | 高 | K08 | 「隔离浏览器」没有存储隔离：无 `setDataDirectorySuffix` 与清理 op，且引擎鉴权 cookie 在**进程级** `CookieManager` | `app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:815` | AI 访问过的站点 cookie/localStorage 持久驻留且用户无撤销入口；过滤一旦有缺口即带引擎 cookie 出网 | 未修（S-3/F-9） |
 | 高 | K06 | 双引号内的动态命令替换曾绕过屏幕范围门 | `app/src/main/java/com/dsharnessmobile/shell/ShellOps.kt`、`plugins/dsh-android-bridge/src/screen-scope.ts` | 引号内动态展开、命令合成与不透明执行器可能改变实际命令/目标屏 | 已修：动态屏幕目标 fail-closed；两侧统一检查不透明执行器，跨语言 fixture 增加反证 |
+| 高 | K06 | 路径脚本与错误显示参数认证可绕过范围门 | `ShellOps.scopeCommandText/hasUncertifiedSelector`、`screen-scope.ts` 同名函数 | 脚本不可见、引用目标被抹掉、注释/重定向捐出参数、Android CLI 别名与位置差异 | 源码已修；两插件编译通过；按用户要求仅做编译和静态检查，设备层未验收。见坑 313/314 |
+| 高 | K05 | 输入广播未限定组件时可能向其他应用泄露 nonce | `plugins/dsh-android-manage/src/index.ts:33` | 同 action 接收器可能取得 auth 并伪造输入 | 源码已修：所有发送与重试显式指定 AdbKeyboardReceiver；设备验收待完成。见坑 312 |
 | 高 | K06 | 特权服务面危险命令黑名单曾可被 `controlExec` 直连绕过 | `plugins/dsh-android-bridge/src/index.ts:1045`、`:1191`、`:1228` | 工具壳拒绝而服务面放行，会让直连插件绕过系统配置/权限写保护 | 已修：服务面 `controlExec`、`execAdbShell`、`execAdbLine` 共用拒绝判据并审计 |
 | 高 | K07 | `touch()` 全仓零调用点，「空闲回收」实为「建屏后 10 分钟必回收」 | `app/src/main/java/com/dsharnessmobile/shell/VdisplayController.kt:84`、`app/src/main/java/com/dsharnessmobile/shell/VdisplayController.kt:60` | 长任务看虚拟屏时中途黑屏 | 未修（F-10/V-R0） |
 | 高 | K07 | `create()` 幂等判定在锁外、`setSurface` 失败被吞、`VdisplayHost.onMain` 无 catch | `app/src/main/java/com/dsharnessmobile/shell/VdisplayController.kt:322`、`app/src/main/java/com/dsharnessmobile/shell/VdisplayController.kt:495`、`app/src/main/java/com/dsharnessmobile/shell/VdisplayHost.kt:207-213` | 并发双建屏；查看器槽位被占但画面黑；主线程异常打穿 | 未修（S-8 同族） |
@@ -456,6 +458,7 @@ sequenceDiagram
 | K06 | 引擎 bridge 插件 androidPrivilege | sh* 四 op 的唯一常规调用方；档位/危险命令/范围第一道都在引擎侧 | plugins/dsh-android-bridge/src/index.ts:1034 |
 | K06 | 引擎 screen-scope.ts | 同一判定算法的 JS 副本，与壳侧由跨语言 fixture 双向锁死 | plugins/dsh-android-bridge/src/screen-scope.ts:405 |
 | K06 | 控制队列承载 ControlCarrier/ControlPoller | 特权 op 的唯一壳侧入口与单线程执行者 | app/src/main/java/com/dsharnessmobile/shell/ControlCarrier.kt:107 |
+| K06 | bridge 范围门与 shell 静态参数还原 | 两份实现按真实参数核对显示选项；路径/包装拒绝、注释/重定向剔除、CLI 拼写与位置校验 | app/src/main/java/com/dsharnessmobile/shell/ShellOps.kt:656, plugins/dsh-android-bridge/src/screen-scope.ts:392 |
 | K06 | 无障碍控制面 DeviceControlService | 另一条通道的同名分支与范围门；六面登记链要求分支留在该服务里 | app/src/main/java/com/dsharnessmobile/shell/DeviceControlService.kt:661 |
 | K06 | 虚拟屏注册表 VdisplayController | displayId 与 SF token 两个 id 空间的真源，范围放行只认它 | app/src/main/java/com/dsharnessmobile/shell/ShellOps.kt:197 |
 | K06 | 页面桥 AndroidBridge/MainActivity | 范围写面、外部打开、配置导入导出、来件 intent 的接线点 | app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:771 |
@@ -821,7 +824,7 @@ flowchart TD
 - **入口/触发**：
   - 队列取活：`ControlPoller.loop()`（`ControlPoller.kt:96`）向 `127.0.0.1:3080/api/android/ui/pending` 长轮询 → `ControlCarrier.handle`（`ControlCarrier.kt:86`）→ `DeviceControlService.handle`（`DeviceControlService.kt:607`）。
   - 服务生命周期：系统绑定 → `onServiceConnected`（:444，登记 `ControlCarrier.a11y` 并 `ensureStarted`）；`onAccessibilityEvent`（:457）只做失效标记；`onInterrupt`（:471）空实现；`onUnbind`/`onDestroy` → `teardown`（:485）。
-  - 键盘：`AdbKeyboardReceiver.onReceive`（`AdbKeyboardReceiver.kt:23`）← `am broadcast -a ADB_INPUT_TEXT/ADB_CLEAR_TEXT --es msg/--es auth`（引擎 manage 的 `android_ui_input`，`plugins/dsh-android-manage/src/index.ts:1889`）。
+  - 键盘：`AdbKeyboardReceiver.onReceive`（`AdbKeyboardReceiver.kt:23`）← `am broadcast -n com.dsharnessmobile.shell/.AdbKeyboardReceiver -a ADB_INPUT_TEXT/ADB_CLEAR_TEXT --es msg/--es auth`（显式限定接收组件，避免认证 nonce 扩散到其他应用；引擎 manage 的 `android_ui_input`，`plugins/dsh-android-manage/src/index.ts:1990`）。
   - 设置页只读：`statusJson`（:214）/`token`（:235）经 `AndroidBridge.a11yStatus`（`MainActivity.kt:793`）。
 - **运行顺序**：
   1. 引擎工具面 → bridge `controlExec`（`plugins/dsh-android-bridge/src/index.ts:949`）→ 控制队列 enqueue（单在途；档位门、`A11Y_OPS` 门、`REAL_SCREEN_CONTROL_OPS` 范围门都在这一步）。

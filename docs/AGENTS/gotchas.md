@@ -1853,3 +1853,33 @@ EngineBootContinuationTest用latch驱动真实观察函数：winner持CAS但无�
 **修法**：bridge 服务面先做有界的引号/转义词法还原，再跑危险操作规则；未闭合引号拒绝。若命令词或危险命令族参数含动态展开，则拒绝无法静态确认的情况。服务面仍在 `controlExec`、`execAdbShell`、`execAdbLine` 复查并记审计。
 
 **判据**：服务面反证必须拒绝普通写法、引号拼词、反斜杠拼词和权限动词拼词；被拒命令不进入控制队列。对应反例已加到 `plugins/dsh-android-bridge/test/screen-scope.test.mjs`，本轮未运行测试套件。
+
+312. **认证 nonce 随未限定目标的输入广播发送，会暴露给同 action 的其他接收方**
+
+**现象**：`android_ui_input` 通过 `am broadcast -a ADB_INPUT_TEXT/ADB_CLEAR_TEXT` 发送携带认证 nonce 的隐式广播。其他应用若注册相同 action 的接收器，可能收到 `auth` extra；取得 nonce 后即可伪造输入广播，在本输入法活跃时向当前输入框注入文本。
+
+**真因**：接收器虽校验了 nonce，但发送方没有限定广播的接收包或组件，认证凭据随可被其他应用匹配的广播一同发送。
+
+**修法**：所有输入/清空广播都显式指定 `com.dsharnessmobile.shell/.AdbKeyboardReceiver` 组件，避免广播解析到其他应用；nonce 校验继续作为接收端防线。Android 的 `Intent.setPackage()` 文档说明包约束会把匹配范围限制在指定应用内；此处用 `am broadcast -n` 进一步限制到单个组件。
+
+**判据**：manage 插件所有 `ADB_INPUT_TEXT` / `ADB_CLEAR_TEXT` 发送点都必须指定壳侧接收组件；不得将 auth nonce 放进未限定目标的广播。静态复核确认发送点已收敛，本轮未运行测试或设备验收。
+
+313. **路径脚本、执行环境改写和 shell 包装可以隐藏实际屏幕操作**
+
+**现象**：先用授权的 `shPush` 写入可执行脚本，再让 `shExec` 执行该路径，原文本扫描看不到脚本中的截图或输入命令。前置重定向、带空白的可执行文件名、相对路径、控制结构、通配符命令名及伪装为 `sh` 的脚本还会遮住真正的命令头；`BASH_ENV`、`LD_PRELOAD` 等执行环境变量又能让普通命令加载额外代码。
+
+**真因**：范围门只检查提交的文本，无法认证磁盘中另一段程序的行为；把命令段开头当作可执行文件位置也不符合 shell 语法。原 `sh -c` 提取还可能匹配普通参数中的诱饵，或漏掉引用/转义的 `-c`，因此载荷不一定对应实际启动方式。
+
+**修法**：两侧先还原静态 shell 参数并去掉重定向落点，再识别实际命令头；受限范围拒绝路径执行、带空白的命令头、PATH/启动文件/加载器环境变量改写、命令名通配符、控制结构和不透明包装。仅保留可递归检查的固定 `env/command sh -c` 与 `/system/bin/sh -c` 形态。这是范围门的保守文本策略，不是完整 shell 沙箱。环境加载行为依据 [Bash 启动文件规则](https://www.gnu.org/software/bash/manual/html_node/Bash-Startup-Files.html) 与 [Android linker 源码](https://android.googlesource.com/platform/bionic/+/d990f7d7f495430875b023538881c9b7a7e81c23/linker/linker_main.cpp)。
+
+**判据**：静态核对脚本与包装拒绝路径，同时核对普通文件命令、固定 shell 包装和合法虚拟屏截图的放行路径。按用户要求本轮只做编译和静态检查，未新增或运行测试，设备层未验收。
+
+314. **引用参数被抹掉、注释/重定向捐出选项、CLI 别名与选项位置差异都可能误认证显示目标**
+
+**现象**：`input -d "0" tap …` 的引用目标会被旧扫描抹掉；`screencap -p # -d 7` 或 `screencap -p > -d 7` 又会把注释/重定向文件名误当作显示选项。`input touchscreen tap …`、`cmd activity start-activity` 和 `cmd window dump-visible-window-views` 也未进入原命令族。静态路径还显示，`wm size … --display 7` 中的未知选项不能证明命令会作用于显示器 7。
+
+**真因**：引用参数、shell 语法与真实 argv 被混为一层；不同 Android CLI 又共享了过宽的显示参数白名单，未核对参数是否处于该命令实际读取的位置。
+
+**修法**：Kotlin 与 bridge 共用等价的静态参数还原规则，引用单个参数保留值，包含空白的单个数据参数不拆成策略词，注释与重定向文件名不参与认证。显示参数按命令和位置核对；无法确认的紧凑、等号、uniqueId 及不受支持的拼写在受限范围拒绝。补齐 input 源/动词覆盖、`cmd activity` 启动面；多显示器窗口接口与 instrumentation 在受限范围保守拒绝。无显示选择器的全局子命令不得借用启动命令的显示参数。
+
+**依据与判据**：[AOSP InputShellCommand](https://android.googlesource.com/platform/frameworks/base/+/8417c7bb1cbb/services/core/java/com/android/server/input/InputShellCommand.java)、[ActivityManagerShellCommand](https://android.googlesource.com/platform/frameworks/base/+/master/services/core/java/com/android/server/am/ActivityManagerShellCommand.java)、[WindowManagerShellCommand](https://android.googlesource.com/platform/frameworks/base/+/master/services/core/java/com/android/server/wm/WindowManagerShellCommand.java) 的真实解析路径；静态逐项核对上述拒绝反例与合法目标对照。插件编译通过；测试与设备验收状态同坑 313。

@@ -79,7 +79,7 @@ export function controlOpNeedsRealScreen(op: string): boolean {
 
 // ── 目标屏参数：全链路唯一的取值口 ────────────────────────────────────────────────
 //
-// 三种拼写是设备实测可行形态（`screencap -d` / `input --display` / `-d` 前置）；取值**保留
+// 各命令的有效拼写由 SCREEN_COMMAND_FAMILIES 分别限定；取值**保留
 // 原始十进制串、绝不数值化**：`screencap -d` 吃的是 SurfaceFlinger display token，
 // 设备实测虚拟屏形如 `11529215046816944610` —— 它 > 2^53（JS Number 安全整数上界）且
 // > 2^63-1（Kotlin Long 上界）。任何数值化都会把它变成 `...944000`（末位失真），
@@ -117,8 +117,8 @@ export function displayOptionsIn(text: string): DisplayOption[] {
  */
 export function adbCommandDisplayIds(command: string): number[] {
   const ids: number[] = []
-  for (const option of displayOptionsIn(command)) {
-    const id = Number(option.value)
+  for (const value of adbCommandDisplayTokens(command)) {
+    const id = Number(value)
     if (Number.isInteger(id)) ids.push(id)
   }
   return ids
@@ -129,7 +129,9 @@ export function adbCommandDisplayIds(command: string): number[] {
  * @returns 命令中出现的目标屏数字串（原样）；空数组 = 无可核对目标屏。
  */
 export function adbCommandDisplayTokens(command: string): string[] {
-  return displayOptionsIn(command).map((option) => option.value)
+  const parsed = splitCommandSegments(command)
+  if (parsed.unparsed) return []
+  return parsed.segments.flatMap((segment) => displayOptionsIn(scopeCommandText(segment) ?? '').map((option) => option.value))
 }
 
 // ── 命令段切分：引号感知（§8.3b 洗白绕过的修法） ────────────────────────────────
@@ -144,8 +146,8 @@ export function adbCommandDisplayTokens(command: string): string[] {
 //      这类合法形态，误切会把合法命令判成多段）；
 //   ② 嵌套执行体（反引号、`$(...)`、`sh -c '<内层>'`）**再切一层**——它们会被 shell 真正执行，
 //      不切开就等于放过 `sh -c "screencap -d <token>; input tap 1 2"`；
-//   ③ 抽 token / 匹配命令词之前先**剥掉引号内文本**（否则 `echo x -d <token>; …` 里的 token
-//      会充当洗白凭据）；
+//   ③ 抽 token / 匹配命令词之前先还原静态参数，引用的数据仍保持一个词；注释与重定向落点
+//      不参与认证，每段独立核对（否则别处的 token 会充当洗白凭据）；
 //   ④ 引号不闭合（无法解析）一律判**拒**（fail-closed：绝不在看不懂的命令上放行）。
 
 /** 引号感知切段结果。`unparsed` = 引号不闭合等无法解析形态（调用方必须 fail-closed）。 */
@@ -159,11 +161,21 @@ export interface CommandSegments {
 const MAX_NESTING = 4
 
 /** Commands that can execute opaque scripts or stdin; restricted screen scopes cannot inspect their effects. */
-const OPAQUE_EXECUTION = /(?:^|[ \t])(?:eval|source|xargs|trap|awk|gawk|mawk|perl|python(?:[0-9.]*)?|node(?:js)?|ruby|php|lua|tclsh|js)(?:[ \t]|$)|(?:^|[ \t])\.(?:[ \t]|$)|(?:^|[ \t])find[ \t]+[^\n]*[ \t]-(?:exec|ok)(?:dir)?(?:[ \t]|$)|(?:^|[ \t])tar[ \t]+[^\n]*[ \t]--to-command(?:[ =]|$)/i
-const SHELL_INTERPRETER = /(?:^|[ \t])(?:(?:[^\s]*\/)?(?:sh|bash|mksh|ash|dash|zsh|busybox|toybox|su))(?=[ \t]|$)/i
-const SCREEN_COMMAND_HEAD = /^(?:(?:[A-Za-z_][A-Za-z0-9_]*=[^\s]+)[ \t]+)*(?:(?:[^\s]*\/)?(?:screencap|screenrecord|input|uiautomator|wm|dumpsys|am|monkey))(?=[ \t]|$)/i
-const SCREEN_COMMAND_WORD = /\b(?:screencap|screenrecord|input|uiautomator|wm|dumpsys|am|monkey)\b/i
-const COMMAND_LAUNCHER_HEAD = /^(?:(?:[A-Za-z_][A-Za-z0-9_]*=[^\s]+)[ \t]+)*(?:command|exec|env|nohup|nice|timeout|setsid)(?=[ \t]|$)/i
+const OPAQUE_EXECUTION = /^(?:(?:[A-Za-z_][A-Za-z0-9_]*=[^\s]+)[ \t]+)*(?:eval|source|xargs|trap|awk|gawk|mawk|perl|python(?:[0-9.]*)?|node(?:js)?|ruby|php|lua|tclsh|js|alias|hash|read|run-as|runcon|chroot|app_process|dalvikvm|\.)(?:[ \t]|$)|(?:^|[ \t])find[ \t]+[^\n]*[ \t]-(?:exec|ok)(?:dir)?(?:[ \t]|$)|(?:^|[ \t])tar[ \t]+[^\n]*[ \t]--to-command(?:[ =]|$)/i
+const SHELL_INTERPRETER = /^(?:[^\s]*\/)?(?:sh|bash|mksh|ash|dash|zsh|busybox|toybox|su)(?=[ \t]|$)/i
+const SCREEN_COMMAND_HEAD = /^(?:(?:[A-Za-z_][A-Za-z0-9_]*=[^\s]+)[ \t]+)*(?:(?:[^\s]*\/)?(?:screencap|screenrecord|input|uiautomator|wm|dumpsys|am|monkey|cmd[ \t]+(?:activity|window)))(?=[ \t]|$)/i
+const SCREEN_COMMAND_WORD = /\b(?:screencap|screenrecord|input|uiautomator|wm|dumpsys|am|monkey|cmd[ \t]+(?:activity|window))\b/i
+const COMMAND_LAUNCHER_HEAD = /^(?:(?:[A-Za-z_][A-Za-z0-9_]*=[^\s]+)[ \t]+)*(?:command|builtin|exec|env|nohup|nice|timeout|setsid|time|!)(?=[ \t]|$)/i
+const SAFE_SHELL_LAUNCHER_HEAD = /^(?:env|command)[ \t]+(?:\/system\/bin\/)?sh[ \t]+-c[ \t]/
+const TRUSTED_SHELL_PATH_HEAD = /^\/system\/bin\/sh[ \t]+-c[ \t]/
+const SHELL_CONTROL_HEAD = /^(?:(?:[A-Za-z_][A-Za-z0-9_]*=[^\s]+)[ \t]+)*(?:if|then|elif|else|fi|while|until|for|select|case|esac|do|done|function|coproc)(?=[ \t]|$)/
+// These interfaces can inspect multiple displays and do not have one uniform target selector.
+const OPAQUE_DISPLAY_API = /\b(?:cmd[ \t]+window|wm[ \t]+dump-visible-window-views|(?:am|cmd[ \t]+activity)[ \t]+instrument)\b/i
+/** Path-based executables may be attacker-written scripts whose screen effects are invisible here. */
+const EXECUTABLE_PATH_HEAD = /^[^ \t]*\/[^ \t]*(?=[ \t]|$)/
+const COMMAND_GLOB_HEAD = /^[^ \t]*[*?\[]/
+/** Search paths, shell startup files and loader hooks can execute code absent from the submitted command. */
+const EXECUTION_ENV_OVERRIDE = /(?:^|[ \t])(?:(?:export|declare|typeset|local|readonly)[ \t]+(?:-[A-Za-z]+[ \t]+)*)?(?:PATH|ENV|BASH_ENV|SHELLOPTS|BASHOPTS|ZDOTDIR|LD_[A-Z0-9_]+)[ \t]*=/
 
 function dynamicExpansionCanAffectScreenScope(prefix: string): boolean {
   const bare = stripQuotedText(prefix).trimEnd()
@@ -211,8 +223,8 @@ function parenEnd(text: string, from: number): number {
   return -1
 }
 
-/** `sh -c '<内层>'` 形式的嵌套执行体（含 `/system/bin/sh`、`busybox sh`、`su` 等包装）。 */
-const SHELL_C_PAYLOAD = /(?:^|[ \t])(?:[^\s]*\/)?(?:sh|bash|mksh|ash|dash|zsh|busybox|toybox|su)[ \t]+(?:-[^\s]+[ \t]+)*-c[ \t]+([\s\S]*)$/
+/** Only the actual, fixed `sh -c` launch may donate an inspectable payload. */
+const SHELL_C_PAYLOAD = /^[ \t]*(?:(?:[A-Za-z_][A-Za-z0-9_]*=[^\s]+)[ \t]+)*(?:(?:env|command)[ \t]+)?(?:\/system\/bin\/)?sh[ \t]+-c[ \t]+([\s\S]*)$/
 
 /** Read the first shell word after `-c`, removing the outer shell quoting. Null means ambiguous. */
 function shellCommandArgument(text: string): string | null {
@@ -353,17 +365,99 @@ export function splitCommandSegments(command: string): CommandSegments {
   }
   if (pending.length > 0) unparsed = true
   if (segments.some((segment) => {
-    const bare = stripQuotedText(segment).trimStart()
-    return OPAQUE_EXECUTION.test(bare) || (SHELL_INTERPRETER.test(bare) && !SHELL_C_PAYLOAD.test(segment))
+    const view = scopeCommandText(segment)
+    if (view === null) return true
+    const words = view.split(' ')
+    let first = 0
+    while (first < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[first])) first += 1
+    const head = words.slice(first).join(' ')
+    return OPAQUE_EXECUTION.test(head)
+      || head.split(' ')[0] === '__shell_argument__'
+      || OPAQUE_DISPLAY_API.test(head)
+      || SHELL_CONTROL_HEAD.test(head)
+      || COMMAND_GLOB_HEAD.test(head)
+      || (EXECUTABLE_PATH_HEAD.test(head) && !TRUSTED_SHELL_PATH_HEAD.test(head))
+      || (COMMAND_LAUNCHER_HEAD.test(head) && !(SAFE_SHELL_LAUNCHER_HEAD.test(head) && SHELL_C_PAYLOAD.test(segment)))
+      || EXECUTION_ENV_OVERRIDE.test(view)
+      || (SHELL_INTERPRETER.test(head) && !SHELL_C_PAYLOAD.test(segment))
   })) unparsed = true
   return { segments, unparsed }
 }
 
 /**
- * 把**引号内文本与转义字符**替换成 shell 真正会执行的字面量：
- *   - 引号段整体抹成空白（引号内不是命令词，也不是参数——`echo "screencap"` 不执行它）；
- *   - `\x` 解成 `x`（shell 会消掉反斜杠：`input \-d 0 tap 1 2` 实际执行的就是 `input -d 0 tap 1 2`，
- *     不解转义则这行会从命令词面里溜走）。
+ * Decode static shell words while keeping each quoted argument one word.
+ * Redirection filenames and comments cannot donate a display selector to the command.
+ * Unsupported compound syntax and descriptor redirections fail closed.
+ */
+function scopeCommandText(text: string): string | null {
+  const words: string[] = []
+  let word = ''
+  let active = false
+  let redirect = false
+  let quote: "'" | '"' | null = null
+  const flush = () => {
+    if (!active) return
+    if (redirect) redirect = false
+    else {
+      // A literal argument containing spaces must not become multiple policy words.
+      const assignment = /^[A-Za-z_][A-Za-z0-9_]*=/.exec(word)?.[0] ?? ''
+      words.push(/[ \t\r\n]/.test(word) ? assignment + '__shell_argument__' : word)
+    }
+    word = ''
+    active = false
+  }
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i]
+    if (quote === "'") {
+      if (ch === "'") quote = null
+      else word += ch
+      continue
+    }
+    if (ch === '\\') {
+      if (i + 1 >= text.length) return null
+      const next = text[++i]
+      if (next === '\n') continue
+      if (quote === '"' && !/[$"\\`]/.test(next)) word += '\\'
+      word += next
+      active = true
+      continue
+    }
+    if (quote === '"') {
+      if (ch === '"') quote = null
+      else word += ch
+      continue
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch
+      active = true
+      continue
+    }
+    if (ch === '#' && !active) break
+    if (ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r') { flush(); continue }
+    if (ch === '<' || ch === '>') {
+      if (active && /^[0-9]+$/.test(word)) { word = ''; active = false }
+      else flush()
+      if (redirect) return null
+      if (text[i + 1] === ch) {
+        if (ch === '<') return null // A here-document contains another uninspected language.
+        i += 1
+      }
+      if (text[i + 1] === '&' || text[i + 1] === '|' || text[i + 1] === '(' || text[i + 1] === '>') return null
+      redirect = true
+      continue
+    }
+    if ('(){};&|'.includes(ch)) return null
+    word += ch
+    active = true
+  }
+  if (quote !== null) return null
+  flush()
+  return redirect ? null : words.join(' ')
+}
+
+/**
+ * 仅供动态展开前缀检测使用：去掉引用数据并还原反斜杠转义。
+ * 真实参数与显示选择器认证使用 scopeCommandText，不能抹掉引用参数的值。
  */
 export function stripQuotedText(text: string): string {
   let out = ''
@@ -425,29 +519,67 @@ interface ScreenCommandFamily {
   targetFlags: readonly string[]
 }
 
-const ALL_DISPLAY_FLAGS: readonly string[] = ['-d', '--display', '--display-id']
 
-/** 命令词面（与修复前的大正则逐词一致 + `input keycombination`）。 */
+/** 命令词面及各 CLI 实际支持的显示选择器；与 Kotlin 侧同表。 */
 const SCREEN_COMMAND_FAMILIES: readonly ScreenCommandFamily[] = [
-  { name: 'screencap', pattern: /\bscreencap\b/i, targetFlags: ALL_DISPLAY_FLAGS },
-  { name: 'screenrecord', pattern: /\bscreenrecord\b/i, targetFlags: ALL_DISPLAY_FLAGS },
+  { name: 'screencap', pattern: /\bscreencap\b/i, targetFlags: ['-d'] },
+  { name: 'screenrecord', pattern: /\bscreenrecord\b/i, targetFlags: ['--display-id'] },
   {
     name: 'input',
-    pattern: /\binput[ \t]+(?:tap|swipe|roll|draganddrop|motionevent|text|keyevent|keycombination)\b/i,
-    targetFlags: ALL_DISPLAY_FLAGS,
+    // Input sources and new verbs must not hide this command's screen access.
+    pattern: /\binput\b/i,
+    targetFlags: ['-d'],
   },
-  { name: 'wm', pattern: /\bwm[ \t]+(?:size|density|overscan)\b/i, targetFlags: ALL_DISPLAY_FLAGS },
+  { name: 'wm', pattern: /\bwm[ \t]+(?:size|density)(?=[ \t]|$)/i, targetFlags: ['-d'] },
+  { name: 'wm-unscoped', pattern: /\bwm[ \t]+(?!(?:size|density)(?=[ \t]|$))[^ \t]+/i, targetFlags: [] },
   // `uiautomator dump` 没有目标屏参数：dump 的就是**默认屏**的语义树 ⇒ 无法自证，恒拒。
   { name: 'uiautomator', pattern: /\buiautomator\b/i, targetFlags: [] },
   { name: 'dumpsys', pattern: /\bdumpsys[ \t]+(?:window|display|input)\b/i, targetFlags: [] },
-  // `am` 的显示参数是 `--display`；`-d` 是 Intent data，**不得**作为目标屏凭据（见上）。
-  { name: 'am', pattern: /\bam[ \t]+(?:start|start-activity|force-stop|kill)\b/i, targetFlags: ['--display', '--display-id'] },
-  { name: 'monkey', pattern: /\bmonkey\b/i, targetFlags: ['--display', '--display-id'] },
+  // `am` / `cmd activity` 的启动显示参数是 `--display`；`-d` 是 Intent data，**不得**作为目标屏凭据（见上）。
+  { name: 'am', pattern: /\bam[ \t]+(?:start(?=[ \t]|$)|start-activity(?=[ \t]|$)|start-in-vsync(?=[ \t]|$))/i, targetFlags: ['--display'] },
+  { name: 'am-unscoped', pattern: /\bam[ \t]+(?:force-stop|kill|instrument|startservice|start-service|startforegroundservice|startfgservice|start-foreground-service|start-fg-service|broadcast)\b/i, targetFlags: [] },
+  { name: 'cmd-activity', pattern: /\bcmd[ \t]+activity[ \t]+(?:start(?=[ \t]|$)|start-activity(?=[ \t]|$)|start-in-vsync(?=[ \t]|$))/i, targetFlags: ['--display'] },
+  { name: 'cmd-activity-unscoped', pattern: /\bcmd[ \t]+activity[ \t]+(?:force-stop|kill|startservice|start-service|startforegroundservice|startfgservice|start-foreground-service|start-fg-service|broadcast|instrument)\b/i, targetFlags: [] },
+  { name: 'monkey', pattern: /\bmonkey\b/i, targetFlags: [] },
 ]
+
+/** A flag only certifies a display when that exact command actually consumes it. */
+function hasUncertifiedSelector(text: string, family: ScreenCommandFamily): boolean {
+  const words = text.split(' ')
+  for (let i = 0; i < words.length; i += 1) {
+    const word = words[i]
+    if (word === '-d' && (family.name.startsWith('am') || family.name.startsWith('cmd-activity'))) {
+      i += 1 // Intent data, never a display certificate.
+      continue
+    }
+    if (family.name === 'wm' && word === '-u') return true // Unique display IDs require another registry.
+    if (word === '-d' || word === '--display' || word === '--display-id') {
+      if (!family.targetFlags.includes(word) || !/^[0-9]+$/.test(words[i + 1] ?? '')) return true
+      let at = words.indexOf(family.name === 'cmd-activity' ? 'activity' : family.name)
+      if (at < 0) return true
+      if (family.name === 'input') {
+        at += 1
+        if (/^(?:keyboard|dpad|gamepad|touchscreen|mouse|stylus|trackball|touchpad|touchnavigation|joystick)$/.test(words[at] ?? '')) at += 1
+        if (i !== at) return true
+      } else if (family.name === 'wm') {
+        if (i !== at + 2 && i !== at + 3) return true
+      } else if (family.name === 'am' || family.name === 'cmd-activity') {
+        if (i !== at + 2) return true
+      } else if (family.name === 'screencap') {
+        if (!words.slice(at + 1, i).every((arg) => arg === '-p' || arg === '-h')) return true
+      } else if (family.name === 'screenrecord' && i !== at + 1) return true
+      i += 1
+    } else if (/^-d.+|^--display/.test(word)) {
+      // Compact/equal/unknown selector spellings have different semantics in each Android CLI.
+      return true
+    }
+  }
+  return false
+}
 
 /** 命令（归一化后）命中哪些命令词家族。 */
 export function screenCommandFamilies(command: string): string[] {
-  const normalized = stripDisplayOptions(stripQuotedText(command))
+  const normalized = stripDisplayOptions(scopeCommandText(command) ?? '')
   return SCREEN_COMMAND_FAMILIES.filter((family) => family.pattern.test(normalized)).map((f) => f.name)
 }
 
@@ -484,7 +616,7 @@ export function screenCommandVerdict(
   const { segments, unparsed } = splitCommandSegments(command)
   if (unparsed) return 'deny-unparsed'
   for (const segment of segments) {
-    const bare = stripQuotedText(segment)
+    const bare = scopeCommandText(segment) ?? ''
     const options = displayOptionsIn(bare)
     const families = SCREEN_COMMAND_FAMILIES.filter(
       (family) => family.pattern.test(stripDisplayOptions(bare)),
@@ -495,6 +627,7 @@ export function screenCommandVerdict(
       continue
     }
     for (const family of families) {
+      if (hasUncertifiedSelector(bare, family)) return 'deny-uncertified-target'
       if (family.targetFlags.length === 0) return 'deny-uncertified-target'
       const owned = options
         .filter((option) => family.targetFlags.includes(option.flag))
@@ -585,12 +718,13 @@ export function realScreenAdbCommandDenied(
     const parsed = splitCommandSegments(command)
     if (parsed.unparsed) return realOnlyScreenScopeMessage()
     for (const segment of parsed.segments) {
-      const bare = stripQuotedText(segment)
+      const bare = scopeCommandText(segment) ?? ''
       const options = displayOptionsIn(bare)
       const families = SCREEN_COMMAND_FAMILIES.filter(
         (family) => family.pattern.test(stripDisplayOptions(bare)),
       )
       for (const family of families) {
+        if (hasUncertifiedSelector(bare, family)) return realOnlyScreenScopeMessage()
         // Commands without a display selector use Android's physical default display (0).
         // If a family has no documented selector, any display-looking option is ambiguous.
         const relevant = options.filter((option) => family.targetFlags.includes(option.flag))
@@ -605,18 +739,18 @@ export function realScreenAdbCommandDenied(
   const verdict = screenCommandVerdict(command, ownedTargetPredicate(options))
   if (verdict === 'allow') return null
   const head = '用户当前开放屏幕范围为 virtual-only，不允许读取或操作真实屏内容'
-    + '（screencap/screenrecord/uiautomator/input/wm/dumpsys window|display|input/am start/monkey）。'
+    + '（screencap/screenrecord/uiautomator/input/wm/dumpsys window|display|input/am/cmd activity/monkey）。'
   if (verdict === 'deny-unparsed') {
-    return head + '本条命令含无法解析的引号/嵌套（引号未闭合），无法核对目标屏，故拒绝。'
-      + '请改写为单条、引号配对的命令后重试。'
+    return head + '本条命令含无法安全解析的 shell 语法、脚本执行器或屏幕命令别名，无法核对目标屏，故拒绝。'
+      + '请改为直接、可静态核对的命令后重试。'
   }
   if (verdict === 'deny-orphan-target-token') {
     return head + '本条命令的某个命令段携带了 `-d`/`--display` 目标屏参数，自身却不含任何屏幕命令词——'
       + '目标屏参数只能由**作用在该屏上**的命令段携带（一行参数不得给同行其它命令发通行证）。'
       + '若该参数不是屏幕目标参数（例如 `curl -d <数据>`），请改用其长选项写法（如 `--data`）后重试。'
   }
-  return head + '命令里显式指定的目标屏若确为**已注册虚拟屏**（DisplayManager displayId 或该屏的 '
-    + 'SurfaceFlinger token）即可放行；本条命令的目标屏未能与壳侧注册表核对上，故拒绝。'
+  return head + '命令里显式指定的目标屏须为**已注册虚拟屏**（DisplayManager displayId 或该屏的 '
+    + 'SurfaceFlinger token），且参数须使用该命令支持的拼写与位置；本条命令未能通过核对，故拒绝。'
     + '请确认虚拟屏仍在活跃状态（android_vdisplay_create / vdInfo），或由用户在设置中修改范围后重试。'
 }
 

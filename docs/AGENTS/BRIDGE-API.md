@@ -174,6 +174,8 @@ JS interface count is checked from source by `scripts/check-bridge-symmetry.mjs`
 
 | 方向 | 方法/通道 | 位置 | 说明 |
 |---|---|---|---|
+| 引擎 → 壳 | `execAdbShell/execAdbLine` → `shExec` 屏幕范围门 | bridge `screen-scope.ts` → `ShellOps` | 两侧还原静态 shell 参数，排除注释与重定向落点，并按 Android CLI 的实际参数拼写与位置核对显示目标；受限范围拒绝路径脚本、不可判定包装及多显示器窗口接口。细节与反例见坑 313/314；完整设备验收待完成。 |
+| 引擎 → 壳 | ADBKeyboard 输入/清空广播 | manage → `AdbKeyboardReceiver` | 发送与重试均通过 `am broadcast -n com.dsharnessmobile.shell/.AdbKeyboardReceiver` 显式限定目标，auth nonce 不进入隐式广播。见坑 312。 |
 | 页面 → 壳 | `getScreenScope()` / `setScreenScope(scope)` | AndroidBridge → MainActivity → `ScreenScopePrefs` | 用户设置唯一写面；wire 值仅 `virtual-only`、`real-only`、`all`，未知值回落 `virtual-only`。模型工具没有 setter。设置页落在开发者选项「屏幕与 Shizuku 控制」。 |
 | 页面 → 壳 | `browserHostStatus/show/hide/reload/bounds/viewport/close/identity` | AndroidBridge → MainActivity → `BrowserHost` | Files 右栏的可信页面把 CSS stage bounds 与视口预设传给壳；第二 WebView 只覆盖该 stage（letterbox rect，不做 CSS 缩放），不挂 JavaScript bridge。`browserHostBounds` 可见挂载1000ms续租、4000ms过期隐藏；hidden/detach停止续租，普通几何消息仍去重。 |
 | 页面 → 壳 | `vdisplayStatus/create/destroy/launchSettingsProbe/backProbe/bounds` | AndroidBridge → MainActivity → `VdisplayController`/`VdisplayHost` | 建屏/销毁/`am start --display` 探针/`input -d` 回退探针/viewer stage 几何。`virtual-1` 建成前一律 `screen-not-ready`，绝不映射 display 0。 |
