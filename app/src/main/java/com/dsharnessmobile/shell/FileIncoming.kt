@@ -3,7 +3,11 @@ package com.dsharnessmobile.shell
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.ParcelFileDescriptor
+import android.system.Os
+import android.system.OsConstants
 import java.io.File
+import java.io.InputStream
 import java.net.URLDecoder
 
 /**
@@ -11,7 +15,7 @@ import java.net.URLDecoder
  * 路径校验与文件名净化 → 安全拷贝进临时工作区 → 交给引擎侧插件创建空白强制新会话与
  * 未发送的 file attachment 草稿。壳侧不生成 `@路径` user message，也不自动发送。
  *
- * - 只接受 content:// 与 file:// 真实路径；白名单前缀校验；拒绝 ../ 上级跳转
+ * - content:// 必须有系统读授权且不属于本 UID；file:// 仅共享存储，打开后复核持有的 FD
  * - 文件名净化（0.13.8 #177 白名单化）：路径分隔符 `/` `\` 是路径语义 token 一律替换、
  *   `..` 连点折叠（`..%2f` 解码后同样覆盖）、首尾点与空白去除、问号/冒号/竖线/星号/双引号等
  *   非法字符（共享存储实测非法字符集）、百分号解码、255 字节边界（超长截断 + 哈希后缀）、
@@ -32,12 +36,7 @@ object FileIncoming {
   fun tmpWorkspace(context: Context): File =
     File(context.filesDir, "home/.dsh/workspaces/incoming").apply { mkdirs() }
 
-  private val SAFE_PREFIXES = listOf(
-    "content://", "file:///data/user/0/com.dsharnessmobile.shell/", "file:///data/data/com.dsharnessmobile.shell/",
-    "file:///storage/emulated/0/", "file:///sdcard/",
-  )
-
-  /** 路径校验：仅接受白名单前缀的真实路径，拒绝上级跳转。返回可拷资源 Uri 描述或 null。 */
+  /** 来源预检；异步拷贝前必须再次检查，预检通过不能代替打开后对实际 FD 的验证。 */
   fun validate(uriString: String, context: Context): Uri? {
     // A content URI's encoded document id is opaque. URLDecoder on the whole URI turns `%2F`
     // into a path separator before DocumentsProvider sees it, so a valid external file can become
@@ -45,20 +44,57 @@ object FileIncoming {
     // semantics; `uri.path` below is still decoded for file:// traversal checks.
     val uri = try { Uri.parse(uriString) } catch (_: Exception) { return null }
     if (uri.scheme == null) return null
-    val ok = when (uri.scheme) {
-      "content" -> true // 内容提供者：临时读授权；只拷贝不引用
-      "file" -> {
-        val p = uri.path ?: return null
-        SAFE_PREFIXES.any { p.startsWith(it.removePrefix("file://").let { it }) } ||
-          SAFE_PREFIXES.any { uriString.startsWith(it) }
+    val ok = try {
+      when (uri.scheme) {
+        "content" -> {
+          val authority = uri.authority?.takeIf { it.isNotBlank() } ?: return null
+          val provider = context.packageManager.resolveContentProvider(authority, 0) ?: return null
+          // An explicit URI grant is a capability; an intent flag or our own provider privileges are not.
+          provider.applicationInfo.uid != android.os.Process.myUid() &&
+            context.checkUriPermission(uri, android.os.Process.myPid(), android.os.Process.myUid(),
+              Intent.FLAG_GRANT_READ_URI_PERMISSION) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        }
+        "file" -> {
+          if (!uri.authority.isNullOrEmpty() || uri.query != null || uri.fragment != null) return null
+          val p = uri.path ?: return null
+          File(p).isAbsolute && isSharedFile(File(p))
+        }
+        else -> false
       }
-      else -> false
-    }
+    } catch (_: Exception) { return null }
     if (!ok) return null
     // 上级跳转拒绝
     val path = uri.path ?: return null
     if (path.split("/").any { it == ".." }) return null
     return uri
+  }
+
+  /** Both roots and candidate are canonicalized; app-private files are never incoming file sources. */
+  private fun isSharedFile(file: File): Boolean {
+    val candidate = file.canonicalFile.toPath()
+    return listOf(File("/storage/emulated/0"), File("/sdcard")).any { root ->
+      val canonicalRoot = root.canonicalFile.toPath()
+      candidate != canonicalRoot && candidate.startsWith(canonicalRoot)
+    }
+  }
+
+  /** Read the descriptor we validated, never reopen a pathname after checking it. */
+  private fun openIncomingStream(context: Context, uri: Uri): InputStream? {
+    val validated = validate(uri.toString(), context) ?: return null
+    if (validated.scheme == "content") return context.contentResolver.openInputStream(validated)
+    val descriptor = ParcelFileDescriptor.open(File(validated.path!!), ParcelFileDescriptor.MODE_READ_ONLY)
+    try {
+      val stat = Os.fstat(descriptor.fileDescriptor)
+      val heldPath = Os.readlink("/proc/self/fd/" + descriptor.fd)
+      if (!OsConstants.S_ISREG(stat.st_mode) || !isSharedFile(File(heldPath))) {
+        descriptor.close()
+        return null
+      }
+      return ParcelFileDescriptor.AutoCloseInputStream(descriptor)
+    } catch (failure: Exception) {
+      try { descriptor.close() } catch (closeFailure: Exception) { failure.addSuppressed(closeFailure) }
+      throw failure
+    }
   }
 
   /**
@@ -126,18 +162,20 @@ object FileIncoming {
   /** 安全拷贝进临时工作区；返回落盘路径（或 null——超限/IO 失败/归属断言拒绝）。 */
   fun copyIn(context: Context, uri: Uri): File? {
     return try {
+      val validated = validate(uri.toString(), context) ?: return null
       val dir = tmpWorkspace(context)
-      val display = queryDisplayName(context, uri) ?: "file"
+      val display = queryDisplayName(context, validated) ?: "file"
       val name = uniqueName(dir, sanitizeName(display))
       val target = safeTarget(dir, name) ?: run {
         android.util.Log.w("dsh-file-open", "incoming rejected (ownership assertion): $display")
         return null
       }
-      val input = context.contentResolver.openInputStream(uri) ?: return null
+      val input = openIncomingStream(context, validated) ?: return null
       input.use { ins ->
         // 有界拷贝（R17：大小上限；防御流式读取绕过 SIZE 列声明）
         var written = 0L
-        target.outputStream().use { out ->
+        java.nio.file.Files.newOutputStream(target.toPath(), java.nio.file.StandardOpenOption.CREATE_NEW,
+          java.nio.file.StandardOpenOption.WRITE, java.nio.file.LinkOption.NOFOLLOW_LINKS).use { out ->
           val buf = ByteArray(64 * 1024)
           while (true) {
             val n = ins.read(buf)
@@ -378,15 +416,19 @@ object FileIncoming {
    */
   fun processIncomingIntent(context: Context, intent: Intent?, notify: (title: String, text: String) -> Unit) {
     if (intent == null) return
-    val action = intent.action
-    val uri: Uri? = when (action) {
-      Intent.ACTION_VIEW -> intent.data
-      Intent.ACTION_SEND -> intent.getParcelableExtra(Intent.EXTRA_STREAM)
-      else -> null
+    val uri: Uri? = try {
+      when (intent.action) {
+        Intent.ACTION_VIEW -> intent.data
+        Intent.ACTION_SEND -> androidx.core.content.IntentCompat.getParcelableExtra(intent, Intent.EXTRA_STREAM, Uri::class.java)
+        else -> null
+      }
+    } catch (_: RuntimeException) {
+      notify("文件直达被拒绝", "无法解析传入文件")
+      return
     }
     if (uri == null) return
     val validated = validate(uri.toString(), context) ?: run {
-      notify("文件直达被拒绝", "路径不在允许范围（仅系统打开/分享的真实路径）")
+      notify("文件直达被拒绝", "仅支持已获读授权的外部分享或共享存储文件")
       return
     }
     val main = android.os.Handler(android.os.Looper.getMainLooper())

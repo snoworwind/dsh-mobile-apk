@@ -84,6 +84,8 @@ node scripts/check-maintenance-docs.mjs
 
 继续沿生产调用方复核时，发现 `EngineStartFlow.onClientPluginTreeFailed` 在调用 `writeBootFail` 后又直接把页面契约原文写入 logcat，绕过集中出口的脱敏。现将该函数的文件 detail 与 logcat 摘录统一改用先脱敏、后截断的诊断副本；恢复逻辑仍使用内存中的原文。根因、编译输入和检查证据见 [gotchas.md](gotchas.md) 坑 320。编译器警告中的可空父目录与恒定条件已静态查看，当前调用处有固定应用目录前提，未据警告本身宣称存在安全漏洞。
 
+外部文件导入继续复核（2026-10-15）：`MainActivity` 的 exported VIEW/SEND 入口曾允许整个应用私有目录的 file URI，且 content URI 没有 Provider 归属或读授权检查，可能借壳权限把受保护文件搬进可分享的来件工作区。已收紧来源权限，在 `copyIn` 与实际打开前重检，并通过实际持有的普通文件 FD 核对共享存储归属后直接读取；目标叶文件排他创建，分享参数采用 Uri 类型化解析并处理运行时解析异常。没有将「自动搬入草稿」描述成「已经向外发送」；根因与证据见 [gotchas.md](gotchas.md) 坑 321。WSL Kotlin 主源码编译与静态检查通过；未新增或运行测试、未做设备验证、未构建 APK。设备来源/授权/FD 兼容性仍未验收。
+
 ## 维护入口
 
 - [known-gaps.md](known-gaps.md)：当前风险、环境限制和待取得的证据。

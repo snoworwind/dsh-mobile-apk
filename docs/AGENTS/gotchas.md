@@ -1945,3 +1945,13 @@ EngineBootContinuationTest用latch驱动真实观察函数：winner持CAS但无�
 **检查状态**：WSL Java 17、工程 Gradle 8.11.1 与 API 36 下 `:app:compileDebugKotlin --no-daemon --parallel` 成功（`.deploy-tmp/wsl-client-failure-compile.log`，16 个任务中 1 个执行、15 个复用）；输入为 `dad75c2` 加本次 `EngineStartFlow.kt` 修改，该文件 SHA-256 为 `809bbad0272799905e992e6e6d7895614f820012970279092ed843616664eb59`。基线 `dad75c2` 在同环境已先执行全量主源码编译，16 个任务全部执行成功（`.deploy-tmp/wsl-android-compile.log`），因此坑 319 先前的 SDK 编译阻塞已解除。静态核对两个输出均使用 `diagnosticLine`，原文仍写入恢复字段；未新增或运行测试、未做设备验收、未构建 APK。编译环境与可重复命令见 [build-and-env.md](build-and-env.md)。
 
 执行地图、Kotlin 注释与维护文档静态检查通过，日志分别为 `.deploy-tmp/wsl-client-failure-{code-map,kotlin-comments,maintenance}.log`；`git diff --check` 通过。这些是编译和结构证据，不能证明设备 logcat 中的实际脱敏行为。
+
+321. **外部文件导入允许应用私有来源，形成 ContentResolver 权限代用路径**
+
+**现象与触发链**：其他应用可显式向 exported `MainActivity` 发送 VIEW/SEND，指定 `file:///data/user/0/com.dsharnessmobile.shell/files/home/.dsh/.credentials.yaml` 或 `/data/data` 别名；旧 `validate` 的白名单包含整个应用私有根，随后 `ContentResolver.openInputStream` 以壳 UID 读取，`copyIn` 将内容放入 `home/.dsh/workspaces/incoming` 并投递附件草稿。content URI 原先也直接放行，可借用壳对内部 Provider 的访问权。这里确认的是受保护数据跨入工作区的源码路径，不声称攻击者已得到文件或草稿已发送给模型。未类型校验的 EXTRA_STREAM 解包还可能让畸形 Intent 在主线程抛异常。
+
+**真因**：目的文件名净化与工作区归属校验只保护落点，没有证明来源可由外部请求读取；私有目录白名单与调用进程自己的 Provider 权限都不是发件人的授权。仅检查打开前路径也无法保证符号链接被替换后读到的仍是同一文件。风险类别与 [Android ContentResolver 安全说明](https://developer.android.com/privacy-and-security/risks/content-resolver) 一致。
+
+**修法**：content URI 要求 Provider 属于不同 UID，且 `checkUriPermission` 回读系统已授本进程读权限；不能只看 Intent flag。file URI 只允许共享存储的规范化路径，拒绝 authority/query/fragment 和上级跳转；异步拷贝与打开前重复检查。打开后以 `fstat` 确认普通文件，读取持有 FD 的 `/proc/self/fd` 目标并核对共享存储归属，随后用 AutoCloseInputStream 读取同一 FD，不重新打开 URI。目标使用 CREATE_NEW/NOFOLLOW_LINKS，拒绝覆盖已有文件或叶符号链接。EXTRA_STREAM 使用 IntentCompat 的 Uri 类型化读取，解包异常回拒绝提示。
+
+**证据与边界**：源码基线 `c4fb115` 加本次 `FileIncoming.kt` 改动，该文件 SHA-256 为 `ff20b84b87f5c14acdc9b216a835dedbfae6cad94a65f7f7ce8d581c81a9d88e`。WSL Java 17 / Gradle 8.11.1 / API 36 的 `:app:compileDebugKotlin --no-daemon --parallel` 成功（16 个任务，1 个执行、15 个复用），日志 `.deploy-tmp/incoming-security-compile.log`。执行地图、Kotlin 注释、Manifest 加固与维护文档静态检查记录在 `.deploy-tmp/incoming-security-check-*.log`；原生源码与调用关系人工复核，未新增或运行测试、未做设备验证、未构建 APK。系统分享授权、FUSE 路径别名、链接替换和资源关闭的运行时效果尚无本轮证据；无法解析或核对时拒绝导入。此处只限制外部来件来源，不改变出站阅读器/选择器的路径允许面；已有目的目录整体替换等同 UID 行为不在本次来源修复的完整证明范围内。
