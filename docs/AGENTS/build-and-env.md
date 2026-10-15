@@ -22,6 +22,8 @@ java -classpath gradle/wrapper/gradle-wrapper.jar org.gradle.wrapper.GradleWrapp
 
 ## fx2 本地来源链
 
+2026-10-15 WSL 来源构建暴露两处执行前提：首次 `--no-checkout` 的上游仓尚无 index，`git checkout -- .` 会报 pathspec；仅在来源链的独立上游检出显式 `checkout --detach` 到 workflow 固定 commit 后才可续跑。pnpm 顶层包为目录链接时，原始归档的逐成员物理路径读取无法读取链接下成员；需执行 workflow 本来就规定的 reconcile/materialize/repack，再重跑原始 perf/profile 门禁及来源快照检查，不能把首次失败当通过。每次恢复都须记录命令与操作块哈希，来源输入和门禁判据不变。MiMo verifier 分派的修复与反例见 [gotchas.md](gotchas.md) 坑 323；本次最终证据以后续 APK 交付报告为准。
+
 `node scripts/source-build/run-local-source-chain.mjs --list` / `--dry-run` 只读 committed HEAD 的 workflow；实际执行在原仓之外的独立浅检出。未提交源码不参与构建。用 `--build-workspace /tmp/dsh-build --from <阶段>` 指定可复核的续跑目录，必须属于同一 source/commit；输出留在该目录，不自动回写 base。隔离检出禁用 LFS smudge，sources 阶段负责重建 base，不能跳过缺失的实际输入。
 
 三项目组件的来源证明改为本次 APK commit、原目录、包身份、逐文件 SHA-256 与真实输出 SHA-256；不再用独立 host 仓旧 pin 与当前 APK 副本硬比。目录、tgz 以及独立仓入口不变。完整外部消费者迁移仍待确认。

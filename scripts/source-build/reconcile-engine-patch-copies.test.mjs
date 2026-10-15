@@ -10,7 +10,9 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { collectPhysicalFiles, matchesPatchTarget, reconcileEnginePatchCopies } from './reconcile-engine-patch-copies.mjs'
+import { collectPhysicalFiles, matchesPatchTarget, reconcileEnginePatchCopies, verifyCanonicalEnginePatch } from './reconcile-engine-patch-copies.mjs'
+import { planMimoThinking } from '../patches/mimo-thinking-toggle-056.mjs'
+import { versionedFixture } from '../patches/tests/lib/fixture.mjs'
 
 const PREFIX = 'usr/lib/node_modules/@deepseek-ai/dsh'
 const MARKER = 'dsh-mobile native-binding fallback (N1)'
@@ -22,6 +24,35 @@ const registry = {
     marker: MARKER,
   }],
 }
+
+test('MiMo canonical verifier accepts both patched files and rejects a partial patch', () => {
+  const root = mkdtempSync(join(tmpdir(), 'mimo-source-verifier-'))
+  try {
+    const engine = join(root, PREFIX)
+    const dshRel = 'node_modules/@deepseek-ai/dsh-llm-pi-ai'
+    const piRel = 'node_modules/@earendil-works/pi-ai'
+    const inputs = [
+      [dshRel + '/lib/index.js', readFileSync(versionedFixture('dsh-llm-pi-ai', 'lib', 'index.js'), 'utf8').replaceAll('\r\n', '\n')],
+      [piRel + '/dist/api/openai-completions.js', readFileSync(versionedFixture('pi-ai', 'dist', 'api', 'openai-completions.js'), 'utf8').replaceAll('\r\n', '\n')],
+      [dshRel + '/package.json', JSON.stringify({ version: '0.2.0-rc.2' })],
+      [piRel + '/package.json', JSON.stringify({ version: '0.87.1' })],
+    ]
+    for (const [rel, text] of inputs) {
+      const path = join(engine, rel)
+      mkdirSync(join(path, '..'), { recursive: true })
+      writeFileSync(path, text)
+    }
+    const read = file => readFileSync(join(root, file), 'utf8')
+    for (const item of planMimoThinking(read)) writeFileSync(join(root, item.file), item.after)
+    const patch = { id: 'mimo-thinking-toggle-056', verifier: 'mimo-thinking-toggle-056' }
+    assert.doesNotThrow(() => verifyCanonicalEnginePatch(engine, patch))
+    writeFileSync(join(engine, inputs[0][0]), inputs[0][1])
+    assert.throws(() => verifyCanonicalEnginePatch(engine, patch), /incomplete canonical engine patch/)
+    assert.throws(() => verifyCanonicalEnginePatch(engine, { id: 'unknown', verifier: 'unknown' }), /unknown engine patch verifier/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'reconcile-copies-'))

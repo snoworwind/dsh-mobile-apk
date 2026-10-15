@@ -139,6 +139,7 @@ class ShellOpsScreenCommandFixtureTest {
   fun realOnlyShellGateAllowsOnlyPhysicalScreenTargetsAndPreservesNonScreenCommands() {
     val denied = listOf(
       "input -d 47 tap 10 20",
+      "input tap 10 20 --display=0",
       "screencap --display=47 -p /sdcard/a.png",
       "sh -c \"screencap -d 0 -p; input -d 47 tap 10 20\"",
       "toybox sh -c \"input --display 999 tap 1 2\"",
@@ -153,7 +154,6 @@ class ShellOpsScreenCommandFixtureTest {
     val allowed = listOf(
       "input tap 10 20",
       "input -d 0 tap 10 20",
-      "input tap 10 20 --display=0",
       "screencap -p -d 0 /sdcard/a.png",
       "dumpsys window",
       "am start -d https://example.test -n com.example/.Main",

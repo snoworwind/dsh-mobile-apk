@@ -132,8 +132,8 @@
         "7",
         "11529215046816944610"
       ],
-      "expect": "deny-uncertified-target",
-      "why": "反引号里的内容会被 shell 执行；不展开就等于放过一条读真实屏的路。"
+      "expect": "deny-unparsed",
+      "why": "反引号里的内容会被 shell 执行；当前保守解析先将动态展开判为不可认证，拒绝优先级为 deny-unparsed，不得放行读取真实屏。"
     },
     {
       "name": "S-2g $( ) 嵌套执行体",
@@ -142,8 +142,8 @@
         "7",
         "11529215046816944610"
       ],
-      "expect": "deny-uncertified-target",
-      "why": "命令替换与反引号同性质（会被执行），必须同样展开。"
+      "expect": "deny-unparsed",
+      "why": "命令替换与反引号同性质（会被执行）；当前保守解析先返回 deny-unparsed，仍须保持拒绝，不得改为放行。"
     },
     {
       "name": "屏幕命令在 sh -c 重定向前的载荷仍须扫描",

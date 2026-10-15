@@ -18,6 +18,7 @@ import { copyFileSync, readFileSync, readdirSync, statSync, writeFileSync } from
 import { join, posix, relative, resolve, sep } from 'node:path'
 import { planPiStreaming } from '../patches/pi-upstream-streaming-020.mjs'
 import { planPatch as planPtcAndroid } from '../patches/ptc-android-native-A1.mjs'
+import { planMimoThinking } from '../patches/mimo-thinking-toggle-056.mjs'
 import { resolveEnginePatchTarget } from '../patches/resolve-engine-patch-target.mjs'
 
 // 登记表里的 target 是**归档内路径**；本模块与调用方一律用「相对引擎根」的路径对话，
@@ -84,6 +85,11 @@ export function verifyCanonicalEnginePatch(engineRoot, patch) {
     plan = planPiStreaming(join(engineRoot, 'node_modules/@earendil-works/pi-ai'))
   } else if (patch.id === 'ptc-android-native-A1' && patch.verifier === 'ptc-android-native-A1') {
     plan = planPtcAndroid(join(engineRoot, 'node_modules/@deepseek-ai/dsh-ptc-runtime-node'))
+  } else if (patch.id === 'mimo-thinking-toggle-056' && patch.verifier === 'mimo-thinking-toggle-056') {
+    plan = planMimoThinking(file => {
+      if (!file.startsWith(TARGET_PREFIX)) throw new Error('MiMo verifier target escaped the engine root')
+      return readFileSync(join(engineRoot, file.slice(TARGET_PREFIX.length)), 'utf8')
+    })
   } else throw new Error('unknown engine patch verifier: ' + patch.id)
   if (plan.some(file => file.before !== file.after)) throw new Error('incomplete canonical engine patch: ' + patch.id)
 }

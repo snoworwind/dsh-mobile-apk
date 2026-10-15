@@ -1955,3 +1955,15 @@ EngineBootContinuationTest用latch驱动真实观察函数：winner持CAS但无�
 **修法**：content URI 要求 Provider 属于不同 UID，且 `checkUriPermission` 回读系统已授本进程读权限；不能只看 Intent flag。file URI 只允许共享存储的规范化路径，拒绝 authority/query/fragment 和上级跳转；异步拷贝与打开前重复检查。打开后以 `fstat` 确认普通文件，读取持有 FD 的 `/proc/self/fd` 目标并核对共享存储归属，随后用 AutoCloseInputStream 读取同一 FD，不重新打开 URI。目标使用 CREATE_NEW/NOFOLLOW_LINKS，拒绝覆盖已有文件或叶符号链接。EXTRA_STREAM 使用 IntentCompat 的 Uri 类型化读取，解包异常回拒绝提示。
 
 **证据与边界**：源码基线 `c4fb115` 加本次 `FileIncoming.kt` 改动，该文件 SHA-256 为 `ff20b84b87f5c14acdc9b216a835dedbfae6cad94a65f7f7ce8d581c81a9d88e`。WSL Java 17 / Gradle 8.11.1 / API 36 的 `:app:compileDebugKotlin --no-daemon --parallel` 成功（16 个任务，1 个执行、15 个复用），日志 `.deploy-tmp/incoming-security-compile.log`。执行地图、Kotlin 注释、Manifest 加固与维护文档静态检查记录在 `.deploy-tmp/incoming-security-check-*.log`；原生源码与调用关系人工复核，未新增或运行测试、未做设备验证、未构建 APK。系统分享授权、FUSE 路径别名、链接替换和资源关闭的运行时效果尚无本轮证据；无法解析或核对时拒绝导入。此处只限制外部来件来源，不改变出站阅读器/选择器的路径允许面；已有目的目录整体替换等同 UID 行为不在本次来源修复的完整证明范围内。
+
+322. **屏幕范围加固后的旧测试仍要求放行未认证选项**
+
+**现象与真因**：WSL 来源构建首次执行 Kotlin 全量测试，1218 例中 3 例失败；旧用例要求 `screencap --display/--display-id` 和动词后 `input --display=0` 这类未认证拼写/位置被放行，另有命令替换夹具仍期待旧拒绝优先级。相关插件测试还按旧提示文案作字面断言。这些预期未随坑 313/314 的保守选择器认证更新；不应为迎合旧用例重新放宽生产边界。
+
+**修法与证据**：保留有效 `-d` 及已注册目标的正向覆盖，将未认证别名与错误位置放入拒绝用例；两条命令替换夹具仍拒绝，仅将拒绝原因更新为当前两端共同的 deny-unparsed。权威夹具经 `gen-screen-scope-fixture.mjs` 同步到 Kotlin。WSL 全量 Kotlin XML 汇总为 1218 tests / 0 failures / 0 errors / 0 skipped，日志 `.deploy-tmp/source-validation-kotlin-tests.log`；插件屏幕范围 47 例全通过，日志 `.deploy-tmp/source-scope-policy-tests.log`。生产 ShellOps 与 screen-scope 源码未改，测试数未减少；未做设备验证。
+
+323. **来源审计分派漏接已登记的 MiMo 精确 verifier**
+
+**现象**：来源快照的补丁副本收敛在 `unknown engine patch verifier: mimo-thinking-toggle-056` 处停止，最终快照检查也会复用同一缺口。
+
+**真因与修法**：registry 和普通补丁链已登记、使用 MiMo 的双文件 planner，但 `verifyCanonicalEnginePatch` 只分派 Pi streaming 和 PTC。补接同一个 `planMimoThinking`，约束读取路径属于引擎根，继续要求所有 plan 的 before==after；未知 verifier 仍拒绝，不改 planner 的版本、锚点或字节判据。`node --test scripts/source-build/reconcile-engine-patch-copies.test.mjs` 6 例通过，含完整双文件通过、只还原一文件即拒绝、未知 verifier 拒绝的受控反例，日志 `.deploy-tmp/source-reconcile-tests.log`。复用 planner 不是跳过 verifier；实际 APK 的快照判据仍须在最终产物上执行。

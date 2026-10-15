@@ -125,9 +125,10 @@ class ShellOpsScopeTargetTest {
     val owns = { id: Int -> id == 4 }
     assertTrue("已注册虚拟屏 displayId 必须放行",
       ShellOps.decideTargetsRegisteredVirtualScreen("screencap -p -d 4 /data/local/tmp/a.png", owns, emptySet()))
-    assertTrue("--display 拼写同样放行",
+    // screencap 的已认证选择器是 -d；不能拿不受支持的别名给目标屏发通行证。
+    assertFalse("未认证的 --display 别名必须拒绝",
       ShellOps.decideTargetsRegisteredVirtualScreen("screencap -p --display 4 /data/local/tmp/a.png", owns, emptySet()))
-    assertTrue("--display-id 拼写同样放行",
+    assertFalse("未认证的 --display-id 别名必须拒绝",
       ShellOps.decideTargetsRegisteredVirtualScreen("screencap -p --display-id 4 /data/local/tmp/a.png", owns, emptySet()))
   }
 

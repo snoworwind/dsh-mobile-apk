@@ -153,6 +153,7 @@ test('raw adb real-screen commands are denied outside the real-screen scope', ()
 test('real-only raw shell admits physical targets and fails closed for virtual or unknown targets', async () => {
   const deniedCommands = [
     'input -d 47 tap 10 20',
+    'input tap 10 20 --display=0',
     'screencap --display=47 -p /sdcard/a.png',
     'sh -c "screencap -d 0 -p; input -d 47 tap 10 20"',
     'toybox sh -c "input --display 999 tap 1 2"',
@@ -167,7 +168,6 @@ test('real-only raw shell admits physical targets and fails closed for virtual o
   for (const command of [
     'input tap 10 20',
     'input -d 0 tap 10 20',
-    'input tap 10 20 --display=0',
     'screencap -p -d 0 /sdcard/a.png',
     'dumpsys window',
     'am start -d https://example.test -n com.example/.Main',
@@ -383,10 +383,11 @@ test('F2：virtual-only 下 -d 指向未注册 id / display 0 时仍然拒绝', 
     const r = await out
     assert.equal(r.ok, false, command)
     // 文案随块G F6 更新：旧文案「不允许经 ADB 读取或操作真实屏幕」是**假门禁表述**——
-    // 被判拒的真实理由是「目标屏未能与注册表核对上」，不是「不允许访问 real」
+    // 被判拒的理由包括目标不在注册表、选择器拼写或位置无法认证；文案必须如实说明。
     // （范围 virtual-only 恰恰**允许**访问已注册虚拟屏）。此处断言新文案如实说明拒因，
     // 并显式禁止假表述回归（T3 修过同族缺陷：文案撒谎比拒绝本身更难排查）。
-    assert.match(String(r.guidance), /未能与壳侧注册表核对上/, command)
+    assert.match(String(r.guidance), /未能通过核对/, command)
+    assert.match(String(r.guidance), /拼写与位置/, command)
     assert.doesNotMatch(String(r.guidance), /不允许访问 real|不允许经 ADB 读取或操作真实屏幕/, command)
     assert.equal(await takeNext(queue, 80), null, command + ' 不得投递 shExec')
   }
@@ -402,7 +403,9 @@ test('F2：无 -d 的 screencap 与真实屏命令照旧拒绝（放宽面收敛
   assert.ok(realScreenAdbCommandDenied('virtual-only', 'screencap -p -d 0 /sdcard/a.png', { virtualDisplayIds: [0] }),
     'display 0 = 真实屏，永远不放行')
   assert.equal(realScreenAdbCommandDenied('virtual-only', 'adb shell screencap -p -d 47 /data/local/tmp/a.png', { virtualDisplayIds: [47] }), null)
-  assert.equal(realScreenAdbCommandDenied('virtual-only', 'screencap -p --display 47 /sdcard/a.png', { virtualDisplayIds: new Set([47]) }), null)
+  assert.ok(realScreenAdbCommandDenied('virtual-only', 'screencap -p --display 47 /sdcard/a.png', { virtualDisplayIds: new Set([47]) }),
+    'screencap 未认证的长选项必须拒绝')
+  assert.equal(realScreenAdbCommandDenied('virtual-only', 'screencap -p -d 47 /data/local/tmp/a.png', { virtualDisplayIds: [47] }), null)
   assert.equal(realScreenAdbCommandDenied('virtual-only', 'input -d 47 tap 100 200', { virtualDisplayIds: [47] }), null)
 })
 
@@ -573,7 +576,8 @@ test('F6：拒绝文案如实说明拒因（不得再是「不允许访问 real�
   assert.ok(typeof text === 'string' && text.length > 0)
   assert.ok(!/不允许访问 real|不允许经 ADB 读取或操作真实屏幕/.test(text),
     '禁止「不允许访问 real」这类与真实判据不符的表述（T3 刚修过同族缺陷）')
-  assert.match(text, /未能与壳侧注册表核对上/, '必须如实说明是「目标屏未能与注册表核对」')
+  assert.match(text, /未能通过核对/, '必须如实说明目标认证失败')
+  assert.match(text, /拼写与位置/, '必须覆盖选择器本身不受支持的拒因')
   assert.match(text, /virtual-only/, '必须说明当前范围')
 })
 
