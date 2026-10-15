@@ -113,6 +113,7 @@ adb -s <serial> install -r -t out\v<版本>\dsh-mobile-apk-v<版本>-arm64.apk
 | 运行顺序 / 嵌套 / 耦合 / 流程图（排查入口） | `docs/AGENTS/EXECUTION-MAP.md` |
 | 模拟器验收规范（代码/CDP/adb 三层 + 真实任务） | `docs/AGENTS/emulator-test-protocol.md` |
 | **版本历史（全量）** | `docs/AGENTS/changelog-archive.md` |
+| 安全加固分支宗旨、原则与证据要求 | `docs/AGENTS/SECURITY-HARDENING.md` |
 | Hard / Soft / Data 持久化路径、SharedPreferences keys、恢复来源 | `docs/AGENTS/PERSISTENT-DATA.md` |
 
 ---

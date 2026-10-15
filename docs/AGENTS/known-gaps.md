@@ -1,11 +1,11 @@
-# known-gaps.md — 0.14.5 当前缺口与验收入口
+# known-gaps.md — 当前缺口与验收入口
 
-> 更新：2026-10-07。目标 0.14.5；0.14.4 是旧包与反馈基线。源码有改动不等于新包已验收。
-> 当前自主开发与模拟器验收已获用户授权；远程推送、PR、合并和发版仍需最终授权。历史版本的“外测由别人做”不适用于本轮。
+> 本分支宗旨及当前验证边界见 [SECURITY-HARDENING.md](SECURITY-HARDENING.md)。源码有改动不等于新包已验收。
+> 当前按用户要求只做编译和静态检查；测试与设备验收未执行。远程推送、PR、合并和发版仍需最终授权。
 
 ## 当前入口
 
-- 协调仓 `docs/REFACTOR-2026-10-05.md` 是本轮唯一活动计划、Issue Ledger 与事实账；子仓地图从 [AGENTS.md](../../AGENTS.md) 进入。
+- 本分支从 [安全加固宗旨](SECURITY-HARDENING.md) 与下方安全加固缺口进入；协调仓 `docs/REFACTOR-2026-10-05.md` 保留为历史计划与事实账入口。仓库地图见 [AGENTS.md](../../AGENTS.md)。
 - 恢复与用户数据：[PERSISTENT-DATA.md](PERSISTENT-DATA.md)；协调仓 `docs/RECOVERY-ARCH-0.14.5.md`。当前实现以源码和冻结后的证据为准。
 - 三层验收：[emulator-test-protocol.md](emulator-test-protocol.md)。旧包、热推或仅静态审计不能代替最终双 ABI 包的代码/CDP/ADB 用户层验收。
 
@@ -22,7 +22,7 @@
 | 项 | 当前事实 | 必须取得的结论 |
 |---|---|---|
 | Hard / Soft 插件状态 | 可信 factory identity、四态与真实冷启动健康正在实施；live 用户 patch 不能成为 Hard 来源 | 冻结后统一测试；Disabled 官方条目不能阻止健康；隔离不丢源码/config；退出 Safe Mode 恢复用户配置 |
-| ONLINE 事务与健康 | 完整 tar 和 usr-only 兼容、只交换 usr、Hard sidecar 与 probation/commit/rollback、真实完成态正在修订 | 最终新包验证不改用户 HOME；仅 HTTP 活着不得提前提交；失败后可恢复 |
+| 历史 ONLINE 事务与健康 | 本分支已删除新在线更新入口，保留旧 journal、usr-only 交换与 probation/commit/rollback 的恢复兼容 | 最终新包验证历史中断恢复不改用户 HOME；仅 HTTP 活着不得提前提交；失败后可恢复 |
 | 回撤节流纪元 | `.undo-auto-done` schema 2 仅抑制相同安装指纹 + 回滚前失败 patch digest，成功回滚后原子写入；身份变化重开观察窗，旧数字时间戳在有效期内保守抑制并记诊断；显式用户重启在确认本壳子进程停止后清 marker，自动重试不清。纯逻辑与源码接线测试已补，仍待本批 Gradle fresh 验证 | 同一失败配置防循环，新安装/新配置不继承旧事件；marker 写入只发生在成功整份恢复后 |
 | 许可证 | Shizuku api/provider/aidl/shared 13.1.5 官方 POM 均为 MIT；已补固定许可文本、矩阵、notices 生成及版本/文本反例 | 最终 APK assets/licenses 内含 MIT 全文与 SDK notices；当前源码门禁通过不等于实包已确认 |
 | MiMo 与配置保留 | 旧基线真实 wire on/off 成功；虚拟屏目标达成但旧任务 13 次工具调用超出事先 10 次限制，整例未通过 | 新正式包自主任务预先约定可行预算并按真实事件计数；保留既有配置/会话/凭据 |

@@ -13,8 +13,10 @@ over an **embedded Termux runtime snapshot** (extract-and-run, no Termux app nee
 bridge, keep-alive foreground service, engine watchdog, and bundled snapshot deployment and recovery. One APK to
 install: it boots a full dsh web agent that can really execute bash.
 
+> **Branch purpose: maximize security and verifiability.** See [the branch charter](docs/AGENTS/SECURITY-HARDENING.md) for scope, principles, accepted risks and evidence requirements.
+
 App name `DeepCode` (icon text DeepSearch), package `com.dsharnessmobile.shell`,
-current source version **`0.14.6`** (versionCode 50), engine `@deepseek-ai/dsh` 0.2.0-rc.2 (local development candidate, **not released**).
+source version and versionCode follow the [build declarations](app/build.gradle.kts), with the suffix supplied by build properties; engine `@deepseek-ai/dsh` 0.2.0-rc.2 (local development candidate, **not released**).
 
 > **Plugin-marketplace caveat**: the built-in marketplace covers many third-party plugins, and
 > **most of them are likely unavailable or buggy on phones** (mobile vs desktop differ in WebView

@@ -15,8 +15,10 @@
 **内嵌 Termux 运行时快照**（解压即跑，无需 Termux app）、SAF 目录桥、保活前台服务、引擎看门狗、
 内嵌快照部署与恢复。一个 APK 装完即用：完整的 dsh web agent，且能真实执行 bash。
 
+> **本分支宗旨：最大程度提高安全性和可验证性。** 范围、实施原则、已接受风险与证据要求见 [安全加固分支宗旨](docs/AGENTS/SECURITY-HARDENING.md)。
+
 应用名 `DeepCode`（图标文字 DeepSearch）、包名 `com.dsharnessmobile.shell`、
-当前源码版本 **`0.14.6`**（versionCode 50）、引擎 `@deepseek-ai/dsh` 0.2.0-rc.2（本地开发候选，**未发布**）。
+源码版本与 versionCode 见 [构建声明](app/build.gradle.kts)，后缀由构建属性决定；引擎 `@deepseek-ai/dsh` 0.2.0-rc.2（本地开发候选，**未发布**）。
 
 > **插件市场适配警示**：内置市场牵涉大量第三方插件，**绝大多数插件在手机端不一定可用、大概率有 bug**
 > （移动端与桌面端在 WebView 内核/文件系统/权限模型/运行环境差异大）；移动端适配是长期工程，
