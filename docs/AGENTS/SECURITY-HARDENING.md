@@ -12,6 +12,13 @@
 
 本分支作为本 fork 的长期独立安全加固分支维护，**不合并到本 fork 的 `main`，也不以合并到上游 `main` 为交付目标**。
 
+| 项 | 当前值 |
+|---|---|
+| 分支 | `security/hardening`，远程同名 `origin/security/hardening` |
+| 前身 | `codex/fix-main-review-findings`（2026-10-15 更名并保留旧分支，历史提交未改写，见 [changelog-archive.md](changelog-archive.md) 顶部） |
+| 合并策略 | 不合并本 fork `main`，也不以上游 `main` 为交付目标 |
+| 配套详档 | 缺口与验证边界 [known-gaps.md](known-gaps.md)；缺陷与修法 [gotchas.md](gotchas.md) |
+
 - 日常交付采用可追溯的提交、同名远程分支推送与检查记录，持续在本分支修复和加固。
 - 不自动创建面向 `main` 的合并 PR；CI 通过后继续保留本分支。
 - 引入上游改动时，须重新审查其对本分支安全约束和证据的影响。
@@ -49,9 +56,9 @@
 
 本地 `.deploy-tmp` 日志用于本机复核。需要提交评审或形成发布结论时，应提供可取得的证据、产物身份与重现方法，明确本地日志的可用范围。发布须满足对应风险档位的证据要求及用户授权。
 
-## 本次复核（2026-10-15）
+## 复核轮次：2026-10-15（该轮基线 `3036e2d`）
 
-应用源码基线为 `3036e2d`。本次补充分支文档，并修正维护文档静态门禁的换行比较；当前结果如下：
+该轮应用源码基线为 `3036e2d`（**历史轮次记录**，此后提交见 [changelog-archive.md](changelog-archive.md)）。本轮补充分支文档，并修正维护文档静态门禁的换行比较；该轮结果如下：
 
 - UI、bridge、manage 插件重新编译通过，日志为 `.deploy-tmp/branch-purpose-build-{0,1,2}.log`。
 - 更新入口、桥方法、安装权限及专用 URI 映射在原生源码、前端源码和 UI 生成产物中未发现残留；保留历史事务恢复。
@@ -62,10 +69,23 @@
 
 可重复执行的编译与静态检查入口（命令不包含测试）：
 
+前置：三条 `run build` 需要各目录先装依赖（各目录 `npm ci`；Windows 侧按 [build-and-env.md](build-and-env.md) 用已配 npmmirror 源的 `npm install`）。八条 `node scripts/check-*.mjs` 不读 `node_modules`，本仓单树即可跑（本机实测 exit 0）；`check-release-gates.mjs` 是跨仓接线断言，需要协调仓树在场（本机两树同版时实测 exit 0），只有单树时会以「树定位失败」退出 1。
+
 ```powershell
+# Windows（PowerShell）
 npm.cmd --prefix dsh-client-ui-responsive run build
 npm.cmd --prefix plugins/dsh-android-bridge run build
 npm.cmd --prefix plugins/dsh-android-manage run build
+```
+
+```bash
+# macOS / Linux / WSL 等价写法
+npm --prefix dsh-client-ui-responsive run build
+npm --prefix plugins/dsh-android-bridge run build
+npm --prefix plugins/dsh-android-manage run build
+```
+
+```bash
 node scripts/check-bridge-symmetry.mjs
 node scripts/check-kotlin-comments.mjs
 node scripts/check-control-ops.mjs
@@ -74,9 +94,13 @@ node scripts/check-tool-name-promises.mjs
 node scripts/check-manifest-hardening.mjs
 node scripts/check-code-map.mjs
 node scripts/check-maintenance-docs.mjs
+node scripts/check-release-gates.mjs         # 聚合入口：静态接线断言（需协调仓树在场）
+node scripts/check-release-gates.mjs --list  # 现数门禁集合及「仅构建/发布」标注
 ```
 
-### 追加安全修复（2026-10-15）
+门禁归属：`--list` 里多数条目是「仅构建/发布」，需要快照或两棵树同时在场的条目在本地单跑给不出有效结论（SKIP 不计通过）；四项已下沉到 apk-ci/本地链；`check-maintenance-docs.mjs` 只作 PR Gate 提示 job，不在聚合 `--run` 段内。发布链跑的是聚合入口的 `--run` 段，手动单跑各脚本与它不等价。
+
+### 该轮追加：启动诊断与外部导入加固（2026-10-15）
 
 修复启动诊断文件及 logcat 中的 launch-token 暴露路径：`writeBootDiag` 在写入前对完整诊断行调用 `EngineAuth.redact`；boot-fail 与显式健康标记经共享有界追加器再次脱敏；`writeBootFail` 的 logcat 记录保留失败阶段、detail 和异常类型，但不再把原始 Throwable 交给 Android 打印未脱敏栈。完整栈仍写入应用私有 `boot-fail.log`，并在落盘边界脱敏。根因、调用链与检查边界见 [gotchas.md 坑 319](gotchas.md)。
 
@@ -86,9 +110,23 @@ node scripts/check-maintenance-docs.mjs
 
 外部文件导入继续复核（2026-10-15）：`MainActivity` 的 exported VIEW/SEND 入口曾允许整个应用私有目录的 file URI，且 content URI 没有 Provider 归属或读授权检查，可能借壳权限把受保护文件搬进可分享的来件工作区。已收紧来源权限，在 `copyIn` 与实际打开前重检，并通过实际持有的普通文件 FD 核对共享存储归属后直接读取；目标叶文件排他创建，分享参数采用 Uri 类型化解析并处理运行时解析异常。没有将「自动搬入草稿」描述成「已经向外发送」；根因与证据见 [gotchas.md](gotchas.md) 坑 321。WSL Kotlin 主源码编译与静态检查通过；未新增或运行测试、未做设备验证、未构建 APK。设备来源/授权/FD 兼容性仍未验收。
 
+## 当前状态与未覆盖范围
+
+截至 `a649df9`（2026-10-15）：
+
+| 面 | 当前事实 | 能支持什么结论 |
+|---|---|---|
+| 静态门禁 | 八条本地门禁在 macOS 26.6.2 + Node 20.18.0 下于本尖端实测 exit 0：bridge 对称、Kotlin 注释、control op、op registry 平权、工具名承诺、Manifest 加固、执行地图、维护文档生成块；聚合入口 `check-release-gates.mjs` 静态接线断言同样 exit 0（声明门禁集 35 项，两树同版） | 只支持静态关系成立，不证明运行时行为 |
+| Kotlin 全量测试 | 来源链执行 1218 例零失败零跳过（旧测试放行未认证长选项等预期已修正，生产屏幕授权逻辑未放宽，见坑 322）；引擎侧屏幕范围 47 例通过；已登记的 MiMo 精确 verifier 补接分派，并以完整补丁通过、部分补丁拒绝、未知 verifier 拒绝证明判据，见坑 323 | 绑定当时源码与产物，不覆盖设备行为 |
+| 来源审计 APK | 隔离检出从已提交源码（`bc6637f`）产出 arm64 APK，14 项独立复核通过，判据为语义归一化摘要 | 支持产物与源码的对应关系；**未做设备验收、未发布** |
+| Windows 完整编译 | Java 24 下 Gradle 配置阶段仍报 `Type T not present`，未改工程版本规避 | 该环境阻塞未解除，不记通过 |
+| 设备验收 | 未执行：竖屏 16416 / 横屏 16384、arm64 真机、覆盖升级均未跑 | 不得据此称功能验收通过或具备发布结论 |
+
+复核面、命令与产物身份见 [build-and-env.md](build-and-env.md) 的来源审计小节；逐条改动状态见 [changelog-archive.md](changelog-archive.md)。
+
 ## 维护入口
 
-WSL 来源 APK 构建任务中首次执行 Kotlin 全量测试得到 1218 例、3 例失败；失败来自旧测试放行未认证长选项、旧拒绝原因夹具等预期。修正测试后 1218 例全通过、零跳过；引擎侧屏幕范围 47 例通过。生产屏幕授权逻辑未放宽，详见坑 322。来源链另发现已登记 MiMo verifier 未接入副本校验分派；补接既有精确 planner，并以完整补丁通过、部分补丁拒绝和未知 verifier 拒绝证明判据，见坑 323。最终 APK 仍须以实际产物门禁及交付报告为准。
+接手顺序：本文件（宗旨与边界）→ [changelog-archive.md](changelog-archive.md) 最新一行（做到哪了）→ [known-gaps.md](known-gaps.md)（还缺什么）→ 上方检查入口（先干跑一遍）。
 
 - [known-gaps.md](known-gaps.md)：当前风险、环境限制和待取得的证据。
 - [gotchas.md](gotchas.md)：具体缺陷的现象、根因、修法与检查记录。
