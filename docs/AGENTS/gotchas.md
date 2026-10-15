@@ -1913,3 +1913,13 @@ EngineBootContinuationTest用latch驱动真实观察函数：winner持CAS但无�
 **修法**：本分支按用户要求删除两处 UI、双方桥声明与构造接线、更新控制器/校验/下载/安装实现、安装权限和专用 FileProvider 映射；同时删除旧在线快照网络更新类、调试 Intent 与启动方法。APK 覆盖安装后的内嵌快照部署、历史事务恢复与用户数据保留继续由原启动链负责。专用测试退役记录见 `scripts/kotlin-test-baseline.json` 的 `featureRetirements`，其余回归基线要求仍在。坑 315 描述的 APK 更新路径在本分支已整体退役。
 
 **检查状态**：UI 插件编译通过并生成本仓 `lib` 产物（`.deploy-tmp/remove-updater-ui-build.log`）；Kotlin PSI 语法解析通过（`.deploy-tmp/remove-updater-kotlin-syntax.log`）。桥对称、Kotlin 注释、control op、op registry、工具名承诺、Manifest 加固、执行地图静态门禁均通过（`.deploy-tmp/remove-updater-check-*.log`）；XML 解析及原生/前端/生成产物的退役符号扫描通过。完整 Android 编译在 Gradle 配置阶段报 `Type T not present`（`.deploy-tmp/remove-updater-android-compile.log`，环境限制见 known-gaps）。按用户要求未新增或运行测试，未做设备验收，未产出新 APK。
+
+318. **维护文档门禁直接比较 LF 与 CRLF，Windows 检出会被误判为生成区过期**
+
+**现象**：`check-maintenance-docs.mjs` 报依赖声明和活动补丁生成区与源码不一致；运行 `--write` 后通过，但 Git 中没有生成内容的差异。
+
+**真因**：生成器用 `\n` 拼接预期内容，检查器从 Markdown 原始文本截取生成区后直接作字符串比较。Windows 检出的 CRLF 与预期 LF 不等；归一化后两份内容一致。因此 `--write` 的本地通过只改变了行尾，下次 CRLF 检出仍会再次报错。
+
+**修法**：只将实际生成区内的 CRLF 归一为 LF，再与预期内容完整比较。生成区唯一性、边界及逐字符内容要求保持原判据，生成器的写入行为不变；不跳过任何文档或生成字段。
+
+**检查状态**：在保留 CRLF 的实际工作区文档上重跑静态门禁通过；脚本 `node --check` 通过，生成区对应文档的 Git 内容差异为空。日志为 `.deploy-tmp/branch-purpose-check-maintenance-docs.log`。按用户限定只做静态检查，未新增或运行测试、自检或合成负控；这不构成完整门禁回归通过的结论。

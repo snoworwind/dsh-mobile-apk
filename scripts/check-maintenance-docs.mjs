@@ -56,7 +56,8 @@ for (const { file, name, body } of blocks) {
     throw new Error(`${file}: 缺少唯一生成块 ${name}`);
   }
   const expected = `${start}\n${body}\n${end}`;
-  const actual = contents.slice(startIndex, endIndex + end.length);
+  // Git's Windows checkout may use CRLF; compare the generated Markdown content with LF.
+  const actual = contents.slice(startIndex, endIndex + end.length).replace(/\r\n/g, '\n');
   if (actual !== expected) {
     if (write) fs.writeFileSync(path.join(root, file), contents.slice(0, startIndex) + expected + contents.slice(endIndex + end.length));
     else failures.push(`${file}: ${name} 与源码不一致；运行 node scripts/check-maintenance-docs.mjs --write`);

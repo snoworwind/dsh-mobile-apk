@@ -1,5 +1,7 @@
 # build-and-env.md — 构建与验证命令 + 环境流程
 
+维护文档生成区按内容比较，兼容 Windows CRLF 检出；换行归一化只用于比较，生成区完整性和内容要求不变。根因与检查范围见 [gotchas.md](gotchas.md) 坑 318。
+
 ## 应用内更新功能退役（2026-10-15）
 
 用户明确要求在加固分支移除应用内更新。对应专用测试随实现退役，混合测试类只移除更新用例；Kotlin 数量基线的定点调整及原因登记于 `scripts/kotlin-test-baseline.json` 的 `featureRetirements`。数量门禁算法未改。本轮按用户限定只编译和静态检查，未运行测试；UI 自包含副本需重新生成 `lib` 产物。
