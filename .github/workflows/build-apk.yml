@@ -47,6 +47,8 @@ jobs:
     env:
       # build-apk.mjs 依赖本仓库顶层 scripts/plugins/vendor/base；apk 仓库 = $GITHUB_WORKSPACE
       DSH_APK_DIR: ${{ github.workspace }}
+      APK_BUILD_ABI: ${{ matrix.abi }}
+      APK_BUILD_SUFFIX: ${{ inputs.suffix }}
     steps:
       # 每个 ABI job 只需要本 ABI 的 base-usr 与共用 base-dsh；先缓存，未命中才按路径拉取。
       # checkout 的 lfs:true 是按 ref fetch，不能从 fetch-depth:0 推断它会下载历史全部 LFS。
@@ -56,6 +58,18 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
           lfs: false
+      - name: 验证构建参数
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$APK_BUILD_ABI" in
+            arm64|x86_64) ;;
+            *) echo "::error::ABI 输入无效"; exit 1 ;;
+          esac
+          if [[ -n "$APK_BUILD_SUFFIX" && ! "$APK_BUILD_SUFFIX" =~ ^-[A-Za-z0-9][A-Za-z0-9._+-]{0,30}$ ]]; then
+            echo "::error::suffix 只能是空值或以连字符开头的安全版本后缀（最多 32 个字符）"
+            exit 1
+          fi
       - name: 缓存底座归档（命中则跳过 LFS 拉取）
         id: lfs-base
         uses: actions/cache@v4
@@ -68,13 +82,13 @@ jobs:
         run: |
           set -e
           git lfs install --local
-          git lfs pull --include="base/base-usr-${{ matrix.abi }}.tar.xz,base/base-dsh.tar.xz"
+          git lfs pull --include="base/base-usr-${APK_BUILD_ABI}.tar.xz,base/base-dsh.tar.xz"
       - name: 断言底座确实已落地（拒绝 LFS pointer 冒充文件）
         shell: bash
         run: |
           set -e
           node scripts/require-lfs-materialized.mjs \
-            "base/base-usr-${{ matrix.abi }}.tar.xz" "base/base-dsh.tar.xz"
+            "base/base-usr-${APK_BUILD_ABI}.tar.xz" "base/base-dsh.tar.xz"
 
       - name: 准备运行时（node；dsh-client-ui-responsive 的 tsdown 要求 node ^22.18 || >=24.11）
         uses: actions/setup-node@v4
@@ -104,7 +118,7 @@ jobs:
         shell: bash
         run: |
           set -e
-          abi="${{ matrix.abi }}"
+          abi="$APK_BUILD_ABI"
           # build-snapshot-013.mjs 的 BASE_DIR：arm64 -> arm64-base；x86_64 -> x64-base（缩写，勿写 x86_64-base）
           if [ "$abi" = "arm64" ]; then bdir="arm64-base"; else bdir="x64-base"; fi
           mkdir -p ".deploy-tmp/${bdir}"
@@ -117,13 +131,13 @@ jobs:
         shell: bash
         run: |
           set -e
-          node scripts/build-snapshot-013.mjs "${{ matrix.abi }}"
+          node scripts/build-snapshot-013.mjs "$APK_BUILD_ABI"
 
       - name: 构建 APK ${abi}（注入插件 + 门禁 + gradle + 产物）
         shell: bash
         run: |
           set -e
-          node scripts/build-apk.mjs --abi "${{ matrix.abi }}" --suffix "${{ github.event.inputs.suffix }}"
+          node scripts/build-apk.mjs --abi "$APK_BUILD_ABI" --suffix "$APK_BUILD_SUFFIX"
 
       - name: 上传前复核最终 APK 签名
         shell: bash
@@ -137,7 +151,7 @@ jobs:
       - name: 上传 APK 产物（本地下载 debug；不出 Release）
         uses: actions/upload-artifact@v4
         with:
-          name: dsh-mobile-apk-${{ matrix.abi }}${{ github.event.inputs.suffix }}
+          name: dsh-mobile-apk-${{ env.APK_BUILD_ABI }}${{ env.APK_BUILD_SUFFIX }}
           # 版本目录来自 app/build.gradle.kts（ST-06）：写死 out/v0.13.0 会在版本 bump 后静默
           # 落到 if-no-files-found: error（云端链「构建成功但无产物」）。
           path: out/v*/*.apk

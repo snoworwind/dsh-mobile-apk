@@ -829,6 +829,15 @@ test('S-5 反证：危险命令黑名单在服务面生效（工具壳之外同�
   assert.equal(r.ok, false, '系统写面命令必须在服务面被黑名单拦下')
   assert.match(String(r.guidance), /危险检查拦截/)
   assert.equal(await takeNext(queue, 80), null, '被黑名单拦下的命令不得进入控制队列')
+  for (const obfuscated of [
+    'settings p"ut" global window_animation_scale 0',
+    'settings p\\ut global window_animation_scale 0',
+    'pm gr"ant" com.example android.permission.CAMERA',
+  ]) {
+    const blocked = await svc.execAdbShell(obfuscated, { session: TEST_SESSION })
+    assert.equal(blocked.ok, false, `shell quoting/escaping must not conceal a blocked operation: ${obfuscated}`)
+  }
+  assert.equal(await takeNext(queue, 80), null, '混淆写法同样不得进入控制队列')
 })
 
 test('fx2：调用者伪造内部标记不能通过公开执行入口', async () => {

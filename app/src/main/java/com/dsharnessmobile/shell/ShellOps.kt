@@ -65,6 +65,27 @@ internal object ShellOps {
   private val SHELL_C_PAYLOAD = Regex(
     """(?:^|[ \t])(?:[^\s]*/)?(?:sh|bash|mksh|ash|dash|zsh|busybox|toybox|su)[ \t]+(?:-[^\s]+[ \t]+)*-c[ \t]+([\s\S]*)$""",
   )
+  /** Opaque script executors cannot be safely classified by command-word matching in restricted screen scopes. */
+  private val OPAQUE_EXECUTION = Regex(
+    """(?:^|[ \t])(?:eval|source|xargs|trap|awk|gawk|mawk|perl|python(?:[0-9.]*)?|node(?:js)?|ruby|php|lua|tclsh|js)(?:[ \t]|$)|(?:^|[ \t])\.(?:[ \t]|$)|(?:^|[ \t])find[ \t]+[^\n]*[ \t]-(?:exec|ok)(?:dir)?(?:[ \t]|$)|(?:^|[ \t])tar[ \t]+[^\n]*[ \t]--to-command(?:[ =]|$)""",
+    RegexOption.IGNORE_CASE,
+  )
+  private val SHELL_INTERPRETER = Regex(
+    """(?:^|[ \t])(?:(?:[^\s]*/)?(?:sh|bash|mksh|ash|dash|zsh|busybox|toybox|su))(?=[ \t]|$)""",
+    RegexOption.IGNORE_CASE,
+  )
+  private val SCREEN_COMMAND_HEAD = Regex(
+    """^(?:(?:[A-Za-z_][A-Za-z0-9_]*=[^\s]+)[ \t]+)*(?:(?:[^\s]*/)?(?:screencap|screenrecord|input|uiautomator|wm|dumpsys|am|monkey))(?=[ \t]|$)""",
+    RegexOption.IGNORE_CASE,
+  )
+  private val SCREEN_COMMAND_WORD = Regex(
+    """\b(?:screencap|screenrecord|input|uiautomator|wm|dumpsys|am|monkey)\b""",
+    RegexOption.IGNORE_CASE,
+  )
+  private val COMMAND_LAUNCHER_HEAD = Regex(
+    """^(?:(?:[A-Za-z_][A-Za-z0-9_]*=[^\s]+)[ \t]+)*(?:command|exec|env|nohup|nice|timeout|setsid)(?=[ \t]|$)""",
+    RegexOption.IGNORE_CASE,
+  )
 
   /**
    * 屏幕范围判定的结果码——与引擎侧 `ScreenCommandVerdict` 的字符串**逐字相同**，
@@ -330,14 +351,19 @@ internal object ShellOps {
   /** 引号感知切段结果（与引擎侧 `CommandSegments` 同构）。 */
   internal class ParsedCommand(val segments: List<String>, val unparsed: Boolean)
 
+  private fun dynamicExpansionCanAffectScreenScope(prefix: String): Boolean {
+    val bare = stripQuotedText(prefix).trimEnd()
+    if (bare.trim().isEmpty() || (!bare.contains(' ') && !bare.contains('\t'))) return true
+    if (SHELL_C_PAYLOAD.containsMatchIn(bare) || SCREEN_COMMAND_HEAD.containsMatchIn(bare)) return true
+    return COMMAND_LAUNCHER_HEAD.containsMatchIn(bare) && SCREEN_COMMAND_WORD.containsMatchIn(bare)
+  }
+
   /**
    * 引号感知地把一条命令切成**可判定段**：顶层段 + 反引号 / `$()` / `sh -c` 的嵌套执行体。
    *
-   * 四条不变量（与引擎侧 `splitCommandSegments` 逐条对应，跨语言 fixture 锁死）：
-   *  ① 分隔符（`;` `&&` `||` `|` `&` 换行）**只在引号外**切段；
-   *  ② 嵌套执行体再切一层——它们会被 shell 真正执行，不切开就等于放过
-   *     `sh -c "screencap -d <token>; input tap 1 2"`；
-   *  ③ 引号不闭合（无法解析）一律判拒（fail-closed）。
+   * 关键不变量（与引擎侧 `splitCommandSegments` 对应，跨语言 fixture 锁定）：分隔符仅在引号外切段；
+   * 嵌套执行体递归检查；`-c` 只取首个 shell 参数；动态命令词/目标与不透明解释器 fail-closed；
+   * 引号未闭合或无法提取载荷时拒绝。
    */
   internal fun splitCommandSegments(command: String): ParsedCommand {
     val segments = ArrayList<String>()
@@ -369,6 +395,11 @@ internal object ShellOps {
             i = text.length
             continue
           }
+          // A quote can be part of the command word (`screen"cap"`) or the command itself
+          // (`'screencap'`). Quoted arguments after a command remain ordinary data.
+          if (buf.toString().trim().isEmpty() || (buf.isNotEmpty() && buf.last() != ' ' && buf.last() != '\t')) {
+            unparsed = true
+          }
           buf.append(text, i, end + 1)
           i = end + 1
           continue
@@ -381,6 +412,9 @@ internal object ShellOps {
               continue
             }
             if (text[j] == '"') break
+            // Double quotes still expand variables, $(...), and backticks. In a restricted
+            // screen scope their resulting executable words cannot be proven statically.
+            if (text[j] == '$' || text[j] == '`') unparsed = true
             j += 1
           }
           if (j >= text.length) {
@@ -388,6 +422,9 @@ internal object ShellOps {
             buf.append(text, i, text.length)
             i = text.length
             continue
+          }
+          if (buf.toString().trim().isEmpty() || (buf.isNotEmpty() && buf.last() != ' ' && buf.last() != '\t')) {
+            unparsed = true
           }
           buf.append(text, i, j + 1)
           i = j + 1
@@ -401,6 +438,7 @@ internal object ShellOps {
             i = text.length
             continue
           }
+          if (dynamicExpansionCanAffectScreenScope(buf.toString())) unparsed = true
           scan(text.substring(i + 1, end), depth + 1)
           buf.append(' ')
           i = end + 1
@@ -414,11 +452,16 @@ internal object ShellOps {
             i = text.length
             continue
           }
+          if (dynamicExpansionCanAffectScreenScope(buf.toString())) unparsed = true
           scan(text.substring(i + 2, end), depth + 1)
           buf.append(' ')
           i = end + 1
           continue
         }
+        // Bare parameter expansion can synthesize an executable command (`cmd=screencap; $cmd`).
+        if (ch == '$') unparsed = true
+        // Process substitution also executes a nested command but is not represented by `$()`.
+        if ((ch == '<' || ch == '>') && i + 1 < text.length && text[i + 1] == '(') unparsed = true
         if (ch == ';' || ch == '\n' || ch == '\r') {
           flush()
           i += 1
@@ -446,12 +489,21 @@ internal object ShellOps {
       round += 1
       val segment = pending.removeFirst()
       val payload = SHELL_C_PAYLOAD.find(segment) ?: continue
-      val inner = unwrapOneQuote(payload.groupValues[1])
+      val inner = shellCommandArgument(payload.groupValues[1])
+      if (inner == null) {
+        unparsed = true
+        continue
+      }
       if (inner.isEmpty()) continue
       val before = segments.size
       scan(inner, 1)
       for (k in before until segments.size) pending.addLast(segments[k])
     }
+    if (segments.any { segment ->
+        val bare = stripQuotedText(segment).trimStart()
+        OPAQUE_EXECUTION.containsMatchIn(bare) ||
+          (SHELL_INTERPRETER.containsMatchIn(bare) && !SHELL_C_PAYLOAD.containsMatchIn(segment))
+      }) unparsed = true
     return ParsedCommand(segments.filter { it.isNotBlank() }, unparsed)
   }
 
@@ -504,16 +556,57 @@ internal object ShellOps {
     return -1
   }
 
-  /** 去掉一层首尾成对的引号（`sh -c "…"` 的载荷取值）。不成对则原样返回。 */
-  private fun unwrapOneQuote(text: String): String {
-    val trimmed = text.trim()
-    if (trimmed.length >= 2) {
-      val first = trimmed[0]
-      if ((first == '"' || first == '\'') && trimmed[trimmed.length - 1] == first) {
-        return trimmed.substring(1, trimmed.length - 1)
+  /** Read the first shell word after `-c`, removing the outer shell quoting. Null means ambiguous. */
+  private fun shellCommandArgument(text: String): String? {
+    val out = StringBuilder()
+    var quote: Char? = null
+    var sawArgument = false
+    var i = 0
+    while (i < text.length) {
+      val ch = text[i]
+      if (quote == null) {
+        if (ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n' || ch == ';' || ch == '&' || ch == '|' || ch == '<' || ch == '>') break
+        if (ch == '\'' || ch == '"') {
+          quote = ch
+          sawArgument = true
+          i += 1
+          continue
+        }
+        if (ch == '\\') {
+          if (i + 1 >= text.length) return null
+          sawArgument = true
+          if (text[i + 1] != '\n') out.append(text[i + 1])
+          i += 2
+          continue
+        }
+        sawArgument = true
+        out.append(ch)
+        i += 1
+        continue
       }
+      if (quote == '\'' && ch == '\'') {
+        quote = null
+        i += 1
+        continue
+      }
+      if (quote == '"' && ch == '"') {
+        quote = null
+        i += 1
+        continue
+      }
+      if (quote == '"' && ch == '\\') {
+        if (i + 1 >= text.length) return null
+        val next = text[i + 1]
+        if (next == '$' || next == '`' || next == '"' || next == '\\') out.append(next)
+        else if (next == '\n') { /* shell line continuation */ }
+        else out.append('\\').append(next)
+        i += 2
+        continue
+      }
+      out.append(ch)
+      i += 1
     }
-    return trimmed
+    return if (quote == null && sawArgument) out.toString() else null
   }
 
   /**

@@ -342,9 +342,13 @@ export interface ControlGateFacts {
  * 不受影响。
  */
 function looksDangerous(command: string): boolean {
-  const c = command.trim()
+  const view = shellPolicyView(command)
+  if (view === null) return true
+  const c = view.text.trim()
   if (c === '') return true
   const lower = c.toLowerCase()
+  if (DYNAMIC_COMMAND_WORD.test(c) || DYNAMIC_LAUNCHER_COMMAND.test(c) || DYNAMIC_SHELL_COMMAND.test(c)) return true
+  if (view.dynamic && /\b(?:rm|dd|chmod|chown|mkfs|shutdown|reboot|poweroff|wipe)\b/.test(lower)) return true
   // 全命令正则：多命令拼接/重定向场景
   const PATTERNS = [
     /\brm\s+(-[a-z]*r[a-z]*f|-[a-z]*f[a-z]*r)\s+(\/|\/\*|~|\$home)\b/i,
@@ -379,7 +383,10 @@ function looksDangerous(command: string): boolean {
 /** ADB 通道附加黑名单（shell uid=2000 执行面比 app uid 更危险：系统级配置/权限写面一律拒绝）。 */
 function looksDangerousAdb(command: string): boolean {
   if (looksDangerous(command)) return true
-  const c = command.toLowerCase()
+  const view = shellPolicyView(command)
+  if (view === null) return true
+  const c = view.text.toLowerCase()
+  if (view.dynamic && /\b(?:settings|pm|appops|content|svc|mount|cmd|input)\b/.test(c)) return true
   const PATTERNS_ADB = [
     /\bsettings\s+(put|delete)\b/,
     /\bpm\s+(grant|revoke|set-permission|uninstall|install|disable-user|enable)\b/,
@@ -392,6 +399,58 @@ function looksDangerousAdb(command: string): boolean {
   ]
   return PATTERNS_ADB.some((p) => p.test(c))
 }
+
+interface ShellPolicyView {
+  text: string
+  dynamic: boolean
+}
+
+/** Remove shell quote/escape syntax before policy matching; malformed quoting fails closed. */
+function shellPolicyView(command: string): ShellPolicyView | null {
+  let text = ''
+  let quote: "'" | '"' | null = null
+  let dynamic = false
+  for (let i = 0; i < command.length; i += 1) {
+    const ch = command[i]
+    if (quote === "'") {
+      if (ch === "'") quote = null
+      else text += ch
+      continue
+    }
+    if (ch === '\\') {
+      if (i + 1 >= command.length) return null
+      const next = command[i + 1]
+      if (quote === '"') {
+        if (next === '$' || next === '`' || next === '"' || next === '\\') text += next
+        else if (next === '\n') { /* shell line continuation */ }
+        else text += `\\${next}`
+      } else if (next !== '\n') text += next
+      i += 1
+      continue
+    }
+    if (quote === '"') {
+      if (ch === '"') quote = null
+      else {
+        if (ch === '$' || ch === '`') dynamic = true
+        text += ch
+      }
+      continue
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch
+      continue
+    }
+    if (ch === '$' || ch === '`') dynamic = true
+    if ((ch === '<' || ch === '>') && command[i + 1] === '(') dynamic = true
+    text += ch
+  }
+  if (quote !== null) return null
+  return { text, dynamic }
+}
+
+const DYNAMIC_COMMAND_WORD = /(?:^|[;\n|&])[ \t]*(?:(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;|&]+)[ \t]+)*(?:[^ \t\r\n;&|]*[$`][^ \t\r\n;&|]*)/
+const DYNAMIC_LAUNCHER_COMMAND = /(?:^|[;\n|&])[ \t]*(?:env|command|exec|nohup|nice|timeout|setsid|sudo|su)\b[ \t]+(?:(?:-[^\s]+|[A-Za-z_][A-Za-z0-9_]*=[^\s]+)[ \t]+)*\$/i
+const DYNAMIC_SHELL_COMMAND = /(?:^|[ \t])(?:sh|bash|mksh|ash|dash|zsh|su)[ \t]+(?:-[^\s]+[ \t]+)*-c[ \t]+\$/i
 
 // ── 审查 §5.1 / S-5：授权门从**调用方**下沉到**服务面** ────────────────────────────────
 //

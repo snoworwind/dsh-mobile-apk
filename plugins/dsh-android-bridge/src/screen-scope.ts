@@ -158,6 +158,20 @@ export interface CommandSegments {
 /** 嵌套执行体再切一层的深度上限（防御构造出来的深嵌套导致栈溢出）。 */
 const MAX_NESTING = 4
 
+/** Commands that can execute opaque scripts or stdin; restricted screen scopes cannot inspect their effects. */
+const OPAQUE_EXECUTION = /(?:^|[ \t])(?:eval|source|xargs|trap|awk|gawk|mawk|perl|python(?:[0-9.]*)?|node(?:js)?|ruby|php|lua|tclsh|js)(?:[ \t]|$)|(?:^|[ \t])\.(?:[ \t]|$)|(?:^|[ \t])find[ \t]+[^\n]*[ \t]-(?:exec|ok)(?:dir)?(?:[ \t]|$)|(?:^|[ \t])tar[ \t]+[^\n]*[ \t]--to-command(?:[ =]|$)/i
+const SHELL_INTERPRETER = /(?:^|[ \t])(?:(?:[^\s]*\/)?(?:sh|bash|mksh|ash|dash|zsh|busybox|toybox|su))(?=[ \t]|$)/i
+const SCREEN_COMMAND_HEAD = /^(?:(?:[A-Za-z_][A-Za-z0-9_]*=[^\s]+)[ \t]+)*(?:(?:[^\s]*\/)?(?:screencap|screenrecord|input|uiautomator|wm|dumpsys|am|monkey))(?=[ \t]|$)/i
+const SCREEN_COMMAND_WORD = /\b(?:screencap|screenrecord|input|uiautomator|wm|dumpsys|am|monkey)\b/i
+const COMMAND_LAUNCHER_HEAD = /^(?:(?:[A-Za-z_][A-Za-z0-9_]*=[^\s]+)[ \t]+)*(?:command|exec|env|nohup|nice|timeout|setsid)(?=[ \t]|$)/i
+
+function dynamicExpansionCanAffectScreenScope(prefix: string): boolean {
+  const bare = stripQuotedText(prefix).trimEnd()
+  if (bare.trim().length === 0 || !/[ \t]/.test(bare)) return true
+  if (SHELL_C_PAYLOAD.test(bare) || SCREEN_COMMAND_HEAD.test(bare)) return true
+  return COMMAND_LAUNCHER_HEAD.test(bare) && SCREEN_COMMAND_WORD.test(bare)
+}
+
 /** 反引号段结束位置；`\`` 转义不算结束。返回 -1 = 未闭合。 */
 function backtickEnd(text: string, from: number): number {
   let i = from
@@ -200,16 +214,57 @@ function parenEnd(text: string, from: number): number {
 /** `sh -c '<内层>'` 形式的嵌套执行体（含 `/system/bin/sh`、`busybox sh`、`su` 等包装）。 */
 const SHELL_C_PAYLOAD = /(?:^|[ \t])(?:[^\s]*\/)?(?:sh|bash|mksh|ash|dash|zsh|busybox|toybox|su)[ \t]+(?:-[^\s]+[ \t]+)*-c[ \t]+([\s\S]*)$/
 
-/** 去掉一层首尾成对的引号（`sh -c "…"` 的载荷取值）。不成对则原样返回。 */
-function unwrapOneQuote(text: string): string {
-  const trimmed = text.trim()
-  if (trimmed.length >= 2) {
-    const first = trimmed[0]
-    if ((first === '"' || first === "'") && trimmed[trimmed.length - 1] === first) {
-      return trimmed.slice(1, -1)
+/** Read the first shell word after `-c`, removing the outer shell quoting. Null means ambiguous. */
+function shellCommandArgument(text: string): string | null {
+  let out = ''
+  let quote: "'" | '"' | null = null
+  let sawArgument = false
+  let i = 0
+  while (i < text.length) {
+    const ch = text[i]
+    if (quote === null) {
+      if (/[ \t\r\n;&|<>]/.test(ch)) break
+      if (ch === "'" || ch === '"') {
+        quote = ch
+        sawArgument = true
+        i += 1
+        continue
+      }
+      if (ch === '\\') {
+        if (i + 1 >= text.length) return null
+        sawArgument = true
+        if (text[i + 1] !== '\n') out += text[i + 1]
+        i += 2
+        continue
+      }
+      sawArgument = true
+      out += ch
+      i += 1
+      continue
     }
+    if (quote === "'" && ch === "'") {
+      quote = null
+      i += 1
+      continue
+    }
+    if (quote === '"' && ch === '"') {
+      quote = null
+      i += 1
+      continue
+    }
+    if (quote === '"' && ch === '\\') {
+      if (i + 1 >= text.length) return null
+      const next = text[i + 1]
+      if (next === '$' || next === '`' || next === '"' || next === '\\') out += next
+      else if (next === '\n') { /* shell line continuation */ }
+      else out += `\\${next}`
+      i += 2
+      continue
+    }
+    out += ch
+    i += 1
   }
-  return trimmed
+  return quote === null && sawArgument ? out : null
 }
 
 /**
@@ -232,6 +287,9 @@ export function splitCommandSegments(command: string): CommandSegments {
       if (ch === "'") {
         const end = text.indexOf("'", i + 1)
         if (end < 0) { unparsed = true; buf += text.slice(i); i = text.length; continue }
+        // A quote can be part of the command word (`screen"cap"`) or the command itself
+        // (`'screencap'`). Quoted arguments after a command remain ordinary data.
+        if (buf.trim().length === 0 || (buf.length > 0 && !/[ \t]$/.test(buf))) unparsed = true
         buf += text.slice(i, end + 1); i = end + 1; continue
       }
       if (ch === '"') {
@@ -239,23 +297,33 @@ export function splitCommandSegments(command: string): CommandSegments {
         while (j < text.length) {
           if (text[j] === '\\') { j += 2; continue }
           if (text[j] === '"') break
+          // Unlike single quotes, double quotes still expand variables, $(...), and backticks.
+          // We cannot prove the resulting command word statically, so narrowed screen scopes fail closed.
+          if (text[j] === '$' || text[j] === '`') unparsed = true
           j += 1
         }
         if (j >= text.length) { unparsed = true; buf += text.slice(i); i = text.length; continue }
+        if (buf.trim().length === 0 || (buf.length > 0 && !/[ \t]$/.test(buf))) unparsed = true
         buf += text.slice(i, j + 1); i = j + 1; continue
       }
       if (ch === '`') {
         const end = backtickEnd(text, i + 1)
         if (end < 0) { unparsed = true; buf += text.slice(i); i = text.length; continue }
+        if (dynamicExpansionCanAffectScreenScope(buf)) unparsed = true
         scan(text.slice(i + 1, end), depth + 1)
         buf += ' '; i = end + 1; continue
       }
       if (ch === '$' && text[i + 1] === '(') {
         const end = parenEnd(text, i + 2)
         if (end < 0) { unparsed = true; buf += text.slice(i); i = text.length; continue }
+        if (dynamicExpansionCanAffectScreenScope(buf)) unparsed = true
         scan(text.slice(i + 2, end), depth + 1)
         buf += ' '; i = end + 1; continue
       }
+      // Bare parameter expansion can synthesize an executable command (`cmd=screencap; $cmd`).
+      if (ch === '$') unparsed = true
+      // Process substitution also runs a nested command, but is not represented by `$()`.
+      if ((ch === '<' || ch === '>') && text[i + 1] === '(') unparsed = true
       if (ch === ';' || ch === '\n' || ch === '\r') { flush(); i += 1; continue }
       if (ch === '&' || ch === '|') {
         // `&&` / `||` 与单个 `&` / `|` 都是分隔符；两个字符都要吃掉。
@@ -276,12 +344,17 @@ export function splitCommandSegments(command: string): CommandSegments {
     const segment = pending.shift() as string
     const payload = SHELL_C_PAYLOAD.exec(segment)
     if (payload === null) continue
-    const inner = unwrapOneQuote(payload[1])
+    const inner = shellCommandArgument(payload[1])
+    if (inner === null) { unparsed = true; continue }
     if (inner.length === 0) continue
     const before = segments.length
     scan(inner, 1)
     pending.push(...segments.slice(before))
   }
+  if (segments.some((segment) => {
+    const bare = stripQuotedText(segment).trimStart()
+    return OPAQUE_EXECUTION.test(bare) || (SHELL_INTERPRETER.test(bare) && !SHELL_C_PAYLOAD.test(segment))
+  })) unparsed = true
   return { segments, unparsed }
 }
 

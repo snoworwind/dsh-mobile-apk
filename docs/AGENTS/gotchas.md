@@ -1823,3 +1823,33 @@ EngineBootContinuationTest用latch驱动真实观察函数：winner持CAS但无�
 - 大文件改动一律避免「read 全文 → write 全文」这一组合。
 
 本次恢复来源：`origin/main` 的该文件（1792 行，比被毁版本更完整），307/308 条按 LF 追加。
+
+309. **`sh -c` 的尾随重定向会遮住屏幕命令体，动态目标也可能被替换值洗掉（本轮静态审查发现）**
+
+**现象**：范围门旧逻辑只在 `-c` 载荷从首尾被引号完整包住时才递归扫描。`sh -c "screencap -p -d 0 /sdcard/real.png" > /sdcard/out` 的重定向使载荷不再首尾配对，于是命令词与目标屏参数被当作引号文本抹掉；另外，`screencap -p $(printf -- '-d 0')` 只审替换命令、不审输出，real-only 也可能被动态改到虚拟屏。
+
+**真因**：把 shell 参数视为整段字符串而不是词法参数；并把命令替换的执行副作用当成完整语义，忽略其输出仍参与命令词/屏幕目标解析。
+
+**修法**：Kotlin 与 bridge 侧按 shell 规则提取 `-c` 后第一个参数，再扫描载荷；重定向与位置参数不参与载荷提取。若 `$()` / 反引号会影响命令词、解释器载荷或屏幕命令目标，则标记不可解析并 fail-closed；不透明执行器在两档范围都拒绝。新增跨语言 fixture，权威源在 `plugins/dsh-android-bridge/test/fixtures/screen-scope-cases.json`，壳侧副本由 `node scripts/gen-screen-scope-fixture.mjs` 生成。
+
+**判据**：范围判据必须拒绝真实屏 `-d 0` 的 `sh -c` 重定向形式；合法虚拟屏目标即使带 `-c` 位置参数仍放行；动态输出影响屏幕目标时为 `deny-unparsed`。本轮按仓库要求更新执行地图，并跑代码地图静态门禁；设备层验收仍需按 §2.1 完成。
+
+310. **`workflow_dispatch` 自由文本直接插进 Bash 源码会形成 runner shell 注入面**
+
+**现象**：`.github/workflows/build-apk.yml` 曾把用户控制的 `suffix` 直接以内联表达式写入 shell 命令；特殊字符可改变 runner 实际执行的 Bash 语法。
+
+**真因**：GitHub Actions 表达式插值发生在脚本交给 shell 之前，引用/转义又与 shell 语法耦合；artifact 路径和命令参数也复用了未经约束的输入。
+
+**修法**：先通过环境变量传递输入，再在独立步骤中只接受两个 ABI 常量和总长不超过 32 字符的 `-[A-Za-z0-9][A-Za-z0-9._+-]{0,30}` suffix；后续 shell 命令与 artifact 名只消费校验后的环境值。
+
+**判据**：workflow shell 正文不再直接引用 `inputs.suffix` / `matrix.abi`；无效 ABI 或 suffix 在任何构建步骤前失败。不要把上传文件名当作可执行路径。
+
+311. **特权 shell 危险命令黑名单必须先还原引号与转义，否则 shell 可拼出被拦截的操作**
+
+**现象**：只对原始字符串匹配 `settings put` 会放过 `settings p"ut" ...` 或 `settings p\ut ...`；shell 去掉引号/反斜杠后，实际执行的仍是系统设置写入。`pm gr"ant"` 同样能绕过权限命令判据。
+
+**真因**：黑名单把 shell 源码当成已经拆好的 argv；命令词可以由相邻引号片段拼接，也可以由转义字符还原。
+
+**修法**：bridge 服务面先做有界的引号/转义词法还原，再跑危险操作规则；未闭合引号拒绝。若命令词或危险命令族参数含动态展开，则拒绝无法静态确认的情况。服务面仍在 `controlExec`、`execAdbShell`、`execAdbLine` 复查并记审计。
+
+**判据**：服务面反证必须拒绝普通写法、引号拼词、反斜杠拼词和权限动词拼词；被拒命令不进入控制队列。对应反例已加到 `plugins/dsh-android-bridge/test/screen-scope.test.mjs`，本轮未运行测试套件。

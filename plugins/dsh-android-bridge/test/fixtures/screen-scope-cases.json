@@ -110,6 +110,62 @@
       "why": "命令替换与反引号同性质（会被执行），必须同样展开。"
     },
     {
+      "name": "屏幕命令在 sh -c 重定向前的载荷仍须扫描",
+      "command": "sh -c \"screencap -p -d 0 /sdcard/real.png\" > /sdcard/out",
+      "ownedTargets": ["7", "11529215046816944610"],
+      "expect": "deny-uncertified-target",
+      "why": "重定向属于外层 sh 命令；它不改变 -c 的第一个命令参数。不得因载荷后还有重定向而把引号内命令当普通文本抹掉。"
+    },
+    {
+      "name": "sh -c 的尾随位置参数不应吞掉合法虚拟屏目标",
+      "command": "sh -c \"screencap -p -d 7 /sdcard/virtual.png\" marker",
+      "ownedTargets": ["7", "11529215046816944610"],
+      "expect": "allow",
+      "why": "-c 后第一个 shell word 才是执行载荷；后续词是 $0/$1 等位置参数，不得造成过度拒绝。"
+    },
+    {
+      "name": "env 包装的 sh -c 仍扫描实际载荷",
+      "command": "env sh -c \"screencap -p -d 0 /sdcard/real.png\"",
+      "ownedTargets": ["7", "11529215046816944610"],
+      "expect": "deny-uncertified-target",
+      "why": "常见命令包装器不能遮蔽解释器及其 -c 命令体。"
+    },
+    {
+      "name": "env 包装的脚本解释器不能绕过范围门",
+      "command": "env sh /sdcard/job.sh",
+      "ownedTargets": ["7", "11529215046816944610"],
+      "expect": "deny-unparsed",
+      "why": "从文件读取的 shell 程序无法静态检查；即使命令词本身不含屏幕命令也必须拒绝。"
+    },
+    {
+      "name": "awk 等代码解释器属于不透明执行器",
+      "command": "awk 'BEGIN { system(\"screencap -p -d 0 /sdcard/real.png\") }'",
+      "ownedTargets": ["7", "11529215046816944610"],
+      "expect": "deny-unparsed",
+      "why": "脚本解释器可在字符串中启动任意屏幕命令；范围扫描器不尝试解析语言子集。"
+    },
+    {
+      "name": "屏幕目标由命令替换动态生成时拒绝",
+      "command": "screencap -p $(printf -- '-d 0') /sdcard/real.png",
+      "ownedTargets": ["7", "11529215046816944610"],
+      "expect": "deny-unparsed",
+      "why": "命令替换会动态改变屏幕目标参数；只扫描替换体会丢失其输出值，两个范围档位都必须 fail-closed。"
+    },
+    {
+      "name": "命令替换不能合成屏幕命令名",
+      "command": "$(printf screencap) -p -d 0 /sdcard/real.png",
+      "ownedTargets": ["7", "11529215046816944610"],
+      "expect": "deny-unparsed",
+      "why": "动态展开可能把非屏幕命令替换成屏幕命令；命令词本身不静态时不得按无关命令放行。"
+    },
+    {
+      "name": "eval 这类不透明文本执行器 fail-closed",
+      "command": "eval 'screencap -p -d 0 /sdcard/real.png'",
+      "ownedTargets": ["7", "11529215046816944610"],
+      "expect": "deny-unparsed",
+      "why": "范围扫描器无法可靠解释 eval 的二次 shell 语义；不透明执行器必须拒绝。"
+    },
+    {
       "name": "S-3 am 的 -d 是 Intent data，不是目标屏凭据",
       "command": "am start -d 7 -n com.example/.Main",
       "ownedTargets": ["7", "11529215046816944610"],
