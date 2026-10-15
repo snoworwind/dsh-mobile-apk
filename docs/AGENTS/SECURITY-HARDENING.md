@@ -21,6 +21,8 @@
 
 **当前缺口（已登记；未补验不得发布）**：`release.yml` 仍走「LFS 底座 + `build-apk-013.ps1`」，与本铁律冲突。把发布链接到来源链要动签名与快照输入面，属独立改动，见 [known-gaps.md](known-gaps.md)。
 
+**「独立」的含义（避免歧义）**：本分支的构建、验证都不需要 kelai141 名下任何仓库——来源链只取 `deepseek-ai/deepseek-harness`、Termux 官方签名仓、npm registry 与 Android SDK；`scripts/patches/**` 与各子仓副本在本分支内即为权威，协调仓的逐字节镜像比对属于对端 CI 的自守面，**不是本分支产物的判据**。手工发布脚本（`upload-release.mjs` / `sync-release-notes.mjs`）已按用户指示删除；`release.yml` 与它依赖的本地/协调仓链在发布面切到来源链之前不得使用。仍然保留、且**不构成依赖**的只有归属与出处类内容：`LICENSE` 的版权声明、`CODEOWNERS`、各 `package.json` 的 `repository` 字段、README 的生态链接，以及 `gotchas.md` / `changelog-archive.md` 的历史条目——这些记录的是事实来源，**不得改写成「我们的」**。
+
 ## 分支维护方式
 
 本分支作为本 fork 的长期独立安全加固分支维护，**不合并到本 fork 的 `main`，也不以合并到上游 `main` 为交付目标**。

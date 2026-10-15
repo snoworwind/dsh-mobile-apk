@@ -42,14 +42,18 @@
 
 快照输入：dsh-mobile-apk/snapshot/snapshot-<abi>.tar.xz（设备侧 make-snapshot.sh 产出后按 ABI 命名放入；打快照前必须先部署最新插件，否则一致性门禁中止）。
 
-## 5. 发布（单一入口）
+## 5. 发布（单一入口：来源链）
 
-    git -C dsh-mobile-apk tag v0.10.2 && git -C dsh-mobile-apk push origin v0.10.2
-    $env:GH_TOKEN=<pat> node scripts/upload-release.mjs 0.10.2
+本分支只允许从源码构建，见 `AGENTS.md` §4 铁律 9 与 `docs/AGENTS/SECURITY-HARDENING.md`：**任何 APK 及发布资产都必须由来源链产出**，禁止用 `scripts/build-apk-013.ps1`、`scripts/build-release.ps1` 或任何手工上传路径归集、发布。
 
+    git -C dsh-mobile-apk tag v<版本> && git -C dsh-mobile-apk push origin v<版本>
+    # 资产由来源链（.github/workflows/build-apk-source.yml）产出，随产物附 provenance 后发布。
+
+- 原先的手工发布脚本 `scripts/upload-release.mjs` / `scripts/sync-release-notes.mjs` **已按用户指示删除**：它们写死上游仓库坐标、且属非来源链路径。需要发布能力时按来源链重建，不要从上游取回。
+- 来源链目前只覆盖构建面（APK + provenance），发布面（资产归集、Release 创建）尚未建成——**本分支当前不具备发布能力**，见 `docs/AGENTS/known-gaps.md`。
 - 插件仓库不再打 release（避免 tag 与包版本错位混乱）；需单独分发时用 plugins/ tgz；
 - 发布后闭环：下载新资产 → sha256 对照 MANIFEST → 对应平台安装冒烟（x86_64 → MuMu；arm64 → 真机）→ 记录进 notes.md；
-- 错误 release 处置：gh release delete <tag> -R snoworwind/dsh-mobile-apk --yes → 修正后重发（本 fork 坐标；脚本按 `DSH_REPO_SLUG` > `GITHUB_REPOSITORY` > `git origin` 自行解析，不再写死上游）。
+- 错误 release 处置：gh release delete <tag> -R snoworwind/dsh-mobile-apk --yes → 修正后重发（本 fork 坐标）。
 
 ## 6. 资产命名约定
 

@@ -19,7 +19,8 @@
 | 外部文件导入来源 | 私有 file URI 与同 UID Provider 的权限代用路径已在源码关闭；外部 content URI 要求系统已授读权限，file URI 限共享存储并检查实际 FD；畸形分享参数被安全拒绝，见坑 321 | WSL 主源码编译及静态检查通过；未做设备验证。正常带授权的系统分享、私有 URI 拒绝、链接替换与 FD 关闭均待设备回归；不提供 URI 读授权的旧文件管理器需改用系统分享/打开入口，系统不能解析的 Provider 或 FD 路径失败关闭 |
 | raw shell 策略边界 | 范围门检查提交文本中的静态命令与显示选择器，不具备完整 shell 沙箱的能力 | 不应将文本扫描视作任意可执行程序行为的安全证明；本批只收紧已定位的绕过路径，运行时效果仍待验收 |
 | **发布链与「APK 只能从源码构建」冲突** | 按用户指示立铁律（见宗旨文档）：本分支任何 APK 必须由来源链产出。实测现状：`release.yml` 仍先拉 `base/*.tar.xz` LFS 底座造快照、再在 runner 内跑 `scripts/build-apk-013.ps1`（其门禁段与产物面无来源链 provenance）；`build-apk.yml`/`build-apk-source.yml` 才是来源链 | 需把发布链接到来源链：快照输入改为 Termux 官方验签仓组装、打包改用来源链编排、发布资产附带来源链 provenance；在此之前**不得**用现有 release 链产出发布候选。改到签名/快照输入面，按 L2 面即时三层验收，属独立改动 |
-| **仓库坐标写死上游（已修）** | 实测：`record-project-components.mjs` 把 provenance 的 `sourceRepository` 写死 `github.com/kelai141/dsh-mobile-apk`（而来源链会调用它两次）；`upload-release.mjs` / `sync-release-notes.mjs` 写死 `OWNER/REPO` 并需对方 PAT；`webpages/` 的 canonical/og/发布 API/下载链接全指向上游 | 已改为运行时解析（`DSH_*` 环境变量 > CI 变量 > `git origin`，取不到即判红）与构建期占位符注入，默认指向本 fork；站点测试同步改为按解析值断言。证据与根因见坑 327 |
+| **仓库坐标写死上游（已修）** | 实测：`record-project-components.mjs` 把 provenance 的 `sourceRepository` 写死 `github.com/kelai141/dsh-mobile-apk`（而来源链会调用它两次）；`upload-release.mjs` / `sync-release-notes.mjs` 写死 `OWNER/REPO` 并需对方 PAT；`webpages/` 的 canonical/og/发布 API/下载链接全指向上游 | 已改为运行时解析（`DSH_*` 环境变量 > CI 变量 > `git origin`，取不到即判红）与构建期占位符注入，默认指向本 fork；站点测试同步改为按解析值断言。**两个手工发布脚本已按用户指示删除**（零调用者、非来源链路径）。证据与根因见坑 327 |
+| **本分支当前不具备发布能力（发布面未建成）** | 按铁律 9，APK 与发布资产必须由来源链产出。现状：来源链只有**构建面**（`build-apk-source.yml` 产出 APK + provenance 证据包），没有**发布面**（资产归集、Release 创建）；原手工发布工具已删除，`release.yml` 仍是非来源链路径且与之冲突 | 需在来源链上补发布面（产物归集 + provenance 随附 + Release 创建），或明确本分支不出 Release。在此之前**不得**从本分支产出任何 Release；发布链切换属 L2 面（签名/快照输入），须即时三层验收 |
 
 ## 本轮仍需收口
 

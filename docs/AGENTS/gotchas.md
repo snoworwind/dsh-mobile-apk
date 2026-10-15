@@ -2009,6 +2009,8 @@ EngineBootContinuationTest用latch驱动真实观察函数：winner持CAS但无�
 
 **复验证据**：`node --test scripts/source-build/record-project-components.test.mjs` 8 例（7 通过 / 1 既有 SKIP），其中新增用例断言 env > CI 变量 > git origin 的优先级，并带负控「无来源可解析时必须抛错」；`node --test webpages/tests/*.test.mjs` 39/39 通过（Node 24，与 CI 同版本）；受控负控：把 `__CANONICAL_URL__` 这类未登记占位符塞进模板后 `tools/build.mjs` exit 1 并点名该占位符；真实构建产物的坐标全部为本 fork（`https://snoworwind.github.io/dsh-mobile-apk/`、`https://github.com/snoworwind/dsh-mobile-apk/releases`），残留 `__…__` 计数 0。
 
+**后续（同日，按用户指示）**：目标明确为「本分支事实上独立于 kelai141 且只能从源码构建」后，②涉及的两个手工发布脚本已**整体删除**（零调用者、不在镜像面、无门禁引用），本分支不再保留手工发布面。`webpages/` 的处置与三个镜像面文件（`scripts/build-apk-013.ps1` / `scripts/build-release.ps1` / `scripts/build-snapshot-013.mjs`，单边不可删）见 [known-gaps.md](known-gaps.md) 与宗旨文档的「独立」口径。
+
 328. **`webpages` 测试套件在本分支 HEAD 上就是红的：一处 mock 陈旧、一处断言与刻意实现相反**
 
 **现象**：`node --test webpages/tests/*.test.mjs`（Node 24，CI 同版本）在 HEAD `d7a456f` 上判红两处，且都表现为「构建照跑、结果悄悄变差」。
