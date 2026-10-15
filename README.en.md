@@ -10,7 +10,7 @@
 
 Android shell for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness): WebView UI
 over an **embedded Termux runtime snapshot** (extract-and-run, no Termux app needed), SAF directory
-bridge, keep-alive foreground service, engine watchdog, and online runtime updates. One APK to
+bridge, keep-alive foreground service, engine watchdog, and bundled snapshot deployment and recovery. One APK to
 install: it boots a full dsh web agent that can really execute bash.
 
 App name `DeepCode` (icon text DeepSearch), package `com.dsharnessmobile.shell`,
@@ -30,18 +30,11 @@ current source version **`0.14.6`** (versionCode 50), engine `@deepseek-ai/dsh` 
 - **Embedded runtime** — xz snapshot bundling node + git + bash + coreutils + dsh + plugins + pnpm +
   python/perl/ruby; first launch extracts in 2–4 min (`refreshSnapshot`), engine listens on
   `127.0.0.1:3080`; fully offline.
-- **APK self-update (the primary user-facing path as of 0.14.6)** — queries the GitHub latest release,
-  matches the asset by device ABI, and falls back through a mirror chain; after download it verifies
-  sha256 and launches the system installer. Two entry points share **one** state: "Check for updates"
-  reachable in the healthy state, and a secondary button on the launch screen; **never automatic**.
-  The update action **never occupies the phase or the primary button**, and every terminal state
-  lands on honest text (with a timeout fallback).
-- **Runtime snapshot update** — manifest-driven snapshot replacement (download → sha256 → atomic swap →
-  restart), so the runtime self-updates without an APK update. The tree swap is **one transaction**:
-  extract to staging → verify completeness → swap wholesale; interruption rolls back, and user data
-  (sessions / attachments / settings / credentials / workspaces) is **never** touched.
-  Note: as of 0.14.6 the user-facing entry moved to the APK update above, and the snapshot chain is no
-  longer triggered from the launch screen; the adb-only debugging path remains but has no timeout fallback.
+- **Manual app upgrades** — this branch removes in-app update checks, downloads and installation.
+  Download a new APK for the device ABI and install it over the existing app.
+- **Bundled snapshot deployment and recovery** — the runtime ships in the APK. Refreshes extract to
+  staging, verify completeness and swap transactionally. Interrupted deployment and historical online
+  transactions remain recoverable, preserving sessions, attachments, settings, credentials and workspaces.
 - **Keep-alive** — foreground service + 5s watchdog (relaunches a wedged engine) + 3s UI poll +
   crash rollback gate (UndoGate).
 - **Built-in console** — a standalone interactive bash terminal (`assets/console.html`) that works
@@ -227,11 +220,10 @@ the physical screen.
 
 | Permission | Purpose |
 |---|---|
-| `INTERNET` | WebView + engine probe + APK self-update (manual trigger only) |
+| `INTERNET` | WebView + engine probe |
 | `POST_NOTIFICATIONS` | Notification channel (runtime request on API 33+) |
 | `FOREGROUND_SERVICE` + `FOREGROUND_SERVICE_DATA_SYNC` | Keep-alive foreground service |
 | `MANAGE_EXTERNAL_STORAGE` | "All files access" (required for external workspaces; special permission, granted manually) |
-| `REQUEST_INSTALL_PACKAGES` | Launches the system installer for a downloaded update (the user must grant it explicitly) |
 
 SAF directory and image picking need no permission. Virtual displays and privileged shell require the
 user to install, start and authorize **Shizuku**.

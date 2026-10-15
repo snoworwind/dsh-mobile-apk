@@ -10,8 +10,7 @@ import org.junit.Test
  * 0.14.1 批 2「点了没反应 / 一次点击做错事」的行为回归（纯 JVM，无 Robolectric）。
  *
  * 覆盖 P0-2 ~ P0-9 里**可离线判定**的那几条。做法沿用本仓既有的两条路子：
- *  1. **纯函数判据**（[pagerIndex] / [optionsShownCount] / [optionsHiddenCount] / [approvalArmed] /
- *     `UpdateManager.UpdateFailures.humanize`）——语义直接可测，改坏即红；
+ *  1. **纯函数判据**（[pagerIndex] / [optionsShownCount] / [optionsHiddenCount] / [approvalArmed]）——语义直接可测；
  *  2. **源码级判据**——需要 Activity/View 的交互（按钮 enabled、Toast、flashStatus）在 JVM 里跑不起来，
  *     就断言「调用点与真源表达式在场」（与 `CallSiteContractTest` 同一口径，撤掉修复即红）。
  *
@@ -129,29 +128,6 @@ class OverlayPendingCardTest {
     assertTrue("无轮次时必须给出可见回执", stopBody.contains("flashStatus(\"当前没有正在运行的任务\")"))
   }
 
-  // ── P0-3：按钮卡在禁用的「下载中 100%」 ──────────────────────────────────
-
-  @Test
-  fun `安装权限缺失时按钮必须复原为可点`() {
-    // 0.14.6 单一真源重构：安装/授权推进迁到 ApkUpdateController，渲染改由 renderApkUpdate 统一负责。
-    // 不变量**没变**（P0-3）：权限缺失时按钮必须是**可点**的「授权后继续安装」，被拒返回后同样可点。
-    val renderer = codeOnly(source("GuidePageRenderer.kt"))
-    assertTrue("必须存在「授权后继续安装」这一可点态", renderer.contains("ds_apk_grant_install"))
-    assertTrue("需授权相位必须渲染为可点", renderer.contains("STATE_NEED_PERMISSION"))
-    val permIdx = renderer.indexOf("STATE_NEED_PERMISSION")
-    val permBody = renderer.substring(permIdx, (permIdx + 400).coerceAtMost(renderer.length))
-    assertTrue("权限缺失分支必须把按钮复原为可点", permBody.contains("enabled = true"))
-
-    val controller = codeOnly(source("ApkUpdateAction.kt"))
-    val canIdx = controller.indexOf("if (!UpdateChecker.canInstall(activity))")
-    assertTrue("必须有权限缺失分支", canIdx >= 0)
-    val canBody = controller.substring(canIdx, (canIdx + 900).coerceAtMost(controller.length))
-    assertTrue("权限缺失必须拉起授权页并如实回报是否拉起", canBody.contains("requestInstallPermission(activity)"))
-    assertTrue("拉不起来必须落到如实失败态（不假装拉起过）", canBody.contains("KIND_INSTALLER_UNAVAILABLE"))
-    val settle = controller.substringAfter("fun settleAfterResume()").take(900)
-    assertTrue("被拒返回后必须收敛到可解释终态（不会是永远转圈）", settle.contains("onFailed") || settle.contains("install("))
-  }
-
   // ── P0-4：存储授权「点了没反应」 ─────────────────────────────────────────
 
   @Test
@@ -173,35 +149,4 @@ class OverlayPendingCardTest {
     assertTrue("失败必须留日志", fn.contains("Log.w("))
   }
 
-  // ── P0-2：未配置发布源被当成故障 ────────────────────────────────────────
-
-  @Test
-  fun `未配置发布源是中性事实，不是失败`() {
-    val um = codeOnly(source("UpdateManager.kt"))
-    assertFalse("不得再抛「未配置发布源」异常（那会让界面走红色错误相位）", um.contains("未配置可信发布源（需 HTTPS"))
-    assertTrue("必须回中性终态", um.contains("UpdateOutcome.NotConfigured"))
-    val flow = codeOnly(source("EngineStartFlow.kt"))
-    assertFalse(
-      "界面相位不得再靠字符串前缀猜（旧实现把内部错误串当失败相位）",
-      flow.contains("status.startsWith(\"更新失败\")"),
-    )
-    assertTrue("NotConfigured 必须映射到中性相位 Info", flow.contains("UpdateOutcome.NotConfigured -> GuidePhase.Info"))
-  }
-
-  @Test
-  fun `失败文案必须说人话且给下一步`() {
-    val um = codeOnly(source("UpdateManager.kt"))
-    // 内部术语一律不上屏：overrideManifestUrl 是只存在于代码里的名字。
-    assertFalse("内部开关名不得出现在用户可见文案里", um.contains("\"在线更新未启用：未配置可信发布源"))
-    val humanize = UpdateManager.UpdateFailures.humanize(IllegalStateException("manifest HTTP 404"))
-    assertTrue("必须带可读原因（含状态码）", humanize.contains("404"))
-    assertTrue("必须给下一步", humanize.contains("请") || humanize.contains("可"))
-    // 未归类异常不得把 Java 类名/原始 message 直接倒给用户。
-    val unknown = UpdateManager.UpdateFailures.humanize(RuntimeException("com.foo.BarException: boom"))
-    assertFalse("未归类异常不得回显内部类名", unknown.contains("com.foo.BarException"))
-    assertTrue("未归类异常要指向日志与重试", unknown.contains("日志"))
-    // 网络类异常有专门的「网络不可达 + 下一步」文案。
-    val net = UpdateManager.UpdateFailures.humanize(java.net.UnknownHostException("example.invalid"))
-    assertTrue("网络不可达要说清并给下一步", net.contains("网络"))
-  }
 }

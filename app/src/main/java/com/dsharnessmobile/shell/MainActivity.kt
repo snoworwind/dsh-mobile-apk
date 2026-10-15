@@ -99,19 +99,6 @@ class MainActivity : ComponentActivity() {
   internal val guideViewReady: Boolean get() = ::guideView.isInitialized
 
   internal val guideRenderer by lazy { GuidePageRenderer(this) }
-  /**
-   * 更新动作唯一推进者（引导页按钮与设置页那一行**共用这一份状态**）。
-   *
-   * applier 单独成属性：若在 apkUpdate 的初始化器里直接 new 一个引用 apkUpdate 的对象字面量，
-   * Kotlin 会判成自引用递归（编译期就红）。两个 lazy 的求值都在首次访问（onResume/页面就绪）时，
-   * 彼此不构成构造期依赖。
-   */
-  private val apkUpdateLazy: ApkUpdateController by lazy { ApkUpdateController(this) }
-  /** 已构造的控制器引用（仅用于 onDestroy 释放）：lazy 没有 isInitialized，故自己留一份可空引用。 */
-  @Volatile private var apkUpdateRef: ApkUpdateController? = null
-  internal val apkUpdate: ApkUpdateController get() = apkUpdateLazy.also { apkUpdateRef = it }
-
-
   internal val engineFlow by lazy { EngineStartFlow(this) }
   internal val engineManager by lazy { EngineManager(this, pickToken) }
   private val downloadSaver by lazy { DownloadSaver(this, engineManager.dshDataDir) }
@@ -194,7 +181,6 @@ class MainActivity : ComponentActivity() {
     internal const val WEBVIEW_SYNTAX_FLOOR_MAJOR = 94
     /** 虚拟屏空闲回收扫描间隔（判定阈值在 VdisplayController.IDLE_RECLAIM_MS = 10 分钟）。 */
     private const val VDISPLAY_REAP_INTERVAL_MS = 2 * 60 * 1000L
-    const val ACTION_UPDATE = "com.dsharnessmobile.shell.action.UPDATE"
 
     /** #120：显式拒绝哨兵路径前缀（引擎侧识别为拒绝而非取消，见 host-web-compat）。
      *  协议：`__dsh_pick_refused__:<reason>`，reason = permission-denied | android-10。 */
@@ -471,20 +457,15 @@ class MainActivity : ComponentActivity() {
     // manage 插件广播时 --es auth 携带；幂等）。
     try { AdbKeyboardService.ensureNonce(this) } catch (_: Throwable) {
     }
-    // Testable update trigger: adb am start -n .../.MainActivity -a com.dsharnessmobile.shell.action.UPDATE
-    if (intent?.action == ACTION_UPDATE) {
-      engineFlow.runUpdate()
-    } else {
-      // 来件接线（VIEW/SEND 外部来件）已迁至 FileIncoming.processIncomingIntent：
-      // 校验净化→后台拷贝临时工作区→待发清单投递引擎侧插件；拒绝/失败经 showTestNotification 提示。
-      // 0.13.8 #174：startEngineFlow 提前——引擎启动是异步的，先拉起缩短
-      // 「拷完 POST 早于引擎 listen」的竞态窗口（投递另有待发清单 + 引擎就绪钩子兜底）。
-      if (!userClosedEngine) startEngineFlow()
-      FileIncoming.processIncomingIntent(this, intent) { title, text -> showTestNotification(title, text) }
-      // P0-1：冷启动路径的通知落点（热路径在 onNewIntent）。放在 startEngineFlow 之后：
-      // 落点要等页面把会话列表装起来，故这里只登记，真正的投递由页面就绪/onNewIntent 触发。
-      consumeNotifyRoute(intent)
-    }
+    // 来件接线（VIEW/SEND 外部来件）已迁至 FileIncoming.processIncomingIntent：
+    // 校验净化→后台拷贝临时工作区→待发清单投递引擎侧插件；拒绝/失败经 showTestNotification 提示。
+    // 0.13.8 #174：startEngineFlow 提前——引擎启动是异步的，先拉起缩短
+    // 「拷完 POST 早于引擎 listen」的竞态窗口（投递另有待发清单 + 引擎就绪钩子兜底）。
+    if (!userClosedEngine) startEngineFlow()
+    FileIncoming.processIncomingIntent(this, intent) { title, text -> showTestNotification(title, text) }
+    // P0-1：冷启动路径的通知落点（热路径在 onNewIntent）。放在 startEngineFlow 之后：
+    // 落点要等页面把会话列表装起来，故这里只登记，真正的投递由页面就绪/onNewIntent 触发。
+    consumeNotifyRoute(intent)
   }
 
   /**
@@ -645,9 +626,6 @@ class MainActivity : ComponentActivity() {
     }
     // M3：从系统授权页返回——上次 pick 因缺权限挂起时按授权结果续启/结算（迁至 DirectoryPickerController）。
     dirPickerController.settlePendingOnResume()
-    // 0.13.8 批 H：从「安装未知应用」授权页返回——已授权则续继 APK 更新包的安装。
-    // 0.14.6：结算动作搬进唯一状态机（引导页与设置页走同一条闭环，不会再出现某入口卡在「等授权」）。
-    apkUpdate.settleAfterResume()
   }
 
   /**
@@ -774,9 +752,6 @@ class MainActivity : ComponentActivity() {
 
   override fun onDestroy() {
     engineFlow.destroy() // Invalidate and cancel startup callers before destroying their page owners.
-    // 0.14.6：解除更新状态机的超时定时器并把进行中相位收敛为可解释终态
-    // （否则重新打开应用会看到一个永远不会动的「更新中」）。
-    apkUpdateRef?.release()
     pageRecovery.pause()
     // #128 L1：控制面不再持有已销毁 Activity 的 WebView。
     if (::webView.isInitialized && webViewRef === webView) webViewRef = null
@@ -1160,8 +1135,6 @@ class MainActivity : ComponentActivity() {
         onSettingsPathRequest = { engineManager.settingsDocumentPath() },
         onExportSettingsDocument = { engineManager.settingsDocumentExport() },
         onCopyTextRequest = { text -> copyTextNative(text) },
-        // 0.14.6：设置页「检查更新」——动作与引导页按钮共用同一状态机（ApkUpdateController）。
-        onApkUpdate = { action -> apkUpdate.handleBridgeAction(action) },
         pickToken = pickToken,
         onRestartEngine = { engineFlow.restart() },  // S3-15：返回 Boolean，页面据此如实反馈
         onShutdownToGuide = { engineFlow.shutdownToGuide() },

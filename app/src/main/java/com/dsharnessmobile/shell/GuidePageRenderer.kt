@@ -13,7 +13,7 @@ import java.io.File
 
 /** 引导页（启动/测试界面）纯代码 UI：GuidePhase 状态机驱动视图渲染 + WebUI/引导页切换（自 MainActivity 拆出）。 */
 
-internal enum class GuidePhase { Idle, Starting, Extracting, Updating, Recovering, Undoing, Error, Closed, Info }
+internal enum class GuidePhase { Idle, Starting, Extracting, Recovering, Undoing, Error, Closed, Info }
 
 /** Stable user copy comes only from a structured failure code, never raw paths or exception text. */
 internal fun startupFailureHintResource(code: String?): Int = when (code) {
@@ -51,7 +51,7 @@ internal enum class HintSource(val priority: Int) {
   /** 流程内进度/阶段（下载百分比、解压阶段名）。 */
   FLOW(20),
 
-  /** 旁路动作的回执（检查更新结果、复制日志回执、探测中…）。 */
+  /** 旁路动作的回执（复制日志回执、探测中…）。 */
   SIDE(10),
 }
 
@@ -62,7 +62,7 @@ internal enum class HintSource(val priority: Int) {
  * @param incoming 本次写入的来源。
  *
  * 规则：不可打断的文案只能被**同级或更高**优先级顶掉（即另一条相位文案）；否则一律拒绝。
- * 非锁定期一切照常（后写者赢）——这样「点检查更新，然后它回报结果」这条正常路径不受影响。
+ * 非锁定期一切照常（后写者赢），旁路动作可正常回报结果。
  */
 internal fun hintAccepted(current: HintSource?, currentSticky: Boolean, incoming: HintSource): Boolean =
   !currentSticky || incoming.priority >= (current?.priority ?: 0)
@@ -248,13 +248,6 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
   private var hintSource: HintSource? = null
   private var hintSticky = false
 
-  // —— APK 自更新：状态机**不在本类**（0.14.6 单一真源重构）——
-  // 旧实现把 apkPending/apkReadyToInstall/apkBusy 三个私有字段与全部推进逻辑放在本渲染器里，
-  // 状态只通过改引导页按钮文案表达；健康态 showWeb() 把本视图藏起来后状态随之不可达 ——
-  // 这正是「健康态没有更新入口」的代码级成因，也意味着任何新入口另起一套状态就会与引导页打架。
-  // 现在唯一状态是 [ApkUpdateController]（Activity 作用域），引导页按钮与设置页那一行读**同一份**。
-  private val apkUpdate: ApkUpdateController get() = activity.apkUpdate
-
   /** 失败相位自愈的防重入标记（相位可能被多次应用；同一时刻只跑一次）。 */
   private var ownershipRepairRunning = false
 
@@ -338,10 +331,6 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
   }
 
   fun buildGuideView(): LinearLayout {
-    // 0.14.6：更新入口与设置页共用**同一状态机**——注册渲染回调（注册即按当前状态渲染一次）。
-    // 旧实现的更新状态是本类的私有字段，视图一被 showWeb() 藏起来状态就不可达，这正是
-    // 「健康态没有入口」的代码级成因；现在状态在 Activity 作用域的 ApkUpdateController 里。
-    activity.apkUpdate.observe { renderApkUpdate() }
     chrome = buildGuideChrome(
       activity,
       GuideCallbacks(
@@ -364,7 +353,6 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
           }
         },
         onOpenConsole = { activity.startActivity(Intent(activity, ConsoleActivity::class.java)) },
-        onCheckUpdate = { onUpdateButton() }, // 读的是 Activity 作用域的唯一状态机
         onGrantStorage = { activity.dirPickerController.requestStorageGrant() },
         onCopyLog = { copyGuideLog() },
         // 功能 B（0.14.6）：故障诊断包分享。入口可见性由 refreshGuideMeta 按证据点亮。
@@ -417,12 +405,10 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
 
     val busy = phase == GuidePhase.Starting ||
       phase == GuidePhase.Extracting ||
-      phase == GuidePhase.Updating ||
       phase == GuidePhase.Recovering ||
       phase == GuidePhase.Undoing
     val lockPrimary = phase == GuidePhase.Starting ||
       phase == GuidePhase.Extracting ||
-      phase == GuidePhase.Updating ||
       phase == GuidePhase.Undoing ||
       // S1-3：**自动恢复期间也必须锁**。旧实现在 Recovering 时让主按钮可点且写着「重试」，
       // 而此刻看门狗正在自动重试——用户点它只会打断正在进行的恢复，且手册里那句「重试」
@@ -445,7 +431,6 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
       phase == GuidePhase.Error -> activity.getString(R.string.ds_safe_start)
       phase == GuidePhase.Recovering -> activity.getString(R.string.ds_recovering)
       phase == GuidePhase.Starting || phase == GuidePhase.Extracting -> activity.getString(R.string.ds_starting)
-      phase == GuidePhase.Updating -> activity.getString(R.string.ds_updating)
       phase == GuidePhase.Undoing -> activity.getString(R.string.ds_undoing)
       // 其余（Idle / Info）＝尚未启动或中性事实陈述，主按钮是「启动引擎」
       else -> activity.getString(R.string.ds_start_engine)
@@ -462,7 +447,7 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
     val dotColor = when (phase) {
       GuidePhase.Error, GuidePhase.Closed -> activity.getColor(R.color.ds_danger)
       // 黑白稿里「进行中」统一为墨色脉冲，色相只留给真正的故障信号。
-      GuidePhase.Starting, GuidePhase.Extracting, GuidePhase.Updating,
+      GuidePhase.Starting, GuidePhase.Extracting,
       GuidePhase.Recovering, GuidePhase.Undoing -> activity.getColor(R.color.ds_accent)
       // Info = 中性事实陈述（本版没有这项能力、无需处理），既不是故障（红）也不是进行中（墨）。
       GuidePhase.Idle, GuidePhase.Info -> activity.getColor(R.color.ds_text_tertiary)
@@ -574,9 +559,8 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
 
   /** 只更新副标题（不动相位/状态点/主按钮）。
    *
-   *  用途：**不可打断的相位**（首启解压 / 启动 / 回滚）进行中，旁路动作（如「检查更新」）的结果
-   *  不该抢占状态行——否则「正在更新运行时 686MB」会被一行「本版不提供在线更新」顶掉，
-   *  用户以为解压被取消了（设备实测：首启解压期间点「检查更新」正是这个现象）。 */
+   *  用途：**不可打断的相位**（首启解压 / 启动 / 回滚）进行中，旁路动作的结果
+   *  不该抢占状态行，避免用户误以为解压或启动被取消。 */
   fun applyGuideHint(text: String) = pushHint(text, HintSource.SIDE)
 
   /** 流程内进度/阶段文案（优先级高于旁路回执、低于相位文案）。 */
@@ -640,9 +624,6 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
   private fun defaultHint(phase: GuidePhase): String = when (phase) {
     GuidePhase.Starting -> "首次启动会解压内嵌运行时，请保持应用在前台。"
     GuidePhase.Extracting -> extractHintBody()
-    // 0.14.6：这句只允许出现在**引擎快照更新**相位。APK 自更新路径不再把相位设成 Updating
-    // （更新动作只占用次级提示/次级按钮，不占用主按钮与状态行），故此处不会误导成「在更新应用」。
-    GuidePhase.Updating -> "正在检查运行时快照更新（与安装新版本 APK 是两件事）。"
     GuidePhase.Recovering -> "看门狗正在拉起引擎，通常几秒内恢复。"
     GuidePhase.Undoing -> "正在把配置/插件回滚到最后良好快照（自动回撤）。"
     // 缺陷 D（fx-2）：失败页的默认副文案要说清「这个按钮现在做什么」——
@@ -771,86 +752,6 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
           toast(activity.getString(R.string.ds_storage_detail_copied))
         }
       }
-    }
-  }
-
-  /** 测试界面「检查更新」按钮：手动检查 APK 自更新（用户拍板：不自动检查）。
-   *  同按钮三态 = 检查 → （发现新版）二次确认 → 下载安装；已有下载好的包则直接续继安装。 */
-  private fun onUpdateButton() {
-    // 三态语义（检查 → 二次确认下载 → 安装）由控制器统一决定；渲染只跟着状态走。
-    activity.apkUpdate.onButtonPressed()
-  }
-
-  private fun setUpdateButton(label: String, enabled: Boolean) {
-    // 固定高按钮 + 长版本号（v0.13.7fx-1）会换行截断（device 实测）——单行 + 省略号
-    chrome.updateButton.maxLines = 1
-    chrome.updateButton.ellipsize = android.text.TextUtils.TruncateAt.END
-    chrome.updateButton.text = label
-    chrome.updateButton.isEnabled = enabled
-    chrome.updateButton.alpha = if (enabled) 1f else 0.55f
-  }
-
-  private fun apkHint(msg: String) = pushHint(msg, HintSource.SIDE)
-
-  private fun sizeText(bytes: Long): String =
-    if (bytes <= 0) "" else "%.1f MB".format(bytes / 1048576.0)
-
-  /**
-   * 渲染更新按钮与提示行（**唯一渲染点**）：状态来自 [ApkUpdateController]，本类不再持有任何更新状态。
-   *
-   * 这样引导页与设置页那一行读的是同一份状态——用户在引导页下载到 50%，设置页看到的就是 50%
-   * （旧实现两份状态会长出「能力在、入口无 / 入口有、状态不一致」这类幽灵缺陷）。
-   */
-  internal fun renderApkUpdate() {
-    // **结构性保证**（用户硬判据：「更新失败不影响正常启动，启动页下方按钮是启动而不是别的」）：
-    // 本渲染只改次级提示与**次级**按钮文案（chrome.updateButton 是次级行里的那一枚），
-    // 绝不触碰主按钮与相位——「更新中」这一相位在 APK 路径上根本不再出现。
-    // 旧实现让更新动作占用相位（applyGuidePhase(Updating)）=> 主按钮变「更新中」且被锁 =>
-    // 用户在更新失败后连启动都点不到（用户截图正是这个形态）。
-    if (!::chrome.isInitialized) return
-    val s = activity.apkUpdate.stateName()
-    val tag = activity.apkUpdate.tag()
-    when (s) {
-      ApkUpdateState.STATE_CHECKING -> {
-        setUpdateButton(activity.getString(R.string.ds_apk_checking), enabled = false)
-        apkHint(activity.getString(R.string.ds_apk_checking))
-      }
-      ApkUpdateState.STATE_UP_TO_DATE -> {
-        val v = activity.apkUpdate.version() ?: ("v" + UpdateChecker.currentVersion())
-        setUpdateButton(activity.getString(R.string.ds_check_update), enabled = true)
-        // 0.14.6：**不再链式调用引擎快照更新**（那条链已下线：UpdateManager.DEFAULT_MANIFEST_URL 为空、
-        // 零生产覆盖点 ⇒ 必然只回「本版不提供在线更新」）。留着只会让用户以为在更新应用。
-        apkHint(activity.getString(R.string.ds_apk_latest, v))
-      }
-      ApkUpdateState.STATE_AVAILABLE -> {
-        setUpdateButton(activity.getString(R.string.ds_apk_confirm, tag ?: ""), enabled = true)
-        apkHint(
-          activity.getString(
-            R.string.ds_apk_available, tag ?: "", "v" + UpdateChecker.currentVersion(),
-            sizeText(activity.apkUpdate.sizeBytes()),
-          ),
-        )
-      }
-      ApkUpdateState.STATE_DOWNLOADING -> {
-        val pct = activity.apkUpdate.percent()
-        setUpdateButton(activity.getString(R.string.ds_apk_downloading, pct), enabled = false)
-      }
-      ApkUpdateState.STATE_NEED_PERMISSION -> {
-        // S1-10：授权页是否真的拉起由控制器如实判定；这里只按事实渲染可点按钮。
-        setUpdateButton(activity.getString(R.string.ds_apk_grant_install), enabled = true)
-        apkHint(activity.getString(R.string.ds_apk_need_permission))
-      }
-      ApkUpdateState.STATE_INSTALLING -> {
-        setUpdateButton(activity.getString(R.string.ds_check_update), enabled = true)
-        apkHint(activity.getString(R.string.ds_apk_installing))
-      }
-      ApkUpdateState.STATE_FAILED -> {
-        // 失败如实报分类原因（UpdateChecker 的 8 类 + 下载/校验/安装器 3 类），不再链快照更新。
-        val reason = activity.apkUpdate.reason() ?: "检查更新未完成——可重试，或复制日志反馈"
-        setUpdateButton(activity.getString(R.string.ds_check_update), enabled = true)
-        apkHint(reason)
-      }
-      else -> setUpdateButton(activity.getString(R.string.ds_check_update), enabled = true)
     }
   }
 

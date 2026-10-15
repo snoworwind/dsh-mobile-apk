@@ -8,6 +8,10 @@
 
 > 桥方法与签名以 AndroidBridge/BackGateBridge/consoleBridge 源码为准，计数由门禁现取；不沿用旧版数量。后文版本增量用于历史溯源，不能代表当前版本的构建或验收状态。
 
+## 应用内更新移除（当前分支）
+
+原生与 TypeScript 两侧已移除 APK 更新桥方法；设置页与启动页不再提供检查、下载或安装更新。旧在线快照更新调试 Intent 也已删除。此变更不新增兼容占位方法，完整验收状态见坑 317。
+
 ## 1. 信任与线程边界
 
 主WebView只对精确受管引擎origin开放androidBridge与dshBackBridge；匿名BrowserHost网页不挂桥、不注入EngineAuth cookie/token。@JavascriptInterface运行在JavaBridge线程；涉及UI的调用必须marshal主线程且返回真实结算/超时，不把任务已提交写成已完成。bridge不存在、畸形/空回包均结构化拒绝。

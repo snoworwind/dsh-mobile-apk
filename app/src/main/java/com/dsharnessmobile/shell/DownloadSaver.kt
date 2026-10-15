@@ -30,8 +30,7 @@ internal fun isSessionExport(url: String, method: String): Boolean {
  * MediaStore.Downloads）——浏览器导航带 Origin:null 会被 dsh 的 /api browser-trust
  * fence 拒绝（403），app 内 HttpURLConnection 无浏览器标记 → fence 放行（403 修复路径）。
  * 另承载引擎同源外链的系统浏览器打开（URL 分流的另一半）。
- * 选择独立文件而非并入 UpdateManager：UpdateManager 职责是快照在线更新编排
- * （manifest/sha256/换 usr），与「引擎同源 URL 落盘通道」不是同一内聚面。
+ * 本类只承载用户文件导出，不提供应用或运行时的在线更新。
  */
 internal class DownloadSaver(private val activity: MainActivity, private val dshDataDir: File) {
 

@@ -101,7 +101,7 @@ sequenceDiagram
 ### 阶段 4：后台维护（低频）
 
 - 看门狗持续探活/退避/熔断（`WatchdogV2.kt:109`）；日志采集与轮转（`LogCollector`）；
-- APK 更新：引导页/设置页经 `AndroidBridge.apkUpdate(action)` 驱动 `ApkUpdateController`（唯一状态机与推进者）→ `UpdateChecker` 官方哈希校验、限额下载 → 系统安装器；超时/销毁使操作代次失效，迟到的下载回执不能排队安装。快照更新链已下线，`startUpdateCheck` 在本版**已无任何调用点**（定义保留于 `EngineStartFlow.kt:549`；`UpdateManagerPolicyTest.kt:58` 与 `ForegroundPageRecoveryWiringTest.kt:47` 按该签名切片，**不得当死代码删除**）。manifest 未配置仍 fail-closed；当前职责见§6 K03。
+- 应用内更新已移除：启动页和设置页没有检查/下载/安装入口，原生桥不再暴露更新动作，旧在线快照调试 Intent 也已删除。APK 覆盖安装后的内嵌快照部署与历史事务恢复仍由启动链负责。见坑 317。
 - 公共下载页：`webpages/tools/build.mjs` 只从 GitHub 官方 MANIFEST 注入哈希，内联 JSON 转义 HTML raw-text 结束符；页面镜像探测只信可读 CORS 状态并对具体 APK 做 HEAD，无法判定时保留手动选择。源码位于 `webpages/src/assets/app.js` 与 `webpages/src/assets/release.js`。
 - 残渣回收与标记恢复（`SnapshotTransaction.kt:190` / `EngineManager.kt:238`）。
 
@@ -115,9 +115,9 @@ sequenceDiagram
 
 | ID | 名称 | 一句话职责 | 入口/触发 | 阶段 | 依赖 | 被谁拉起 | 关键文件 | 耦合 |
 |---|---|---|---|---|---|---|---|---|
-| K01 | 启动与引导面 | 点开 App 到引擎页面可见的进程入口、引导页与 WebView 宿主 | LAUNCHER 图标、VIEW/SEND 来件、ACTION_UPDATE | 引导与启动 | 引擎进程与快照面、鉴权探活、诊断落盘 | 系统启动器与分享面板、BootReceiver、悬浮球跳转 | MainActivity.kt,EngineStartFlow.kt,GuidePageRenderer.kt,ForegroundPageRecoveryPolicy.kt | 高 |
+| K01 | 启动与引导面 | 点开 App 到引擎页面可见的进程入口、引导页与 WebView 宿主 | LAUNCHER 图标、VIEW/SEND 来件 | 引导与启动 | 引擎进程与快照面、鉴权探活、诊断落盘 | 系统启动器与分享面板、BootReceiver、悬浮球跳转 | MainActivity.kt,EngineStartFlow.kt,GuidePageRenderer.kt,ForegroundPageRecoveryPolicy.kt | 高 |
 | K02 | 引擎生命周期与保活 | 起 node 引擎、Activity独立观察启动准备窗、5s 探活、看门狗重启熔断与日志落盘 | EngineStartFlow.start及生命周期结束后排队启动前台服务、EngineService先前台提升后初始化及5s tick | 引导与启动 | K01,K03 | MainActivity、BootReceiver、EngineStartFlow | EngineManager.kt,EngineService.kt,WatchdogV2.kt,LogCollector.kt | 高 |
-| K03 | 快照事务与更新链 | 内嵌快照暂存交换事务与回滚（插件故障走**清单式外科拔除**，不整份回滚），兼在线更新与清单合并 | 启动流判指纹不新鲜 / 引导页检查更新 / WebView 下载 | 快照与更新 | 引导启动流、引擎探活、构建快照资产 | EngineStartFlow.runFlow、EngineService 看门狗、引导页按钮、MainActivity 的 WebView 回调 | SnapshotTransaction.kt,SnapshotFs.kt,SnapshotRefreshPolicy.kt,PublicRepoProvision.kt,UpdateManager.kt,ApkUpdateAction.kt,UpdateChecker.kt,PluginMounts.kt,SnapshotUserData.kt,SnapshotFingerprintPolicy.kt,ProfilePackageManifest.kt | 高 |
+| K03 | 快照事务与更新链 | 内嵌快照暂存交换事务与回滚（插件故障走**清单式外科拔除**，不整份回滚），兼历史在线事务恢复与清单合并 | 启动流判指纹不新鲜 / APK 覆盖安装 / WebView 导出 | 快照与更新 | 引导启动流、引擎探活、构建快照资产 | EngineStartFlow.runFlow、EngineService 看门狗、引导页按钮、MainActivity 的 WebView 回调 | SnapshotTransaction.kt,SnapshotFs.kt,SnapshotRefreshPolicy.kt,PublicRepoProvision.kt,PluginMounts.kt,SnapshotUserData.kt,SnapshotFingerprintPolicy.kt,ProfilePackageManifest.kt | 高 |
 | K04 | 桥与控制协议面 | 页面 JS 桥面、引擎鉴权与控制队列承载 | 页面调 androidBridge；EngineService 起控制承载 | 稳态控制 | 引导与启动（EngineService/MainActivity）、无障碍与虚拟屏宿主、快照与更新（UndoGate） | MainActivity 装桥；EngineService.onCreate 起 ControlCarrier；看门狗 tick 调 UndoGate | app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt,app/src/main/java/com/dsharnessmobile/shell/ControlPoller.kt,app/src/main/java/com/dsharnessmobile/shell/EngineAuth.kt,app/src/main/java/com/dsharnessmobile/shell/ControlProtocolV2.kt | 高 |
 | K05 | 无障碍控制面 | 按需取语义树并对设备执行点击输入滚动截屏 | 控制队列取活 + 无障碍服务回调 | 稳态控制 | K04 控制协议、K06 特权执行 | ControlCarrier 控制队列取活、onServiceConnected、ADB 键盘广播 | DeviceControlService.kt,GlobalActionCatalog.kt,AdbKeyboardService.kt,AdbKeyboardReceiver.kt | 高 |
 | K06 | 特权执行、屏幕范围与本地文件面 | Shizuku 特权 shell 通道、屏幕范围门与本地文件出入口 | 引擎 sh* op / 设置页范围写面 / 外部分享与打开 intent | 稳态控制 | 控制队列承载、引擎 bridge 插件、虚拟屏注册表、无障碍控制面 | 引擎 androidPrivilege 服务面与页面桥 | ShellOps.kt,ScreenScope.kt,ShizukuTransport.kt,ShizukuBindState.kt,ShizukuUserService.kt,ShizukuProbe.kt,ShizukuSupport.kt,ProcIo.kt,FileIncoming.kt,PathOpen.kt,ExternalLinks.kt,ConfigTransfer.kt,RootGrant.kt,RootAccess.kt,OwnershipRepairCore.kt,OwnershipRepair.kt,RootRepairMain.kt,RootExecutionFence.kt,RootMaintenanceLease.kt,RootOwnershipJobs.kt,LeaseClearProbe.kt | 高 |
@@ -152,7 +152,6 @@ sequenceDiagram
 | 高 | K06 | 双引号内的动态命令替换曾绕过屏幕范围门 | `app/src/main/java/com/dsharnessmobile/shell/ShellOps.kt`、`plugins/dsh-android-bridge/src/screen-scope.ts` | 引号内动态展开、命令合成与不透明执行器可能改变实际命令/目标屏 | 已修：动态屏幕目标 fail-closed；两侧统一检查不透明执行器，跨语言 fixture 增加反证 |
 | 高 | K06 | 路径脚本与错误显示参数认证可绕过范围门 | `ShellOps.scopeCommandText/hasUncertifiedSelector`、`screen-scope.ts` 同名函数 | 脚本不可见、引用目标被抹掉、注释/重定向捐出参数、Android CLI 别名与位置差异 | 源码已修；两插件编译通过；按用户要求仅做编译和静态检查，设备层未验收。见坑 313/314 |
 | 高 | K05 | 输入广播未限定组件时可能向其他应用泄露 nonce | `plugins/dsh-android-manage/src/index.ts:33` | 同 action 接收器可能取得 auth 并伪造输入 | 源码已修：所有发送与重试显式指定 AdbKeyboardReceiver；设备验收待完成。见坑 312 |
-| 高 | K03 | 校验后的共享存储 APK 可在安装前被替换 | `UpdateChecker.updatesDir/invokeInstaller`、`ApkUpdateController.downloadAndInstall` | 哈希校验之后仍经过 UI 排队/授权页，其他有存储写权限的应用可替换原文件 | 源码已修：全程私有目录，安装入口再次核对 canonical 文件归属；仅编译/静态检查，见坑 315 |
 | 高 | K04 | 认证 HTTP 缺少统一初始源与重定向约束 | `EngineAuth.confineConnection` | 手工 Cookie 头不能依赖浏览器域策略，自动重定向可能把请求送到其他源 | 源码已修：精确引擎源、禁自动重定向；仅编译/静态检查，见坑 316 |
 | 高 | K06 | 特权服务面危险命令黑名单曾可被 `controlExec` 直连绕过 | `plugins/dsh-android-bridge/src/index.ts:1045`、`:1191`、`:1228` | 工具壳拒绝而服务面放行，会让直连插件绕过系统配置/权限写保护 | 已修：服务面 `controlExec`、`execAdbShell`、`execAdbLine` 共用拒绝判据并审计 |
 | 高 | K07 | `touch()` 全仓零调用点，「空闲回收」实为「建屏后 10 分钟必回收」 | `app/src/main/java/com/dsharnessmobile/shell/VdisplayController.kt:84`、`app/src/main/java/com/dsharnessmobile/shell/VdisplayController.kt:60` | 长任务看虚拟屏时中途黑屏 | 未修（F-10/V-R0） |
@@ -163,7 +162,6 @@ sequenceDiagram
 | 高 | K03 | 自动回滚目标取自**崩溃那次启动自己建的**快照（快照在建/挂载阶段就写，早于健康判定），于是「回滚成功」而状态没变好；跨版本还会把上一次安装的配置写回 | `app/src/main/java/com/dsharnessmobile/shell/UndoGate.kt:240`、`:194`、`vendor/dsh-undo-savepoint/lib/core.mjs:1180`（快照创建点；0.4.9 起实现由 index.js 拆到 core.mjs，原 index.js:2198 锚点已随追版失效） | 坏插件仍被挂载、引擎仍起不来而 `undo-gate.log` 报 `executed ok`；升级后若新版本从未健康启动，回滚会把新版本的补丁/挂载项静默删掉（新 APK + 旧配置） | 已修（2026-09-21：known-good 由壳侧探活健康定义 + 安装指纹护栏；设备验收 PASS=9） |
 | 高 | K03 | 整份配置回滚会**静默吞掉用户在最后一次健康启动之后装的插件**（挂载清单是一整份文件） | `app/src/main/java/com/dsharnessmobile/shell/PluginMounts.kt:41`、`UndoGate.kt:279` | 用一个坏插件换掉用户全部插件的装配状态 | **已改（2026-09-21 用户拍板）**：清单式——硬清单随版本并集（强制保留）+ 软清单记「当前清单被证明可用」；能点名则**只拔那一块**（其余条目与注释逐字节不动），点不出名且清单变过则拒绝回滚 |
 | 高 | K03 | 刷新失败路径不判 `rollback` 返回值即清 marker；残留 `previous` 会被下次失败路径当回滚源 | `app/src/main/java/com/dsharnessmobile/shell/EngineManager.kt:196-198` | 回滚结果被掩盖，坏树可能被「回滚」成更坏状态 | 未修（D-3 实效性缺口） |
-| 高 | K03 | 在线更新的 `usr` 换位是非事务两步 `renameTo`，不写指纹也不写 marker | `app/src/main/java/com/dsharnessmobile/shell/UpdateManager.kt:69-80` | 中途中断即半新半旧且无恢复源；指纹口径不同还会让下次启动重解压 | 未修 |
 | 高 | P01 | `sh -c "屏幕命令"` 后接重定向/位置参数曾绕过屏幕范围门 | `plugins/dsh-android-bridge/src/screen-scope.ts`、`app/src/main/java/com/dsharnessmobile/shell/ShellOps.kt` | 旧解析要求 `-c` 载荷直到段尾；尾随内容会使载荷不展开 | 已修：按 shell 规则只解析 `-c` 后第一个参数，后续重定向/位置参数不再隐藏命令体 |
 | 高 | P03 | 工具层以「壳侧按 session 判定」为由不做归属校验，而该锁已在 0.14 移除 | `plugins/dsh-android-browser/src/tools.ts:281-294` | 跨会话操作浏览器成为可能 | 未修 |
 | 高 | P03 | `lastSnapshot` 是模块级单槽且不含页维度 | `plugins/dsh-android-browser/src/tools.ts:33` | B 会话的 `browser_click` 会消费 A 会话的 ref 与代次（新页首快照极易同码） | 未修（H-6） |
@@ -200,7 +198,7 @@ sequenceDiagram
 - [K02] 漂移：`docs/AGENTS/ARCHITECTURE.md:76` 给 LogCollector.kt 记 332 行（2026-09-14 实测），现为 931 行；同表 EngineService.kt 记 201 行，现为 246 行。
 - [K03] 1. `app/src/main/java/com/dsharnessmobile/shell/EngineManager.kt:196-198` —— 刷新失败 catch 里 `SnapshotTransaction.rollback(...)` 的返回值未判、紧接着无条件 `clearMarker`，与 `SnapshotTransaction.recover` 的 D-3 处理（SnapshotTransaction.kt:688-699「回滚失败不得无条件清 marker」）自相矛盾，也与同文件的 `applyRecovery`（:308-313 把失败明细写进 `pendingRecoveryFailure`）不对称。触发：swap 中途抛异常且回滚有任一条目失败（例如删不净的 live 子树），marker 被清、失败条目无人上报。后果链：下一次刷新若在写 SWAPPING 之前就抛异常（空间断言拒绝 §7.2-F-4、或 stage 派生的任何异常），catch 会走 `rollback(marker=STAGED)`，而 `collectDisplacedNames`(SnapshotTransaction.kt:798) 会把残留的 `.snapshot-previous` 当成回滚源逐条覆盖回 live —— 即旧的工厂树被静默“复活”盖在新树上；此后 `hasResidue && snapshotFresh()` 的回收门（:253）也可能把仍需的残渣删掉。建议按 `recover` 的口径改：`if (!result.ok) { 保留 marker + 上报告警 } else clearMarker()`。
 - [K03] 2. `app/src/main/java/com/dsharnessmobile/shell/SnapshotTransaction.kt:283-289` —— 空间断言覆盖面窄于审查 §7.2-F-4 / B12 的原始发现：断言跑在解压完成之后（stage 已付过 2.5 GB 量级空间），解压阶段本身仍无任何 StatFs 前置检查（`EngineManager.extractSnapshotTo` :434 直调解压），所以「解压中途 ENOSPC → 报运行时更新失败」的原症状还在；且 required 只由 live profiles 体积推导（`backupBytes + 25% + 64MB`），当 live profiles 明显小于 staged（回滚补偿删剩 / 半合并的现场，正是「失败→留残渣→空间紧→更易失败」的自我强化回路）时，`mergeTree` 补入文件的新分配不在预算内，`SnapshotFs.sizeOf`(:89) 还会把不可读条目按 0 静默低估。后果：断言放行后仍在合并中途 ENOSPC。另有一致性问题：`InsufficientSpaceException` 的可照做文案只进 `lastRefreshFailure`/boot-fail.log，用户界面拿到的是通用「运行时更新失败」（EngineStartFlow.kt:497），B12 要的「专门文案」只实现了一半。
-- [K03] 3. 在线更新指纹错配已由共享事务与 `.online-snapshot` 身份绑定修复：freshness 同时要求当前内嵌 SHA 等于记录的 base SHA、committed fingerprint 等于 archive SHA；在线探活确认前保留 journal/source，冷启对未确认 SWAPPED 回滚。可达性仍受 S-10 限定（默认 manifest URL 为空，显式配置才进入网络路径）。新逻辑单测已增加，Gradle 与设备证据待本轮验证。
+- [K03] 3. 在线更新指纹错配已由共享事务与 `.online-snapshot` 身份绑定修复：freshness 同时要求当前内嵌 SHA 等于记录的 base SHA、committed fingerprint 等于 archive SHA；在线探活确认前保留 journal/source，冷启对未确认 SWAPPED 回滚。本分支已删除在线下载和新事务入口；仅保留历史状态恢复。既有恢复用例保留，本轮未执行测试或设备验收。
 - [K03] 4. 在线更新两步 rename、无冷启journal及删除旧回退源的失败链已由共享 `SnapshotTransaction` journal/stage/previous 替换：STAGED解压中断丢弃、SWAPPING中断回滚、SWAPPED未健康确认时冷启回滚；旧 `usr-old` 不作归属证明，也不会被新路径递归删除。覆盖失败与重入负例已加，Gradle/设备证据待验证。
 - [K03] 5. `app/src/main/java/com/dsharnessmobile/shell/SnapshotExtractor.kt:81` 与 `:142` —— 同一条目把 `entry.size` 累加进 `done` 两次（一次用于上限判定、一次用于进度），于是总量上限 `maxTotalBytes = 8 GiB` 实际在约 4 GiB 处触发，`onProgress` 上报的解压字节数约翻倍（解压条在解压到一半时即报满）。后果：S-10 想要的「快照真实体量 3–5 倍余量」实际只剩约 1.6 倍，偏大的合法快照会被判成「解压炸弹」中止（错误文案指向超限而真因是重复计数）。进度口径同时失真——EngineStartFlow 的「已写入 N MB」由它派生。
 - [K04] 1. 【已修·本轮，见 §3.1】 （已证实，机制层）`jsString` 的 U+2028/U+2029「修复」编译成恒等替换：`AndroidBridge.kt:423-425` 源码是 `.replace(<裸 U+2028 字符>, "<单个反斜杠>u2028")`，第二个实参在 Kotlin 里是同一个字符（`\uXXXX` 是转义，不是六个字符）——编译产物 `app/build/tmp/kotlin-classes/debug/com/dsharnessmobile/shell/AndroidBridgeKt.class` 常量池里只有裸 U+2028/U+2029 两条字符串常量（`\x01\x00\x03 E2 80 A8`），没有 `\u2028` 转义串，两个实参去重成同一条 ⇒ 该行不做任何转义。为什么单测还是绿的（现场反证）：JVM 单测类路径显式引入了另一份实现 `org.json:json:20240303`（`app/build.gradle.kts:126-127` 注释自陈「本地单测用真实 org.json，android.jar 桩在 JVM 里抛 Stub!」）；`BrowserHostNavigationPolicyTest.kt:129-141` 在恒等替换下仍判绿（`app/build/tmp/kotlin-classes/debugUnitTest/.../BrowserHostNavigationPolicyTest.class` 的常量池含断言用 `\u20` 字面量，`app/build/test-results/testDebugUnitTest/TEST-…BrowserHostNavigationPolicyTest.xml` 现场读到 tests=9 failures=0），只可能是这份 jar 的 `quote` 自己转义了 U+2028/U+2029（其 `JSONObject.class` 内含写 `\u` 的字符串字面量，与该区间转义实现相符）。设备运行时用的是 Android 框架 `org.json`，与单测类路径不是同一实现 ⇒ 这条绿的判据测不到设备行为，是假保证。设备侧是否真需要该转义（审查 §3.1-C3 / F-3 断言 `JSONObject.quote` 不转义该区间）本轮无本机复算手段，未证实。
@@ -277,7 +275,6 @@ sequenceDiagram
 - [K11] | app/src/test/java/com/dsharnessmobile/shell/AcceptRoutingTest.kt | 横切 | 仅纯图片 accept 进相册，其余退 SAF | app/src/test/java/com/dsharnessmobile/shell/AcceptRoutingTest.kt:24,app/src/test/java/com/dsharnessmobile/shell/AcceptRoutingTest.kt:45 | 无（纯函数，混合/空/扩展名/大小写反例齐备） |
 - [K11] | app/src/test/java/com/dsharnessmobile/shell/AdbLiveProbeTest.kt | 横切 | TTL 内复用、过期重探、失败不遮盖 | app/src/test/java/com/dsharnessmobile/shell/AdbLiveProbeTest.kt:18,app/src/test/java/com/dsharnessmobile/shell/AdbLiveProbeTest.kt:60 | 无（含真实 loopback ServerSocket 正反对照；时钟可注入） |
 - [K11] | app/src/test/java/com/dsharnessmobile/shell/ApiLevelGuardTest.kt | 横切 | 壳侧源码不得用高于 minSdk 的平台 API | app/src/test/java/com/dsharnessmobile/shell/ApiLevelGuardTest.kt:209,app/src/test/java/com/dsharnessmobile/shell/ApiLevelGuardTest.kt:282 | 白名单式静态断言（自述）：只证明清单内 API 不出现，清单外越级 API 全漏；扫描面靠「>5000 行 + 指定文件在场」自证，门槛是硬编码数字 |
-- [K11] | app/src/test/java/com/dsharnessmobile/shell/ApkArtifactCheckTest.kt | 横切 | 缓存与下载两分支产物判定一致 | app/src/test/java/com/dsharnessmobile/shell/ApkArtifactCheckTest.kt:25,app/src/test/java/com/dsharnessmobile/shell/ApkArtifactCheckTest.kt:36 | 有：`:36-40` 所谓「两分支」是同一个函数、同一组实参调用两次再断言相等，恒等恒真；真正的两分支同源由 `app/src/test/java/com/dsharnessmobile/shell/W3ShellContractTest.kt:85` 的源码文本断言守 |
 - [K11] | app/src/test/java/com/dsharnessmobile/shell/BackGateTest.kt | 横切 | 三输入回退判定与页面脚本契约 | app/src/test/java/com/dsharnessmobile/shell/BackGateTest.kt:21,app/src/test/java/com/dsharnessmobile/shell/BackGateTest.kt:126 | 低：桥方法用反射取 `setAvailable/getBackAvailable` 查注解，改签名即红；脚本常量逐字断言（改文案判红，属假红不属假绿） |
 - [K11] | app/src/test/java/com/dsharnessmobile/shell/BootFailLogTest.kt | 横切 | 失败终态必落盘、一条一行、字段不留空 | app/src/test/java/com/dsharnessmobile/shell/BootFailLogTest.kt:39,app/src/test/java/com/dsharnessmobile/shell/BootFailLogTest.kt:160 | 中：前半用 TemporaryFolder 真写真读；后半（`:160-190`）是源码文本在场断言，「失败调用点接了 5 处」只在设备上见真章 |
 - [K11] | app/src/test/java/com/dsharnessmobile/shell/BootPageConsoleRouteTest.kt | 横切 | 页面控制台前缀分流与 runtime 取值 | app/src/test/java/com/dsharnessmobile/shell/BootPageConsoleRouteTest.kt:39,app/src/test/java/com/dsharnessmobile/shell/BootPageConsoleRouteTest.kt:113 | 有：`:114` 的 `extractRuntimeForTest` 复刻生产取值算法（注释自认「同一算法两处实现会漂移」）；另 `:169` 在页面侧文件缺席时 `?: return` = 静默跳过该用例 |
@@ -319,9 +316,6 @@ sequenceDiagram
 - [K11] | app/src/test/java/com/dsharnessmobile/shell/SnapshotUserDataTest.kt | 横切 | 旧备份只补缺、绝不覆盖较新内容 | app/src/test/java/com/dsharnessmobile/shell/SnapshotUserDataTest.kt:14,app/src/test/java/com/dsharnessmobile/shell/SnapshotUserDataTest.kt:84 | 有：`:84` symlink 建不出来时 `assumeTrue(false)` → 该例被 skip；基线仍计 5 例、门禁不判 skipped，当前结果正含这 1 例 skipped |
 - [K11] | app/src/test/java/com/dsharnessmobile/shell/ProfilePackageManifestTest.kt | 横切 | user pin/未知字段优先，工厂新增 dependency/bundle 补齐，损坏 JSON 拒绝及空 user 基座 | app/src/test/java/com/dsharnessmobile/shell/ProfilePackageManifestTest.kt:8,app/src/test/java/com/dsharnessmobile/shell/ProfilePackageManifestTest.kt:23 | 已执行：随 SnapshotTransaction 聚焦集统一通过；merge 为纯 JVM 函数，解析失败返回 null 由调用方保留现场 |
 - [K11] | app/src/test/java/com/dsharnessmobile/shell/UndoGateDecisionTest.kt | 横切 | 五态闸门与两阶段观察窗边界 | app/src/test/java/com/dsharnessmobile/shell/UndoGateDecisionTest.kt:20,app/src/test/java/com/dsharnessmobile/shell/UndoGateDecisionTest.kt:61 | 无（纯决策函数，边界值两侧都钉） |
-- [K11] | app/src/test/java/com/dsharnessmobile/shell/UpdateCheckerSuffixTest.kt | 横切 | 只剥 rc/preview/SN，fx 修订链保留 | app/src/test/java/com/dsharnessmobile/shell/UpdateCheckerSuffixTest.kt:18,app/src/test/java/com/dsharnessmobile/shell/UpdateCheckerSuffixTest.kt:54 | 无（含「剥所有非数字尾巴」的反向自证） |
-- [K11] | app/src/test/java/com/dsharnessmobile/shell/UpdateCheckerTest.kt | 横切 | 版本比较与资产名、ABI 首选 | app/src/test/java/com/dsharnessmobile/shell/UpdateCheckerTest.kt:15,app/src/test/java/com/dsharnessmobile/shell/UpdateCheckerTest.kt:60 | 低：纯函数；资产名与打包脚本产物名同源靠人工比对（脚本改命名则本测试不红） |
-- [K11] | app/src/test/java/com/dsharnessmobile/shell/UpdateManagerPolicyTest.kt | 横切 | 在线更新默认关闭、明文仅回环、共享入口重入闸门与事务准入policy wiring | app/src/test/java/com/dsharnessmobile/shell/UpdateManagerPolicyTest.kt | 全量fresh `:app:testDebugUnitTest --rerun-tasks`通过，含更新入口并发/共享准入接线判据；source assertion不替代设备并发验收。
 - [K11] | app/src/test/java/com/dsharnessmobile/shell/VdisplayArbitrationTest.kt | 横切 | 一个 Surface 不得被两个 viewer 抢 | app/src/test/java/com/dsharnessmobile/shell/VdisplayArbitrationTest.kt:14,app/src/test/java/com/dsharnessmobile/shell/VdisplayArbitrationTest.kt:30 | 低：纯判据；控制器集成与真实 VirtualDisplay 只在设备验 |
 - [K11] | app/src/test/java/com/dsharnessmobile/shell/W3ShellContractTest.kt | 横切 | 收口、预算同源、env 注入等调用点 | app/src/test/java/com/dsharnessmobile/shell/W3ShellContractTest.kt:52,app/src/test/java/com/dsharnessmobile/shell/W3ShellContractTest.kt:107 | 大：19 例几乎全为源码文本断言，同一形态换写法即漏；`:271` 的退役守卫只判文件是否存在（恒真）；`pnpmStoreDir` 那条真跑但「注入这一半」仍是文本在场 |
 - [K11] | app/src/test/java/com/dsharnessmobile/shell/WatchdogLadderTest.kt | 横切 | 阶梯退避、前置副作用、熔断不锁死 undo | app/src/test/java/com/dsharnessmobile/shell/WatchdogLadderTest.kt:25,app/src/test/java/com/dsharnessmobile/shell/WatchdogLadderTest.kt:189 | 中：`WatchdogV2` 是全局单例状态，靠 `@Before reset` 兜底，用例间顺序敏感；`:205` 用生产 `UndoGate.decide` 驱动属真行为 |
@@ -423,13 +417,11 @@ sequenceDiagram
 | K01 | 无障碍控制面 | webViewRef 进程级持有主 WebView，控制服务拿到 null 即回页面不在场 | app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:137 |
 | K01 | 引擎侧页面契约 | onConsoleMessage 消费 dsh-boot-ready 与 dsh-boot-stall 两个前缀，判据由页面侧 readyWatch 发布 | app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:667 |
 | K01 | 来件与选择器 | onCreate 投递 VIEW/SEND 来件，桥回调接 DirectoryPickerController/MediaPickController/FileIncoming | app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:266 |
-| K01 | 快照与更新面 | 检查更新按钮与启动前快照刷新走 UpdateManager，自动回撤走 UndoGate 加 SnapshotTransaction | app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt:294 |
-| K01 | APK 更新动作 | 引导页按钮与设置页那一行**读同一份**状态（`ApkUpdateController`，Activity 作用域）；动作经唯一桥入口 `AndroidBridge.apkUpdate(action=status\|check\|install)` 发起，**不占用相位与主按钮**，且壳侧对 `window.__dshBridge` 写入面为 0 | app/src/main/java/com/dsharnessmobile/shell/ApkUpdateAction.kt:228 |
+| K01 | 快照与更新面 | 启动前部署 APK 内嵌快照，历史中断恢复走 SnapshotTransaction，自动回撤走 UndoGate | app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt:294 |
 | K01 | 内置控制台 | 引导页与控制台按钮 START ConsoleActivity，其 ConsoleSession 用与引擎同源的 shellEnv 起快照 bash | app/src/main/java/com/dsharnessmobile/shell/ConsoleSession.kt:33 |
 | K01 | 系统外部角色 | BootReceiver 接 ACTION_BOOT_COMPLETED 决定是否自启前台服务，分享面板经 VIEW/SEND 进本 Activity | app/src/main/java/com/dsharnessmobile/shell/BootReceiver.kt:24 |
 | K02 | K01 | 启动全程用引导页阶段承载文案，成功才切 WebUI | EngineStartFlow.kt:445-479、MainActivity.kt:145-155 |
 | K02 | K03 | 刷新期禁启动、事务恢复、update-pending 健康 3 拍才删 usr-old 三处握手 | EngineManager.kt:813、1344-1369 |
-| K02 | UpdateManager | .update-pending/.update-pending-at 与 usr-old 的生产者 | UpdateManager.kt:84-85 |
 | K02 | UndoGate | 看门狗 UNDO、启动超时与客户端插件树失败共用闸门：可点名时外科拔除非 Hard 插件；整份回撤只用当前 snapshot fingerprint 下的壳侧 HEALTHY known-good ID；被拒后复位锁存以继续引擎重试 | EngineService.kt:207-293、EngineStartFlow.kt:345-390、UndoGate.kt:278-434 |
 | K02 | 通知链 NotifyStore/NotifyCenter | 每拍按字节偏移消费 .task-done.ndjson，双读不双发 | WatchdogV2.kt:258-309、NotifyCenter.kt:188 |
 | K02 | 控制载体 ControlCarrier | 随前台引擎服务起停，a11y 关着也承载 browser*/vd* | EngineService.kt:43 |
@@ -442,7 +434,6 @@ sequenceDiagram
 | K03 | 插件注入层 | profiles 的 package.json 与 cordis.patch.yml 决定引擎实际挂载集，工厂 disabled 语义以 FactoryProfilePatch 为权威 | app/src/main/java/com/dsharnessmobile/shell/FactoryProfilePatch.kt:79 |
 | K03 | 交互面 MainActivity | DownloadSaver 由 WebView 下载/外链回调拉起，回执经 window.__dshExportResult 回灌页面 | app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:89 |
 | K03 | EngineAuth | DownloadSaver 下载引擎同源 URL 时附加鉴权并做一次 401 自愈重试 | app/src/main/java/com/dsharnessmobile/shell/DownloadSaver.kt:101 |
-| K03 | APK 更新文件与安装器 | 官方哈希校验、授权续继与安装器使用同一私有目录文件；FileProvider 单文件只读授权 | app/src/main/java/com/dsharnessmobile/shell/UpdateChecker.kt:53、app/src/main/java/com/dsharnessmobile/shell/UpdateChecker.kt:558 |
 | K03 | 开发选项与诊断 | boot-fail.log、update-status.txt 与 diagnostics 镜像目录是本块失败终态的落盘点 | app/src/main/java/com/dsharnessmobile/shell/EngineManager.kt:193 |
 | K03 | 公共导出目录供给 | Documents/dshdata 的创建与**结果记账**（`status|trigger|epochMs|detail` 落在私有目录）；触发点经 onCreate/onResume 与「引擎是否在跑」解耦，且除 OK 外每轮都重试——旧实现只从 startEngine()/shellEnv() 进入，引擎活着早退就永远不再供给（0.14.1 用户反馈：Documents 下一直没有 dshdata）。存储 chip 的判据取该结果，只有 OK 才显示「已就绪」；授权路线按 SDK 分流（API<30 无 All Files Access，改请求运行时 READ/WRITE） | app/src/main/java/com/dsharnessmobile/shell/PublicRepoProvision.kt:1、EngineManager.kt:790、MainActivity.kt:354 |
 | K04 | 引导与启动 | MainActivity/EngineService 是桥与控制承载的唯一安装与起停点（EngineAuth.initContext 必须先于装桥） | app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:160 |
@@ -586,8 +577,6 @@ sequenceDiagram
 | 2. 报「运行时更新失败（诊断已保存）」但看不到原因：`grep -E "存储空间不足|Directory not empty|InsufficientSpace" files/boot-fail.log`；空间类真因只落在 cause 里（UI 文案是通用的），`df /data` 对账；`Directory not empty` 类看 `~/.failed-<ts>` 残渣是否在场。 | K03 | （待补） |
 | 3. 插件列表在、点开不可用（0.14.0 实报形态）：`grep -n "disabled: true" files/home/.dsh/profiles/web/cordis.patch.yml`；查 `files/.profile-patch-repair-<版本名>` 标记是否已写（没写=上次启动修复失败，下轮重试）；对照 `files/home/.dsh/profiles/web/?` 的 node_modules 是否半合并（1/10 形态）。 | K03 | （待补） |
 | 4. 已摘除插件疑似仍在跑：`ls files/home/.dsh/profiles/web/node_modules/@aiwayds`（应为空/不存在）；`grep -n "dsh-model-sync" files/home/.dsh/profiles/web/cordis.patch.yml`；迁移只在发生刷新时执行，指纹未变的老设备需要触发一次刷新。 | K03 | （待补） |
-| 5. **APK 更新**（用户面，0.14.6 起）：读 `ApkUpdateController` 八态（`idle/checking/up-to-date/available/downloading/installing/need-permission/failed`）；引导页次级提示与设置页那一行读**同一份**状态；logcat grep `dsh-update`。不占主按钮/相位。 | K03 | （待补） |
-| 6. **快照更新 / adb 联调 `runUpdate`**（非用户面）：`cat files/update-status.txt`（`runUpdate` 逐行追加）、`ls files/ | grep -E "update-pending|usr-old|update-stage|update.tar.xz"`；`snapshot-fingerprint` 内容与 `assets/snapshot.sha256` 不一致 = 走的不是内嵌链。注意该路径由 `ACTION_UPDATE`（adb 显式 intent、manifest 未声明）触发且**无超时兜底**，见 known-gaps。 | K03 | （待补） |
 | 1. 「审批卡/提问卡不再弹出，必须重启 App」 | K04 | `adb logcat -d | grep dsh-overlay-mux`（应有 `mux handshake refused 401/403: invalidating + refreshing engine cookie`）+ `adb logcat -d | grep dsh-engine-auth`（`cookie acquired via token exchange` / `cookie minted from credentials grant`）；两条都静默则查 `dsh_engine_auth` prefs 里的 cookie 是否只剩本地未过期的死值。 |
 | 2. 「模型报设备控制超时/未知操作，可壳侧其实已经执行」 | K04 | `adb logcat -d | grep dsh-a11y`（`duplicate delivery skipped (reqId=…)`、`result post failed for <op> (HTTP …)`、`result too_large … L1 fallback`）+ 对比 `dsh-adb.xml → controlToken` 与引擎实时读到的值（不一致恒 403）。 |
 | 3. 「自动回撤到底跑没跑」 | K04 | `adb shell run-as com.dsharnessmobile.shell cat files/undo-gate.log`（前缀 `dsh-undo-gate`：`armed` / `trigger` / `executed ok snapshot=` / `aborted list-timeout` / `skipped no-snapshots` / `suppressed retry-window`），再看 `files/.undo-auto-done` 时间戳与 `files/.undo-auto-armed` 是否残留。 |
@@ -699,41 +688,13 @@ sequenceDiagram
 #### K03 快照事务与更新链
 
 - **严格SHA**：SnapshotFingerprintPolicy要求内嵌64hex；fresh须node在场及durable committed fingerprint匹配。缺/非法metadata在抽取/事务/refresh/spawn前拒绝，无legacy/degraded旁路、不无限解压，既有用户数据不被坏包改变。
-- **顺序**：ownership prelude已结算→recoverInterruptedRefresh→probe/fresh→refresh；factory refresh暂存解压→SnapshotUserData.prepareStagedSnapshot→journal/factory swap→durable fingerprint→finish。在线更新下载校验后写ONLINE_UPDATE/STAGED journal、只stage/swap `usr`，保留 `.snapshot-previous/usr` 到 HEALTHY 探活；健康时写 ONLINE_COMMITTED 并收尾，冷启动的未提交 SWAPPING/SWAPPED 回滚至旧 usr。在线健康身份 `.online-snapshot` 保存 base（内嵌 SHA）与 archive SHA；same-APK冷启保持在线树新鲜，APK快照变化转回factory refresh。未知purpose/phase与ONLINE_COMMITTED非在线事务 fail closed 并保留现场；恢复拒绝且marker仍在时Activity不再probe、服务不再装配看门狗启动运行时。
+- **顺序**：ownership prelude已结算→recoverInterruptedRefresh→probe/fresh→refresh；factory refresh暂存解压→SnapshotUserData.prepareStagedSnapshot→journal/factory swap→durable fingerprint→finish。本分支不再创建在线更新；历史 ONLINE_UPDATE journal 和 `.snapshot-previous/usr` 仍按原事务目的恢复或回滚，避免遗留半交换状态失去恢复入口。在线健康身份 `.online-snapshot` 保存 base（内嵌 SHA）与 archive SHA；same-APK冷启保持在线树新鲜，APK快照变化转回factory refresh。未知purpose/phase与ONLINE_COMMITTED非在线事务 fail closed 并保留现场；恢复拒绝且marker仍在时Activity不再probe、服务不再装配看门狗启动运行时。
 - **#304真源**：preserve settings.yaml.imported，marker属安装不是factory；marker或活web patch已在且无legacy YAML则抑stage factory seed，profile-local marker同理；backup不复活已迁移YAML。pre-spawn仅quarantine已知旧blank模板，不动custom配置。configurationDocument选真实web cordis.patch.yml，活patch缺失不fallback历史/factory；显式export公共副本警告key、import仅同格式先backup再atomic replace。
-- **边界**：runtime库/links完整性与snapshotRefreshing仍为启动前闸门；工厂事务与在线事务共用唯一 journal，不能并发；在线更新仅替换usr，legacy `usr-old` 不作新事务归属证明且不由新路径递归删除；profile清单合并不是任意整树覆盖；UndoGate保留既有known-good护栏。
+- **边界**：runtime库/links完整性与snapshotRefreshing仍为启动前闸门；内嵌部署与历史在线恢复共用唯一 journal；历史在线事务仅涉及usr，legacy `usr-old` 不作新事务归属证明且不由新路径递归删除；profile清单合并不是任意整树覆盖；UndoGate保留既有known-good护栏。
 - **当前锚点**：[SHA](<dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/SnapshotFingerprintPolicy.kt#L7-L22>)、[fresh/refresh](<dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/EngineManager.kt#L103-L154>)、[recover](<dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/EngineManager.kt#L325>)、[stage/quarantine/active document](<dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/SnapshotUserData.kt#L50-L143>)、[配置桥](<dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/EngineManager.kt#L1218-L1242>)、[客户端失败一次性入口](<dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/UndoGate.kt#L165-L183>)、[点名唯一可拔条目](<dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/PluginMounts.kt#L259-L269>)、[外科拔除入口](<dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/PluginMounts.kt#L470-L471>)。
 - **待外验**：假provider/key跨冷启/换树/rollback/中断保留；坏SHA真实终包拒绝；目标0.2 runtime assets重出/双ABI最终字节与hash。历史尺寸/hash不是本轮测量，未构建不填造。
-- **0.14.6 增量：APK 更新路径与不变量（三条主项 + 两个同族派生项）**（可判据，逐条可查）：
-  - **唯一状态机与推进者**：`ApkUpdateController`（`app/src/main/java/com/dsharnessmobile/shell/ApkUpdateAction.kt:228`，Activity 作用域）；
-    八态 `idle/checking/up-to-date/available/downloading/installing/need-permission/failed`（`:197-205`）。
-    引导页按钮（`GuidePageRenderer.kt:781` 的 `onButtonPressed`）与设置页那一行经 `observe`（`:344`）**读同一份状态**。
-    唯一桥入口 `AndroidBridge.apkUpdate(action=status|check|install)`（`AndroidBridge.kt:611`）。
-  - **不变量 1（不占用主按钮与相位）**：APK 更新只改次级提示/次级按钮，APK 路径上 `applyGuidePhase` / `primaryButton` 引用数 = 0；
-    「更新中」不再出现在 APK 路径。反例锚点 `UpdateCheckerTest.kt:393`（`updateNeverHijacksPhaseOrPrimaryButton`）。
-  - **不变量 2（收敛由发起方保证）**：超时兜底是发起方责任；`armWatchdog(ms, generation)` 为每个操作创建代次绑定的 Runnable，
-    `disarmWatchdog`、`onTimeout(generation)` 与 `release` 在状态机边界取消定时器/worker；check 与 download 两处都 arm，任何终态必落如实文案。
-    反例锚点 `UpdateCheckerTest.kt:364`（`timeoutAlwaysConvergesToHonestTerminalText`）。
-  - **不变量 2a（超时后不继续安装）**：每个检查/下载操作有代次；超时或 Activity 销毁会递增代次并中断 worker，
-    状态更新、下载进度与 UI 安装排队前都必须匹配代次和当前相位。APK 流式下载同时受发布大小与 512 MiB 上限约束，
-    每次镜像尝试使用独立临时文件；哈希只从 GitHub 官方 sidecar/MANIFEST 获取，取不到则拒绝安装。
-  - **安装文件归属**：下载与校验 → UI 排队 → `readyToInstall` 授权续继 → 安装器，全程使用 `UpdateChecker.updatesDir` 的应用私有文件；安装交接再次核对 canonical 父目录和普通 APK 文件，只给安装器单文件读授权。见坑 315。
-  - **不变量 2b（单一真源：`canStart` 与受理判据必须同表达式）**：`canStart` 直接由 state 派生
-    （`snapshotJson` 的 `state == STATE_AVAILABLE`，`:71`），与 `beginDownload()`（`:140`）的受理判据**同一表达式**。
-    旧实现把 `canStart` 绑在一个独立的「有没有待装新版」字段上，其语义**弱于**真实受理条件（`state == available` **且** 该字段非空），
-    于是出现过 `state:"failed"` 与 `canStart:true` 并存 => 页面按契约改发 `install` => 壳侧回 `busy` => 用户点重试恒得
-    「上一次更新动作仍在进行中」而**实际什么都没在跑**（除杀应用无出路）。该字段已删除，运行时由 `invariantViolation()`（`:271`）
-    逐相位断言（`canStart` 必须等于 `s == STATE_AVAILABLE`，`:279-281`）。
-  - **不变量 2c（拒绝必须按真实原因分档，不得笼统报忙）**：`start()`（`:394`）三档 —— 无待装新版回 `no-pending`（`:396`）、
-    真有在途动作回 `busy`（`:398`）、其余（failed/up-to-date 等）回 `not-available`（`:399`）。
-    旧实现只要 `currentResult` 非空就回 `busy`，这正是上述死循环的用户可见形态。
-    **例外（显式化，勿误以为全线都有兜底）**：快照联调路径 `runUpdate`（`EngineStartFlow.kt:1143`）**无超时兜底**；
-    它由 `MainActivity.kt:475-476` 的 `ACTION_UPDATE`（`:197`，manifest 未声明）即 **adb 显式 intent** 触发，普通用户不可达；
-    回执守卫在 `EngineStartFlow.kt:1150`，代次作废即静默丢弃回执、不落终态。见 `docs/AGENTS/known-gaps.md`。
-  - **不变量 3（不碰共享页面桥对象）**：壳侧对 `window.__dshBridge` 写入面 = 0。
-    反例锚点 `UpdateCheckerTest.kt:426`（`updatePathNeverTouchesTheSharedPageBridgeObject`）。
-  - **快照链已下线**：`startUpdateCheck` 无任何调用点（定义保留于 `EngineStartFlow.kt:549`，两个测试按该签名切片，不得当死代码删除）。
-  - **公共 APK 下载页安全边界**：构建期 release JSON 通过 HTML raw-text 安全序列化，摘要只取官方 GitHub MANIFEST；运行期禁止把镜像响应作为脚本执行，探测只信可读 CORS 状态，对具体 APK 做 HEAD，无法确认的镜像不参与自动选择。入口见 `webpages/tools/build.mjs`、`webpages/src/assets/app.js` 与 `webpages/src/assets/release.js`。
+- **应用内更新移除**：已删除 APK 更新控制器、下载器、安装器交接、设置行/启动按钮、桥方法、安装权限与专用 FileProvider 映射；旧在线快照网络更新入口一并删除。专用测试及其基线退役记录见 `scripts/kotlin-test-baseline.json` 的 `featureRetirements`；本轮仅编译与静态检查，未运行测试或设备验收。
+- **公共 APK 下载页安全边界**：构建期 release JSON 通过 HTML raw-text 安全序列化，摘要只取官方 GitHub MANIFEST；运行期禁止把镜像响应作为脚本执行，探测只信可读 CORS 状态，对具体 APK 做 HEAD，无法确认的镜像不参与自动选择。入口见 `webpages/tools/build.mjs`、`webpages/src/assets/app.js` 与 `webpages/src/assets/release.js`。
 
 #### K04 桥与控制协议面
 
@@ -743,7 +704,7 @@ sequenceDiagram
 
 - **一句话**：页面里的 `window.androidBridge` / `window.dshBackBridge` 方法面，加壳侧两条对引擎的 HTTP/WS 通道（浏览器 cookie 鉴权、控制队列长轮询）与崩溃自动回撤闸门，共同构成「模型动作怎么落到这台手机上、结果怎么回填、出事怎么自救」的底座。
 - **入口/触发**：
-  - 页面 JS 同步调 `window.androidBridge.*`（现状：71 个 `@JavascriptInterface` 注解、70 个唯一方法名（`browserHostShow` 为重载），唯一安装点 `MainActivity.kt:719-799`；2026-10-11 实测修正，旧值 53/52）与 `window.dshBackBridge.*`（`BackGate.kt:132-148`，仅 2 个方法）；另有 `consoleBridge`（`ConsoleActivity.kt:105`）挂在控制台 WebView。
+  - 页面 JS 同步调 `window.androidBridge.*`（当前方法数量由桥对称静态门禁从源码现取，唯一安装点 `MainActivity.kt:719-799`；2026-10-11 实测修正，旧值 53/52）与 `window.dshBackBridge.*`（`BackGate.kt:132-148`，仅 2 个方法）；另有 `consoleBridge`（`ConsoleActivity.kt:105`）挂在控制台 WebView。
   - `EngineService.onCreate` → `ControlCarrier.ensureStarted`（`EngineService.kt:43`）；无障碍服务连接时同入口（`DeviceControlService.kt:452-453`）。轮询/心跳由此起步。
   - 任一出厂 HTTP 调用方（`EngineProbe.kt:51`、`DownloadSaver.kt:101`、`NotifyBridge.kt:328`、`OverlayPanel.kt:824`、`OverlayService.kt:580`、`MuxClient.kt:91`）在发请求前向 `EngineAuth` 取值。
   - 原生 HTTP 的两个 `EngineAuth.attach` 入口在读取凭据前调用 `confineConnection`：初始 URL 精确匹配引擎源，禁自动重定向，再附加 Cookie；WS 仍使用固定 mux 端点。此约束不构成端口进程身份认证（坑 316）。
@@ -2109,7 +2070,6 @@ app/src/main/java/com/dsharnessmobile/shell/ConsoleSession.kt
 app/src/main/java/com/dsharnessmobile/shell/BootReceiver.kt
 app/src/main/java/com/dsharnessmobile/shell/ShimmerTextView.kt
 app/src/main/java/com/dsharnessmobile/shell/DsUi.kt
-app/src/main/java/com/dsharnessmobile/shell/ApkArtifactCheck.kt
 app/src/main/java/com/dsharnessmobile/shell/EngineManager.kt
 app/src/main/java/com/dsharnessmobile/shell/ReverseMigration.kt
 app/src/main/java/com/dsharnessmobile/shell/SnapshotRefreshStage.kt
@@ -2125,8 +2085,6 @@ app/src/main/java/com/dsharnessmobile/shell/PublicRepoProvision.kt
 app/src/main/java/com/dsharnessmobile/shell/SnapshotExtractor.kt
 app/src/main/java/com/dsharnessmobile/shell/SnapshotUserData.kt
 app/src/main/java/com/dsharnessmobile/shell/SnapshotFileMode.kt
-app/src/main/java/com/dsharnessmobile/shell/UpdateManager.kt
-app/src/main/java/com/dsharnessmobile/shell/UpdateChecker.kt
 app/src/main/java/com/dsharnessmobile/shell/DownloadSaver.kt
 app/src/main/java/com/dsharnessmobile/shell/FactoryProfilePatch.kt
 app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt
@@ -2323,7 +2281,6 @@ scripts/e2e-phone-test.ps1
 scripts/verify-state-sync-modep.test.mjs
 app/src/main/java/com/dsharnessmobile/shell/LogShare.kt
 app/src/main/java/com/dsharnessmobile/shell/LogSanitizer.kt
-app/src/main/java/com/dsharnessmobile/shell/ApkUpdateAction.kt
 -->
 
 ## 8. 历史已知漂移与旧审查线索（当前契约见§6）

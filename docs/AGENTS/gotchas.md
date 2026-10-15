@@ -1903,3 +1903,13 @@ EngineBootContinuationTest用latch驱动真实观察函数：winner持CAS但无�
 **修法**：两个 `attach` 入口都在读取 Context/缓存 Cookie 前调用 `confineConnection`，要求精确 `http://127.0.0.1:3080` 源且没有 userinfo，再将 `instanceFollowRedirects` 设为 false。未初始化或无 Cookie 时也执行约束，避免 POST 载荷自动转发。调用方看到原始 3xx 状态，不自动追随。
 
 **判据与状态**：静态核对两个入口的约束顺序与全部认证 HTTP 调用点；编译和未验收范围同坑 315。此修复约束 HTTP 请求目标与重定向，不提供 loopback 端口的进程身份认证。
+
+317. **移除应用内更新必须同时删除原生桥、生命周期续继和旧在线快照调试入口**
+
+**现象**：仅隐藏「检查更新」行仍会留下可调用的桥、等待安装授权的生命周期续继、安装权限以及旧 UPDATE Intent；这些都是仍能触发更新动作的入口。
+
+**真因**：APK 更新跨越设置插件、原生启动页、Activity 生命周期和控制器；旧在线快照下载又有独立调试入口，页面可见性不能代表能力是否已经移除。
+
+**修法**：本分支按用户要求删除两处 UI、双方桥声明与构造接线、更新控制器/校验/下载/安装实现、安装权限和专用 FileProvider 映射；同时删除旧在线快照网络更新类、调试 Intent 与启动方法。APK 覆盖安装后的内嵌快照部署、历史事务恢复与用户数据保留继续由原启动链负责。专用测试退役记录见 `scripts/kotlin-test-baseline.json` 的 `featureRetirements`，其余回归基线要求仍在。坑 315 描述的 APK 更新路径在本分支已整体退役。
+
+**检查状态**：UI 插件编译通过并生成本仓 `lib` 产物（`.deploy-tmp/remove-updater-ui-build.log`）；Kotlin PSI 语法解析通过（`.deploy-tmp/remove-updater-kotlin-syntax.log`）。桥对称、Kotlin 注释、control op、op registry、工具名承诺、Manifest 加固、执行地图静态门禁均通过（`.deploy-tmp/remove-updater-check-*.log`）；XML 解析及原生/前端/生成产物的退役符号扫描通过。完整 Android 编译在 Gradle 配置阶段报 `Type T not present`（`.deploy-tmp/remove-updater-android-compile.log`，环境限制见 known-gaps）。按用户要求未新增或运行测试，未做设备验收，未产出新 APK。

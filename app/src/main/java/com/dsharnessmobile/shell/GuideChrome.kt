@@ -33,7 +33,6 @@ internal class GuideChrome(
   val shareLog: TextView,
   val primaryButton: Button,
   val consoleButton: Button,
-  val updateButton: Button,
   val runtimeChip: TextView,
   val storageChip: TextView,
   val versionLabel: TextView,
@@ -42,7 +41,6 @@ internal class GuideChrome(
 internal class GuideCallbacks(
   val onStartEngine: () -> Unit,
   val onOpenConsole: () -> Unit,
-  val onCheckUpdate: () -> Unit,
   val onGrantStorage: () -> Unit,
   val onCopyLog: () -> Unit,
   val onShareLog: () -> Unit,
@@ -403,7 +401,6 @@ internal fun buildGuideChrome(activity: ComponentActivity, callbacks: GuideCallb
 
   val primaryButton = makePrimary()
   val consoleButton = makeSecondary(activity.getString(R.string.ds_open_console), callbacks.onOpenConsole)
-  val updateButton = makeSecondary(activity.getString(R.string.ds_check_update), callbacks.onCheckUpdate)
 
   val secondaryRow = LinearLayout(activity).apply {
     orientation = LinearLayout.HORIZONTAL
@@ -413,12 +410,9 @@ internal fun buildGuideChrome(activity: ComponentActivity, callbacks: GuideCallb
     lp.topMargin = dpix(R.dimen.ds_space_8)
     layoutParams = lp
   }
-  val half = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f)
-  val halfEnd = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f).apply {
-    marginStart = dpix(R.dimen.ds_space_8)
-  }
-  secondaryRow.addView(consoleButton, half)
-  secondaryRow.addView(updateButton, halfEnd)
+  secondaryRow.addView(consoleButton, LinearLayout.LayoutParams(
+    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT,
+  ))
 
   val actionBlock = LinearLayout(activity).apply {
     orientation = LinearLayout.VERTICAL
@@ -474,7 +468,6 @@ internal fun buildGuideChrome(activity: ComponentActivity, callbacks: GuideCallb
     shareLog = shareLog,
     primaryButton = primaryButton,
     consoleButton = consoleButton,
-    updateButton = updateButton,
     runtimeChip = runtimeChip,
     storageChip = storageChip,
     versionLabel = versionLabel,

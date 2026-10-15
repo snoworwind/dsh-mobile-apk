@@ -13,7 +13,7 @@
 
 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的安卓壳：WebView UI 覆盖
 **内嵌 Termux 运行时快照**（解压即跑，无需 Termux app）、SAF 目录桥、保活前台服务、引擎看门狗、
-运行时在线更新。一个 APK 装完即用：完整的 dsh web agent，且能真实执行 bash。
+内嵌快照部署与恢复。一个 APK 装完即用：完整的 dsh web agent，且能真实执行 bash。
 
 应用名 `DeepCode`（图标文字 DeepSearch）、包名 `com.dsharnessmobile.shell`、
 当前源码版本 **`0.14.6`**（versionCode 50）、引擎 `@deepseek-ai/dsh` 0.2.0-rc.2（本地开发候选，**未发布**）。
@@ -29,13 +29,9 @@
 
 - **内嵌运行时**：xz 快照内置 node + git + bash + coreutils + dsh + 插件 + pnpm + python/perl/ruby；
   首启解压 2-4 分钟（`refreshSnapshot`），引擎监听 `127.0.0.1:3080`；完全离线。
-- **APK 自更新（0.14.6 起为用户面主路径）**：查 GitHub latest release、按设备 ABI 匹配资产、镜像链逐级回退下载，
-  下载后校验 sha256 再拉起系统安装器。入口两处、读**同一份**状态：健康态可达的「检查更新」与启动页次级按钮；
-  **不自动检查**。更新动作**不占用相位与主按钮**，任何终态必落如实文案（含超时兜底）。
-- **运行时快照更新**：manifest 驱动的快照替换（下载 → sha256 → 原子切换 → 自动重启），
-  运行时可自更新而无需更新 APK。换树是**单事务**：解压到 staging → 校验完整 → 整体换入，
-  中断可回滚，且**从不触碰用户数据**（会话/附件/设置/凭据/工作区）。
-  注：0.14.6 起用户面入口已切到 APK 更新（见上），快照链不再从引导页触发；adb 联调路径仍在但无超时兜底（见 known-gaps）。
+- **手动升级应用**：本分支已移除应用内检查、下载和安装更新；升级时自行下载对应 ABI 的新版 APK 并覆盖安装。
+- **内嵌快照部署与恢复**：随 APK 提供运行时；需要刷新时先解压到 staging、校验后事务换入。
+  保留中断恢复和历史在线事务恢复，保护会话、附件、设置、凭据与工作区。
 - **保活**：前台服务 + 5 秒看门狗（自动重拉挂死引擎）+ 3 秒 UI 轮询 + 崩溃自动回退闸门（UndoGate）。
 - **内置控制台**：独立 bash 交互终端（`assets/console.html`），引擎未运行也可排查。
 
@@ -199,11 +195,10 @@ pwsh scripts\build-apk-013.ps1 -Fast
 
 | 权限 | 用途 |
 |---|---|
-| `INTERNET` | WebView + 引擎探测 + APK 自更新（仅手动触发） |
+| `INTERNET` | WebView + 引擎探测 |
 | `POST_NOTIFICATIONS` | 通知通道（API 33+ 运行时请求） |
 | `FOREGROUND_SERVICE` + `FOREGROUND_SERVICE_DATA_SYNC` | 保活前台服务 |
 | `MANAGE_EXTERNAL_STORAGE` | 「所有文件访问」（外部工作区要求；特殊权限，用户手动授予） |
-| `REQUEST_INSTALL_PACKAGES` | 唤起系统安装器安装下载的更新包（须用户在系统页显式授权） |
 
 SAF 目录/图片选择无需权限。虚拟屏与特权 shell 需用户安装、启动并授权 **Shizuku**。
 

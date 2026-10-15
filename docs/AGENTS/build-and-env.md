@@ -1,5 +1,9 @@
 # build-and-env.md — 构建与验证命令 + 环境流程
 
+## 应用内更新功能退役（2026-10-15）
+
+用户明确要求在加固分支移除应用内更新。对应专用测试随实现退役，混合测试类只移除更新用例；Kotlin 数量基线的定点调整及原因登记于 `scripts/kotlin-test-baseline.json` 的 `featureRetirements`。数量门禁算法未改。本轮按用户限定只编译和静态检查，未运行测试；UI 自包含副本需重新生成 `lib` 产物。
+
 ## fx2 本地来源链
 
 `node scripts/source-build/run-local-source-chain.mjs --list` / `--dry-run` 只读 committed HEAD 的 workflow；实际执行在原仓之外的独立浅检出。未提交源码不参与构建。用 `--build-workspace /tmp/dsh-build --from <阶段>` 指定可复核的续跑目录，必须属于同一 source/commit；输出留在该目录，不自动回写 base。隔离检出禁用 LFS smudge，sources 阶段负责重建 base，不能跳过缺失的实际输入。

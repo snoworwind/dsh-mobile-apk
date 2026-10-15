@@ -12,7 +12,7 @@ import org.json.JSONObject
  * 自动执行 dsh-undo-emergency 急救 CLI，将配置/插件代码树回滚到壳侧探活确认的
  * known-good 快照，并恢复引擎。
  *
- * 与 UpdateManager/EngineManager 的 usr 层回退（usr-old）正交：
+ * 与 EngineManager 的历史 usr 层回退（usr-old）正交：
  * - usr 层：运行时二进制回退（EngineManager.rollbackToOld）
  * - 本类：配置/插件代码回退（dsh-undo-savepoint 快照，F3 主引擎）
  *

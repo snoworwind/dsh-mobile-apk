@@ -5,7 +5,7 @@
      - 引擎驱动阅读器只放行 Documents/dshdata；外部存储根映射供页面主动打开的选择器使用
      - 私有目录仅 filesDir/home/.dsh/workspaces 与 filesDir/home/tmp（引擎工作区/导出暂存）与
        filesDir/usr/bin；绝不映射 filesDir/home/.dsh 其余部分（含 .credentials.yaml /
-       deepseek-key.txt 等机密）；更新 APK 另有专用私有子目录，仅由安装路径授单文件读权限。
+       deepseek-key.txt 等机密）。
        引擎返回的路径若在私密区内，运行时白名单将拒绝，
        前端回退引擎 RPC（桌面宿主行为）。
      映射文件不存在时 FileProvider 抛 IllegalArgumentException，调用方已兜底。 -->
@@ -18,8 +18,6 @@
   <files-path name="internal_workspaces" path="home/.dsh/workspaces/" />
   <files-path name="internal_tmp" path="home/tmp/" />
   <files-path name="internal_usr_bin" path="usr/bin/" />
-  <!-- Verified update APKs stay private; grant only one file read access to the installer. -->
-  <files-path name="apk_updates" path="apk-updates/" />
   <!-- 0.14.6 功能 B：启动页「分享诊断包」的 ZIP 只落在 cacheDir/log-share/，
        因此这里只加**最窄**的一条映射（单目录、不休 ≤ 既有任何一条的宽度）。
        不映射 cacheDir 整体——那是给下载/图片缓存等无关内容开口子。

@@ -8,7 +8,7 @@ import java.io.File
 
 /**
  * 引擎启动流与失败分支（自 MainActivity 拆出）：启动/解压/轮询编排、启动失败自动重试、
- * 自动回撤（UndoGate）、在线更新检查、开发者选项关闭/重启，以及前台引擎监控与
+ * 自动回撤（UndoGate）、开发者选项关闭/重启，以及前台引擎监控与
  * WebView 渲染进程冻结看门狗（两者均为「引擎不可用→回退测试界面」的失败分支）。
  * Activity 生命周期入口（onCreate/onResume/onDestroy/onPageFinished）经 MainActivity 委托调用。
  */
@@ -39,7 +39,6 @@ internal class EngineStartFlow(private val activity: MainActivity) {
   /** Throttles retries of an engine page that failed while the engine was still booting. */
   private var lastEnginePageReloadAt = 0L
   @Volatile private var monitorGeneration = 0L
-  @Volatile private var updateUiGeneration = 0L
   private val engineMonitorHandler = android.os.Handler(android.os.Looper.getMainLooper())
   private val engineMonitorRunnable = object : Runnable {
     override fun run() {
@@ -544,47 +543,6 @@ internal class EngineStartFlow(private val activity: MainActivity) {
     // 现在 boot-stall 的 epoch 只由真正的世代切换（start()/restart 路径）与页面自报就绪驱动。
     if (freezeHandler.hasCallbacks(freezeRunnable)) freezeHandler.removeCallbacks(freezeRunnable)
     freezeHandler.postDelayed(freezeRunnable, 10_000)
-  }
-
-  fun startUpdateCheck() {
-    if (!OnlineUpdateGate.begin()) return
-    val updateGeneration = ++updateUiGeneration
-    activity.guideRenderer.chrome.updateButton.isEnabled = false
-    activity.guideRenderer.chrome.updateButton.alpha = 0.55f
-    activity.applyGuidePhase(GuidePhase.Updating, "检查更新…")
-    UpdateManager(activity).checkAndApply { st ->
-      activity.runOnUiThread {
-        if (updateGeneration != updateUiGeneration || !canRunEngineWork()) return@runOnUiThread
-        // 相位由**类型**决定（0.14.1 批 2 / P0-2）：旧实现按字符串前缀猜，于是「本版没配发布源」
-        // 被当失败渲染成满屏红字，而那串错误里写着 overrideManifestUrl（只存在于代码里的名字）。
-        // 现在 NotConfigured 走 Info（中性事实 + 下一步），只有真正的失败才是红。
-        //
-        // 但**不可打断的相位**（首启解压/启动/回滚）进行中不许抢占状态行：那时用户正盯着一件
-        // 不能中断的事，旁路结果只写 hint（设备实测：解压到 686MB 时点「检查更新」会把进度顶掉）。
-        val locked = activity.guideRenderer.phaseLocked()
-        val phase = when (st.outcome) {
-          UpdateManager.UpdateOutcome.NotConfigured -> GuidePhase.Info
-          UpdateManager.UpdateOutcome.Failed -> GuidePhase.Error
-          UpdateManager.UpdateOutcome.Done -> GuidePhase.Recovering
-          UpdateManager.UpdateOutcome.Working, UpdateManager.UpdateOutcome.Verifying -> GuidePhase.Updating
-        }
-        if (locked) {
-          activity.guideRenderer.applyGuideHint(
-            if (phase == GuidePhase.Error) st.text else st.text + "（当前动作不受影响）",
-          )
-        } else {
-          activity.applyGuidePhase(
-            phase,
-            if (phase == GuidePhase.Error) "更新失败" else st.text,
-            if (phase == GuidePhase.Error) st.text.removePrefix("更新失败：") else null,
-          )
-        }
-        if (st.outcome != UpdateManager.UpdateOutcome.Working && st.outcome != UpdateManager.UpdateOutcome.Verifying) {
-          activity.guideRenderer.chrome.updateButton.isEnabled = true
-          activity.guideRenderer.chrome.updateButton.alpha = 1f
-        }
-      }
-    }
   }
 
   /** 开发者选项「关闭」：停止引擎并回退到初始化（启动/测试）界面，不自动重启。 */
@@ -1135,37 +1093,9 @@ internal class EngineStartFlow(private val activity: MainActivity) {
 
   /** Cancel this Activity's callers, never the process-wide root maintenance worker. */
   fun destroy() {
-    updateUiGeneration++
     flowOwnership.invalidate(destroy = true)
     stopMonitoring()
     engineMonitorHandler.removeCallbacksAndMessages(null)
-  }
-
-  /** Run the runtime snapshot update; status mirrored to a file for adb verification. */
-  fun runUpdate() {
-    if (!OnlineUpdateGate.begin()) return
-    val updateGeneration = ++updateUiGeneration
-    val statusFile = File(activity.filesDir, "update-status.txt")
-    val manager = UpdateManager(activity)
-    manager.checkAndApply { st ->
-      activity.runOnUiThread {
-        if (updateGeneration != updateUiGeneration || !canRunEngineWork()) return@runOnUiThread
-        // 与 startUpdateCheck 同口径（0.14.1 批 2 / P0-2）：相位由**类型**决定，不猜字符串前缀。
-        val phase = when (st.outcome) {
-          UpdateManager.UpdateOutcome.NotConfigured -> GuidePhase.Info
-          UpdateManager.UpdateOutcome.Failed -> GuidePhase.Error
-          UpdateManager.UpdateOutcome.Done -> GuidePhase.Recovering
-          UpdateManager.UpdateOutcome.Working, UpdateManager.UpdateOutcome.Verifying -> GuidePhase.Updating
-        }
-        activity.applyGuidePhase(phase, st.text)
-        activity.showGuide()
-      }
-      try {
-        // 落盘仍是纯文本（adb 侧判据读它），保留原始状态串。
-        statusFile.appendText(st.text + "\n")
-      } catch (_: Exception) {
-      }
-    }
   }
 
   private val foregroundServiceStartQueued = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -1356,12 +1286,6 @@ internal class EngineStartFlow(private val activity: MainActivity) {
     caller.start()
     return true
   }
-}
-
-internal object OnlineUpdateGate {
-  private val running = java.util.concurrent.atomic.AtomicBoolean(false)
-  fun begin(): Boolean = running.compareAndSet(false, true)
-  fun end() { running.set(false) }
 }
 
 /**

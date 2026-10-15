@@ -44,7 +44,7 @@ class ForegroundPageRecoveryWiringTest {
 
   @Test fun bothPageMonitorsRejectPausedAndStaleResultsWithoutToasts() {
     val flow = source("EngineStartFlow.kt")
-    val monitors = flow.substringBefore("fun startUpdateCheck()")
+    val monitors = flow.substringBefore("fun shutdownToGuide()")
     assertTrue(monitors.contains("generation != monitorGeneration || !activity.pageUiActive"))
     assertTrue(monitors.contains("if (!activity.pageUiActive || !activity.webViewReady"))
     assertTrue(monitors.contains("freezeHandler.removeCallbacks(freezeRunnable)"))
@@ -146,7 +146,7 @@ class ForegroundPageRecoveryWiringTest {
     assertFalse(pending.contains("snapshotFresh()"))
     assertFalse(pending.contains("startEngine()"))
     assertFalse(pending.contains("showTestNotification"))
-    val guard = between(flow, "private fun canRunEngineWork()", "fun runUpdate()")
+    val guard = between(flow, "private fun canRunEngineWork()", "private val foregroundServiceStartQueued")
     assertTrue(guard.contains("!activity.isDestroyed"))
     assertTrue(guard.contains("!activity.isFinishing"))
     assertTrue(guard.contains("!EngineService.userShutdown"))

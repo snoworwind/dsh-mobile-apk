@@ -16,7 +16,6 @@
        影响面收敛（逐条说明，避免被误读为「全域放开」）：
          - 引擎子进程（node）本就**不受 NSC 约束**（NSC 只保护应用自身的 Kotlin/WebView 流量，
            引擎是独立子进程），故引擎侧行为零变化；
-         - APK 自更新（0.13.8 H1）走 HTTPS，仍是 base-config 允许面，零变化；
          - 主 WebView 只加载 127.0.0.1 引擎源（回环，仍逐字放行），零变化；
          - 变化面**仅限** BrowserHost 这个不可信隔离浏览器（它无 addJavascriptInterface、无桥）。
 
