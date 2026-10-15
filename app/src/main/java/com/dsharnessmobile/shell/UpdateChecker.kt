@@ -6,10 +6,16 @@ import android.net.Uri
 import androidx.core.content.FileProvider
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.IOException
+import java.io.InterruptedIOException
 import java.net.HttpURLConnection
 import java.net.Proxy
 import java.net.URL
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
+import java.util.UUID
 
 /**
  * APK 自更新（0.13.8 批 H，用户拍板交互）：
@@ -18,7 +24,7 @@ import java.net.URL
  * - **同按钮二次确认**：发现新版后同一按钮变为「下载并安装 vX.Y.Z」，再点才开始下载；
  * - 下载落 Documents/dshdata/updates/（FileProvider 既有映射内），.tmp→rename 原子；
  * - 安装：REQUEST_INSTALL_PACKAGES 未持有 → 先拉「安装未知应用」授权页（launcher 返回后续继）；
- *   签名不匹配由系统安装器天然拒绝；sha256 资产存在则下载后校验。
+ *   镜像只提供 APK 字节；安装前必须以 GitHub 官方 SHA sidecar/MANIFEST 校验 APK。
  * 与引擎快照更新（EngineStartFlow.startUpdateCheck / UpdateManager）完全分离。
  *
  * 0.14.6 功能 C（arm64 误报）：本文件此前把**所有**未命中都报成「无 $abi 资产」，而 arm64 资产名
@@ -30,6 +36,9 @@ object UpdateChecker {
 
   private const val TAG = "dsh-update"
   private const val REPO = "kelai141/dsh-mobile-apk"
+  private const val MAX_APK_DOWNLOAD_BYTES = 512L * 1024 * 1024
+  private const val MAX_RELEASE_JSON_BYTES = 2L * 1024 * 1024
+  private const val MAX_CHECKSUM_BYTES = 512L * 1024
 
   /** 镜像链（gh-proxy 风格前缀；直连永远第一。站点失效自动逐级回退）。 */
   private val MIRRORS = listOf(
@@ -276,6 +285,12 @@ object UpdateChecker {
         CheckResult.FailureKind.RELEASE_DATA_BROKEN,
       )
     }
+    if (hit.sizeBytes <= 0L || hit.sizeBytes > MAX_APK_DOWNLOAD_BYTES) {
+      return CheckResult.Failed(
+        "检查失败：发布数据异常——资产 ${hit.name} 的大小无效或超过下载上限",
+        CheckResult.FailureKind.RELEASE_DATA_BROKEN,
+      )
+    }
     if (!isNewer(latest.tag, currentVersion())) return CheckResult.UpToDate
     val shaUrl = byName["${hit.name}.sha256"]?.url?.takeIf { it.isNotEmpty() }
     return CheckResult.Available(latest.tag, hit.name, hit.url, shaUrl, hit.sizeBytes)
@@ -309,7 +324,7 @@ object UpdateChecker {
         android.util.Log.w(TAG, "check HTTP $httpCode rateLimited=$rateLimited")
         return classifyHttpFailure(httpCode, rateLimited)
       }
-      val raw = conn.inputStream.use { it.readBytes() }
+      val raw = conn.inputStream.use { readBounded(it, MAX_RELEASE_JSON_BYTES) }
       return classifyLatestBody(raw.toString(Charsets.UTF_8), abis, family)
     } catch (e: Exception) {
       android.util.Log.w(TAG, "check via $API failed: " + (e.message ?: e.javaClass.simpleName))
@@ -351,50 +366,89 @@ object UpdateChecker {
     return false
   }
 
-  /** 通过镜像链把 GitHub 资产 URL 逐级尝试下载到目标文件（.tmp → rename 原子落盘）。 */
-  fun download(url: String, dest: File, onProgress: (percent: Int) -> Unit): String? {
+  /**
+   * 通过镜像链下载 GitHub APK。每次尝试使用独立临时文件，流式硬限额，且取消/超时后不能提交文件。
+   */
+  fun download(
+    url: String,
+    dest: File,
+    expectedBytes: Long = 0L,
+    shouldContinue: () -> Boolean = { true },
+    onConnectionChanged: (HttpURLConnection?) -> Unit = {},
+    onProgress: (percent: Int) -> Unit,
+  ): String? {
+    if (!isGitHubReleaseAssetUrl(url) || expectedBytes < 0L || expectedBytes > MAX_APK_DOWNLOAD_BYTES) return null
     val path = url.removePrefix("https://github.com/")
     for (mirror in MIRRORS) {
+      if (!shouldContinue() || Thread.currentThread().isInterrupted) return null
       val candidate = if (mirror == MIRRORS[0]) url else mirror + path
+      val parent = dest.parentFile ?: return null
+      if (!parent.exists() && !parent.mkdirs()) return null
+      val tmp = File(parent, dest.name + "." + UUID.randomUUID() + ".tmp")
+      var conn: HttpURLConnection? = null
       try {
-        val conn = URL(candidate).openConnection(Proxy.NO_PROXY) as HttpURLConnection
-        conn.connectTimeout = 10_000
-        conn.readTimeout = 30_000
-        conn.instanceFollowRedirects = true
-        if (conn.responseCode != 200) { conn.disconnect(); continue }
-        val total = conn.contentLengthLong
-        dest.parentFile?.mkdirs()
-        val tmp = File(dest.parentFile, dest.name + ".tmp")
+        val connection = URL(candidate).openConnection(Proxy.NO_PROXY) as HttpURLConnection
+        conn = connection
+        onConnectionChanged(connection)
+        connection.connectTimeout = 10_000
+        connection.readTimeout = 30_000
+        connection.instanceFollowRedirects = true
+        if (!shouldContinue() || Thread.currentThread().isInterrupted) {
+          throw InterruptedIOException("下载已取消")
+        }
+        if (connection.responseCode != 200) continue
+        val total = connection.contentLengthLong
+        val limit = if (expectedBytes > 0L) expectedBytes else MAX_APK_DOWNLOAD_BYTES
+        if (total > limit) throw IOException("下载体积超过限制")
+        if (expectedBytes > 0L && total > 0L && total != expectedBytes) {
+          throw IOException("响应体积与发布元数据不一致")
+        }
         tmp.outputStream().use { out ->
-          conn.inputStream.use { input ->
+          connection.inputStream.use { input ->
             val buf = ByteArray(128 * 1024)
             var read = 0L
             var lastPct = -1
             while (true) {
+              if (!shouldContinue() || Thread.currentThread().isInterrupted) {
+                throw InterruptedIOException("下载已取消")
+              }
               val n = input.read(buf)
               if (n < 0) break
+              if (read + n > limit) throw IOException("下载体积超过限制")
               out.write(buf, 0, n)
               read += n
+              if (expectedBytes > 0L && read > expectedBytes) {
+                throw IOException("下载体积超过发布元数据")
+              }
               if (total > 0) {
                 val pct = (read * 100 / total).toInt()
                 if (pct != lastPct) { lastPct = pct; onProgress(pct) }
               }
             }
+            if (expectedBytes > 0L && read != expectedBytes) throw IOException("下载未达到发布元数据标注的大小")
+            if (total > 0L && read != total) throw IOException("响应体未完整下载")
           }
         }
-        if (dest.exists()) dest.delete()
-        if (!tmp.renameTo(dest)) { tmp.copyTo(dest, overwrite = true); tmp.delete() }
-        conn.disconnect()
+        if (!shouldContinue() || Thread.currentThread().isInterrupted) throw InterruptedIOException("下载已取消")
+        try {
+          Files.move(tmp.toPath(), dest.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+        } catch (_: Exception) {
+          Files.move(tmp.toPath(), dest.toPath(), StandardCopyOption.REPLACE_EXISTING)
+        }
         return candidate
       } catch (e: Exception) {
+        if (!shouldContinue() || Thread.currentThread().isInterrupted || e is InterruptedIOException) return null
         android.util.Log.w(TAG, "download via $mirror failed: " + (e.message ?: e.javaClass.simpleName))
-        File(dest.parentFile, dest.name + ".tmp").delete()
+      } finally {
+        runCatching { conn?.disconnect() }
+        runCatching { onConnectionChanged(null) }
+        runCatching { tmp.delete() }
       }
     }
     return null
   }
 
-  /** 下载后 sha256 校验（可选；资产缺失 .sha256 时跳过）。 */
+  /** 下载后 sha256 校验（输入必须是来自官方 sidecar 或 MANIFEST 的 digest）。 */
   fun verifySha256(file: File, expected: String): Boolean = try {
     val md = java.security.MessageDigest.getInstance("SHA-256")
     file.inputStream().use { input ->
@@ -402,27 +456,72 @@ object UpdateChecker {
       while (true) { val n = input.read(buf); if (n < 0) break; md.update(buf, 0, n) }
     }
     val actual = md.digest().joinToString("") { "%02x".format(it) }
-    actual.equals(expected.trim().substringBefore(' '), ignoreCase = true)
+    val expectedDigest = Regex("^([0-9a-fA-F]{64})(?:\\s+.*)?$").matchEntire(expected.trim())?.groupValues?.get(1)
+    expectedDigest != null && actual.equals(expectedDigest, ignoreCase = true)
   } catch (_: Exception) { false }
 
-  /** 通过镜像链取小文本（.sha256 资产；全部镜像失败返回 null = 跳过校验而非判失败）。 */
-  fun downloadText(url: String): String? {
-    val path = url.removePrefix("https://github.com/")
-    for (mirror in MIRRORS) {
-      val candidate = if (mirror == MIRRORS[0]) url else mirror + path
-      try {
-        val conn = URL(candidate).openConnection(Proxy.NO_PROXY) as HttpURLConnection
-        conn.connectTimeout = 10_000
-        conn.readTimeout = 15_000
-        if (conn.responseCode != 200) { conn.disconnect(); continue }
-        val text = conn.inputStream.use { it.readBytes().toString(Charsets.UTF_8) }
-        conn.disconnect()
-        if (text.isNotBlank()) return text
-      } catch (e: Exception) {
-        android.util.Log.w(TAG, "text via $mirror failed: " + (e.message ?: e.javaClass.simpleName))
+  /**
+   * 从 GitHub 官方下载 SHA sidecar 或 MANIFEST 并取出 APK digest。
+   * 校验值绝不走 APK 镜像链，避免同一第三方同时替换 APK 与匹配的哈希。
+   */
+  fun downloadText(url: String, apkName: String): String? {
+    if (!isGitHubReleaseAssetUrl(url)) return null
+    var conn: HttpURLConnection? = null
+    try {
+      val connection = URL(url).openConnection(Proxy.NO_PROXY) as HttpURLConnection
+      conn = connection
+      connection.connectTimeout = 10_000
+      connection.readTimeout = 15_000
+      connection.instanceFollowRedirects = true
+      if (connection.responseCode != 200 || !isTrustedGitHubDownloadHost(connection.url.host)) return null
+      val text = connection.inputStream.use { readBounded(it, MAX_CHECKSUM_BYTES).toString(Charsets.UTF_8) }
+      val digest = if (URL(url).path.endsWith("/MANIFEST.txt")) {
+        val target = "apk/$apkName"
+        text.lineSequence().mapNotNull { line ->
+          val fields = line.trim().split(Regex("\\s+"))
+          if (fields.size >= 2 && fields[1] == target && fields[0].matches(Regex("[0-9a-fA-F]{64}"))) fields[0]
+          else null
+        }.singleOrNull()
+      } else {
+        text.lineSequence().mapNotNull { line ->
+          Regex("^\\s*([0-9a-fA-F]{64})(?:\\s+.*)?\\s*$").matchEntire(line)?.groupValues?.get(1)
+        }.singleOrNull()
       }
+      return digest
+    } catch (e: Exception) {
+      android.util.Log.w(TAG, "official checksum fetch failed: " + (e.message ?: e.javaClass.simpleName))
+      return null
+    } finally {
+      runCatching { conn?.disconnect() }
     }
-    return null
+  }
+
+  fun manifestUrl(tag: String): String =
+    "https://github.com/$REPO/releases/download/${Uri.encode(tag)}/MANIFEST.txt"
+
+  private fun isGitHubReleaseAssetUrl(raw: String): Boolean = try {
+    val url = URL(raw)
+    url.protocol == "https" && url.host.equals("github.com", ignoreCase = true) &&
+      url.path.startsWith("/$REPO/releases/download/")
+  } catch (_: Exception) { false }
+
+  private fun isTrustedGitHubDownloadHost(host: String): Boolean {
+    val normalized = host.lowercase()
+    return normalized == "github.com" || normalized.endsWith(".githubusercontent.com")
+  }
+
+  private fun readBounded(input: java.io.InputStream, limit: Long): ByteArray {
+    val out = ByteArrayOutputStream(minOf(limit, 16 * 1024L).toInt())
+    val buf = ByteArray(16 * 1024)
+    var total = 0L
+    while (true) {
+      val n = input.read(buf)
+      if (n < 0) break
+      total += n
+      if (total > limit) throw IOException("响应体超过大小限制")
+      out.write(buf, 0, n)
+    }
+    return out.toByteArray()
   }
 
   /** 安装未知应用来源权限是否已持有（manifest 已声明 REQUEST_INSTALL_PACKAGES）。 */

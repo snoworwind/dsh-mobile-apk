@@ -11,8 +11,8 @@
  * 2. 镜像只是**域名前缀**，不复制字节。GitHub Releases 是唯一托管位，镜像是对它的实时反代。
  *    所以"下载" = 一个 URL 模板 x N 个前缀，而不是 N 套下载链。
  *
- * 3. 测速用 fetch(mode:'no-cors')：实测只有 gh-proxy.com 返回 Access-Control-Allow-Origin，
- *    其余镜像（含直连）都没有 ACAO，用 'cors' 测速会被 CORS 挡死、探针本身成了失败源。
+ * 3. 探测只依据 CORS 可读的 HTTP 状态；无 ACAO 时保持「未知」，不把 opaque 响应当健康，
+ *    也不执行镜像响应。已知 APK 则额外用 HEAD 检查目标资产，MANIFEST 可用不能代替 APK 可用。
  *
  * 4. **架构判定宁可"尽力而为 + 明示"也不要假拒绝**：arm64 手机上的浏览器常把
  *    navigator.platform 报成 "Linux armv8l"（32 位用户态字符串）。若把它当成 armv7 判为
@@ -33,20 +33,16 @@ export const LATEST_RELEASE_URL = RELEASES_URL + '/latest';
 export const API_LATEST_URL = 'https://api.github.com/repos/' + OWNER + '/' + REPO + '/releases/latest';
 
 /**
- * 镜像前缀表。顺序 = **初始**优先级；运行时由"健康检查 + 实测延迟"重排。
- *
- * cors 字段的事实（2026-10-14 浏览器实测）：只有 gh-proxy.com 返回
- * Access-Control-Allow-Origin，其余三条都没有。但这**不能**用来判断可用性——
- * gh-proxy.com 在 2026-10-15 起对 MANIFEST 与 APK 均返回 403（连测三次稳定），
- * 却因为带 CORS 且响应最快，反而最容易被选成默认线路。详见 probeUrl 的说明。
+ * 镜像前缀表。顺序 = **初始**优先级；运行时仅按浏览器可读的 HTTP 状态排序。
+ * 跨域状态不可读的镜像保持未探测状态，供用户手动选择，不被当成健康线路。
  */
 // 标签用真实域名：用户有权知道自己在走哪个第三方反代（加速线路是社区服务，非官方托管）。
 // 不要用「加速线路 1」这类尾随数字——与紧随其后的延迟毫秒相邻会读成「线路 1876ms」。
 export const MIRROR_TEMPLATES = [
-  { id: 'github', label: 'GitHub 官方', prefix: 'https://github.com/', cors: false, kind: 'official' },
-  { id: 'gh-proxy', label: 'gh-proxy.com', prefix: 'https://gh-proxy.com/https://github.com/', cors: true, kind: 'mirror' },
-  { id: 'ghfast', label: 'ghfast.top', prefix: 'https://ghfast.top/https://github.com/', cors: false, kind: 'mirror' },
-  { id: 'ghproxy-net', label: 'ghproxy.net', prefix: 'https://ghproxy.net/https://github.com/', cors: false, kind: 'mirror' },
+  { id: 'github', label: 'GitHub 官方', prefix: 'https://github.com/', kind: 'official' },
+  { id: 'gh-proxy', label: 'gh-proxy.com', prefix: 'https://gh-proxy.com/https://github.com/', kind: 'mirror' },
+  { id: 'ghfast', label: 'ghfast.top', prefix: 'https://ghfast.top/https://github.com/', kind: 'mirror' },
+  { id: 'ghproxy-net', label: 'ghproxy.net', prefix: 'https://ghproxy.net/https://github.com/', kind: 'mirror' },
 ];
 
 /** 受支持的 ABI 家族名。 */
@@ -62,8 +58,8 @@ export const SITE_URL = 'https://kelai141.github.io/dsh-mobile-apk/';
  * 资产一旦改名或某版本发布不完整，测速就整体失效，用户被钉死在默认线路上。
  * 用 releases/latest/download/MANIFEST.txt 则永远指向最新版（几十字节）。
  *
- * 为什么必须是小文件：浏览器端判活用的是 <script> 标签（见 app.js 的 probeMirror），
- * 它会**真正加载整个响应体**。MANIFEST.txt 只有约 1.4 KB，代价可忽略；换成 APK 就是 150 MB。
+ * MANIFEST 是小文件。浏览器以 CORS fetch 读取其 HTTP 状态并立刻取消响应体；
+ * APK 可用性另用 HEAD 探测，不执行任何第三方脚本，也不下载 APK 响应体。
  */
 export const PROBE_FILE = 'MANIFEST.txt';
 

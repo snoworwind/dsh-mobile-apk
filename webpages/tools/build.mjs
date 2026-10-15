@@ -48,11 +48,9 @@ function normalize(json, source) {
     source,
     generatedAt: new Date().toISOString(),
     assets,
-    sha256: Object.fromEntries(['arm64', 'x86_64'].flatMap((abi) => {
-      const digest = source === 'seed' ? json.sha256?.[abi] : null;
-      return typeof digest === 'string' && /^[0-9a-f]{64}$/i.test(digest)
-        ? [[abi, digest.toLowerCase()]] : [];
-    })),
+    // Seeds may contain hashes produced by older builds that trusted third-party mirrors.
+    // Only attachSha256 may populate this field from the current official GitHub MANIFEST.
+    sha256: {},
   };
 }
 
@@ -77,13 +75,17 @@ async function fetchText(url, timeoutMs) {
   try {
     const res = await fetch(url, { headers: { 'User-Agent': 'dsh-mobile-pages-build' }, signal: ctrl.signal });
     if (!res.ok) throw new Error('HTTP ' + res.status);
+    const host = new URL(res.url).hostname.toLowerCase();
+    if (host !== 'github.com' && !host.endsWith('.githubusercontent.com')) {
+      throw new Error('MANIFEST 重定向到了非 GitHub 官方主机');
+    }
     return await res.text();
   } finally {
     clearTimeout(timer);
   }
 }
 
-/** 取 sha256：优先官方直连，失败逐个换镜像前缀（与页面同一张模板表）。 */
+/** 哈希只从 GitHub 官方 MANIFEST 读取，不能让同一个第三方镜像同时提供 APK 与“校验值”。 */
 async function attachSha256(data) {
   const wanted = [];
   for (const abi of ['arm64', 'x86_64']) {
@@ -93,27 +95,31 @@ async function attachSha256(data) {
   }
   if (!wanted.length) return;
 
-  for (const tpl of MIRROR_TEMPLATES) {
-    try {
-      const text = await fetchText(assetUrl(tpl, data.tag, 'MANIFEST.txt'), 8000);
-      for (const [abi, name] of wanted) {
-        const sum = sha256FromManifest(text, 'apk/' + name);
-        if (sum) data.sha256[abi] = sum;
-      }
-      log('sha256 取自 ' + tpl.id + '，命中 ' + Object.keys(data.sha256).length + '/2');
-      return;
-    } catch (err) {
-      log('MANIFEST 源 ' + tpl.id + ' 不可用：' + err.message);
+  const official = MIRROR_TEMPLATES.find((tpl) => tpl.kind === 'official');
+  if (!official) return;
+  try {
+    const text = await fetchText(assetUrl(official, data.tag, 'MANIFEST.txt'), 8000);
+    for (const [abi, name] of wanted) {
+      const sum = sha256FromManifest(text, 'apk/' + name);
+      if (sum) data.sha256[abi] = sum;
     }
+    log('sha256 仅取自 GitHub 官方 MANIFEST，命中 ' + Object.keys(data.sha256).length + '/2');
+  } catch (err) {
+    log('GitHub 官方 MANIFEST 不可用：' + err.message);
+    log('警告：本次构建不含 sha256（页面会提示到 Releases 自行核对）');
   }
-  log('警告：所有 MANIFEST 源均不可用，本次构建不含 sha256（页面会提示到 Releases 自行核对）');
+}
+
+/** JSON 位于 HTML script raw-text 节点中，必须转义 `<` 以阻断 `</script>` 提前闭合。 */
+function scriptJson(value) {
+  return JSON.stringify(value).replace(/[<>&]/g, (char) => ({ '<': '\\u003c', '>': '\\u003e', '&': '\\u0026' })[char]);
 }
 
 function render(indexHtml, styles, data, jsonLd) {
   return indexHtml
     .replace('/*__STYLES__*/', () => styles)
-    .replace('__JSONLD__', () => JSON.stringify(jsonLd))
-    .replace('__RELEASE_DATA__', () => JSON.stringify(data));
+    .replace('__JSONLD__', () => scriptJson(jsonLd))
+    .replace('__RELEASE_DATA__', () => scriptJson(data));
 }
 
 /**

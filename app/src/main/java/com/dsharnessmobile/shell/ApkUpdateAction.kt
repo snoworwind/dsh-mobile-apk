@@ -3,6 +3,7 @@ package com.dsharnessmobile.shell
 import android.app.Activity
 import org.json.JSONObject
 import java.io.File
+import java.net.HttpURLConnection
 
 /**
  * 「检查更新 = 下载 APK 然后更新」（0.14.6，用户指令）在壳侧的**单一真源**状态机。
@@ -257,8 +258,35 @@ internal class ApkUpdateController(private val activity: Activity) {
    * **终态兜底定时器**（缺陷修复，见 [ApkUpdateState.Companion.CHECK_TIMEOUT_MS] 的说明）。
    * 每次进入进行中相位都重新武装；落到任何终态或释放即解除。到点必收敛，不依赖回执到达。
    */
+  /** Late worker callbacks are fenced by generation; interruption is only a best-effort cancellation. */
+  private val operationLock = Any()
+  private var operationGeneration = 0L
+  @Volatile private var operationThread: Thread? = null
+  @Volatile private var activeDownloadConnection: HttpURLConnection? = null
   private val watchdogHandler = android.os.Handler(android.os.Looper.getMainLooper())
-  private val watchdog = Runnable { onTimeout() }
+  private var watchdog: Runnable? = null
+
+  private fun beginOperation(): Long = synchronized(operationLock) {
+    operationGeneration += 1
+    operationThread?.interrupt()
+    operationThread = null
+    activeDownloadConnection?.disconnect()
+    activeDownloadConnection = null
+    operationGeneration
+  }
+
+  private fun isCurrentOperation(generation: Long, expectedState: String): Boolean = synchronized(operationLock) {
+    operationGeneration == generation && state.stateName() == expectedState
+  }
+
+  private fun launchOperation(generation: Long, name: String, run: (Long) -> Unit) {
+    val thread = Thread({ run(generation) }, name)
+    synchronized(operationLock) {
+      if (generation != operationGeneration) return
+      operationThread = thread
+    }
+    thread.start()
+  }
 
   /**
    * 状态与私有载荷的一致性不变量（纯读，供测试逐相位钉住）。
@@ -318,13 +346,21 @@ internal class ApkUpdateController(private val activity: Activity) {
 
   // ── 终态兜底（收敛保证） ─────────────────────────────────────────────────────
 
-  private fun armWatchdog(ms: Long) {
-    watchdogHandler.removeCallbacks(watchdog)
-    watchdogHandler.postDelayed(watchdog, ms)
+  private fun armWatchdog(ms: Long, generation: Long) {
+    synchronized(operationLock) {
+      if (generation != operationGeneration) return
+      watchdog?.let { watchdogHandler.removeCallbacks(it) }
+      val scheduled = Runnable { onTimeout(generation) }
+      watchdog = scheduled
+      watchdogHandler.postDelayed(scheduled, ms)
+    }
   }
 
   private fun disarmWatchdog() {
-    watchdogHandler.removeCallbacks(watchdog)
+    synchronized(operationLock) {
+      watchdog?.let { watchdogHandler.removeCallbacks(it) }
+      watchdog = null
+    }
   }
 
   /**
@@ -332,9 +368,20 @@ internal class ApkUpdateController(private val activity: Activity) {
    *
    * 只对**进行中**相位生效（终态已被别的路径报过就不再覆盖，避免把「真实失败原因」换成超时文案）。
    */
-  private fun onTimeout() {
-    val text = timeoutReason(state.stateName()) ?: return
-    fail(text, ApkUpdateState.KIND_TIMEOUT)
+  private fun onTimeout(generation: Long) {
+    val expired = synchronized(operationLock) {
+      if (generation != operationGeneration) return
+      val reason = timeoutReason(state.stateName()) ?: return
+      operationGeneration += 1
+      operationThread?.interrupt()
+      operationThread = null
+      val connection = activeDownloadConnection
+      activeDownloadConnection = null
+      watchdog = null
+      reason to connection
+    }
+    runCatching { expired.second?.disconnect() }
+    fail(expired.first, ApkUpdateState.KIND_TIMEOUT)
   }
 
   /**
@@ -344,10 +391,19 @@ internal class ApkUpdateController(private val activity: Activity) {
   fun release() {
     disarmWatchdog()
     observer = null
-    if (!state.busy()) return
-    // 载荷与相位成对作废（同 fail()）：不变量在任何退出路径上都成立。
-    currentResult = null
-    state.onFailed("更新已中断（应用界面已关闭）——请重新打开后重试")
+    val connection = synchronized(operationLock) {
+      if (!state.busy()) return
+      operationGeneration += 1
+      operationThread?.interrupt()
+      operationThread = null
+      val active = activeDownloadConnection
+      activeDownloadConnection = null
+      // 载荷与相位成对作废（同 fail()）：不变量在任何退出路径上都成立。
+      currentResult = null
+      state.onFailed("更新已中断（应用界面已关闭）——请重新打开后重试")
+      active
+    }
+    runCatching { connection?.disconnect() }
   }
 
   /**
@@ -377,9 +433,10 @@ internal class ApkUpdateController(private val activity: Activity) {
       return reject("busy", "上一次更新动作仍在进行中，请稍候")
     }
     currentResult = null // 进入 checking：旧载荷（若有）立即作废，避免与新一轮检查的结果混用
-    armWatchdog(CHECK_TIMEOUT_MS)
+    val generation = beginOperation()
+    armWatchdog(CHECK_TIMEOUT_MS, generation)
     notifyChanged()
-    Thread({ runCheck() }, "dsh-apk-update-check").start()
+    launchOperation(generation, "dsh-apk-update-check", ::runCheck)
     return JSONObject(state.snapshotJson()).put("code", "accepted").toString()
   }
 
@@ -398,9 +455,10 @@ internal class ApkUpdateController(private val activity: Activity) {
       return if (state.busy()) reject("busy", "上一次更新动作仍在进行中，请稍候")
       else reject("not-available", "当前状态（" + state.stateName() + "）不能开始下载，请先点「检查更新」")
     }
-    armWatchdog(downloadTimeoutMs(pending.sizeBytes))
+    val generation = beginOperation()
+    armWatchdog(downloadTimeoutMs(pending.sizeBytes), generation)
     settle() // 页面立刻看到 downloading（两段式：受理 + 轮询读状态面）
-    Thread({ downloadAndInstall(pending) }, "dsh-apk-update-download").start()
+    launchOperation(generation, "dsh-apk-update-download") { token -> downloadAndInstall(pending, token) }
     return JSONObject(state.snapshotJson()).put("code", "accepted").toString()
   }
 
@@ -431,24 +489,44 @@ internal class ApkUpdateController(private val activity: Activity) {
 
   // ── 内部推进 ────────────────────────────────────────────────────────────────
 
-  private fun runCheck() {
+  private fun runCheck(generation: Long) {
+    if (!isCurrentOperation(generation, ApkUpdateState.STATE_CHECKING)) return
     val r = try {
       UpdateChecker.checkLatest()
     } catch (t: Throwable) {
       android.util.Log.w(TAG, "check threw: " + (t.message ?: t.javaClass.simpleName))
       UpdateChecker.CheckResult.Failed("检查更新未完成（详细原因已写入日志）——可重试，或复制日志反馈")
     }
-    if (r is UpdateChecker.CheckResult.Available) currentResult = r else currentResult = null
-    state.onCheckResult(r, UpdateChecker.currentVersion())
-    settle()
+    val applied = synchronized(operationLock) {
+      if (operationGeneration != generation || state.stateName() != ApkUpdateState.STATE_CHECKING) {
+        false
+      } else {
+        if (r is UpdateChecker.CheckResult.Available) currentResult = r else currentResult = null
+        state.onCheckResult(r, UpdateChecker.currentVersion())
+        operationThread = null
+        true
+      }
+    }
+    if (applied) settle()
   }
 
   /** 下载 → 校验 → 安装（复用既有下载链与 [verifyApkArtifact]，判定强度与旧引导页路径完全一致）。 */
-  private fun downloadAndInstall(r: UpdateChecker.CheckResult.Available) {
+  private fun downloadAndInstall(r: UpdateChecker.CheckResult.Available, generation: Long) {
     val dest = File(UpdateChecker.updatesDir(activity), r.name)
     var reused = false
     try {
-      val expectedSha = r.sha256Url?.let { UpdateChecker.downloadText(it) }
+      if (!isCurrentOperation(generation, ApkUpdateState.STATE_DOWNLOADING)) return
+      val expectedSha = r.sha256Url?.let { UpdateChecker.downloadText(it, r.name) }
+        ?: UpdateChecker.downloadText(UpdateChecker.manifestUrl(r.tag), r.name)
+      if (!isCurrentOperation(generation, ApkUpdateState.STATE_DOWNLOADING)) return
+      if (expectedSha == null) {
+        failDownload(
+          generation,
+          "下载失败：无法从 GitHub 官方发布源取得可信 SHA-256（未安装文件）",
+          ApkUpdateState.KIND_ARTIFACT_REJECTED,
+        )
+        return
+      }
       fun artifactVerdict(): ApkArtifactVerdict = verifyApkArtifact(
         fileExists = dest.exists(),
         actualBytes = dest.length(),
@@ -459,41 +537,82 @@ internal class ApkUpdateController(private val activity: Activity) {
       if (artifactVerdict() is ApkArtifactVerdict.Accept) {
         reused = true // 上次下完但没装成（授权中断/安装取消）→ 复用已验证的包，不重复拉 169MB
       } else {
-        val used = UpdateChecker.download(r.apkUrl, dest) { pct -> onDownloadProgress(pct) }
+        val used = UpdateChecker.download(
+          r.apkUrl,
+          dest,
+          expectedBytes = r.sizeBytes,
+          shouldContinue = { isCurrentOperation(generation, ApkUpdateState.STATE_DOWNLOADING) },
+          onConnectionChanged = { connection ->
+            synchronized(operationLock) {
+              if (operationGeneration == generation && state.stateName() == ApkUpdateState.STATE_DOWNLOADING) {
+                activeDownloadConnection = connection
+              }
+            }
+          },
+        ) { pct -> onDownloadProgress(generation, pct) }
+        if (!isCurrentOperation(generation, ApkUpdateState.STATE_DOWNLOADING)) return
         if (used == null) {
-          failDownload("下载失败：镜像链全部不可用（直连与加速镜像均失败）——请稍后重试", ApkUpdateState.KIND_DOWNLOAD_FAILED)
+          failDownload(generation, "下载失败：镜像链全部不可用（直连与加速镜像均失败）——请稍后重试", ApkUpdateState.KIND_DOWNLOAD_FAILED)
           return
         }
-        when (val verdict = artifactVerdict()) {
+        val verdict = artifactVerdict()
+        if (!isCurrentOperation(generation, ApkUpdateState.STATE_DOWNLOADING)) return
+        when (verdict) {
           is ApkArtifactVerdict.Accept -> Unit
           is ApkArtifactVerdict.Reject -> {
-            dest.delete()
-            failDownload("下载失败：" + verdict.reason + "（文件已删除，请重试）", ApkUpdateState.KIND_ARTIFACT_REJECTED)
+            val applied = synchronized(operationLock) {
+              if (operationGeneration != generation || state.stateName() != ApkUpdateState.STATE_DOWNLOADING) false
+              else {
+                dest.delete()
+                currentResult = null
+                operationThread = null
+                state.onDownloadFailed(
+                  "下载失败：" + verdict.reason + "（文件已删除，请重试）",
+                  ApkUpdateState.KIND_ARTIFACT_REJECTED,
+                )
+                true
+              }
+            }
+            if (applied) settle()
             return
           }
         }
       }
     } catch (t: Throwable) {
       android.util.Log.w(TAG, "apk download threw: " + (t.message ?: t.javaClass.simpleName))
-      failDownload("下载失败：" + (t.message ?: "未知原因") + "——请稍后重试", ApkUpdateState.KIND_DOWNLOAD_FAILED)
+      if (!isCurrentOperation(generation, ApkUpdateState.STATE_DOWNLOADING)) return
+      failDownload(generation, "下载失败：" + (t.message ?: "未知原因") + "——请稍后重试", ApkUpdateState.KIND_DOWNLOAD_FAILED)
       return
     }
+    if (!isCurrentOperation(generation, ApkUpdateState.STATE_DOWNLOADING)) return
     val reusedFlag = reused
     // 注意：此处**不**清载荷——install() 在 UI 线程跑且可能落到「需授权」相位，而那一刻才离开
     // downloading。载荷的清零与相位切换成对发生（见 install/failDownload），不变量因此始终成立。
-    activity.runOnUiThread { install(dest, reusedFlag) }
+    activity.runOnUiThread {
+      if (isCurrentOperation(generation, ApkUpdateState.STATE_DOWNLOADING)) install(dest, reusedFlag)
+    }
   }
 
-  private fun onDownloadProgress(pct: Int) {
-    state.onDownloadProgress(pct)
-    notifyChanged()
+  private fun onDownloadProgress(generation: Long, pct: Int) {
+    val changed = synchronized(operationLock) {
+      if (operationGeneration != generation || state.stateName() != ApkUpdateState.STATE_DOWNLOADING) false
+      else { state.onDownloadProgress(pct); true }
+    }
+    if (changed) notifyChanged()
   }
 
-  private fun failDownload(text: String, kind: String) {
+  private fun failDownload(generation: Long, text: String, kind: String) {
     // 载荷随相位一起作废：失败后的重试路径是 check（重新取元数据），不再复用它。
-    currentResult = null
-    state.onDownloadFailed(text, kind)
-    settle()
+    val applied = synchronized(operationLock) {
+      if (operationGeneration != generation || state.stateName() != ApkUpdateState.STATE_DOWNLOADING) false
+      else {
+        currentResult = null
+        operationThread = null
+        state.onDownloadFailed(text, kind)
+        true
+      }
+    }
+    if (applied) settle()
   }
 
   /** 安装步骤必须在 UI 线程（拉起授权页/安装器都是 Activity 动作）。 */

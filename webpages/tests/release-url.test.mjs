@@ -272,20 +272,18 @@ test('正文含可抓取的静态说明（不依赖 JS 渲染）', () => {
   assert.ok(/<h1>/.test(html), '缺少 h1');
 });
 
-test('线路健康检查必须能判死：403 的线路不得被当成"最快"选中', () => {
+test('线路健康检查只读 CORS 状态：不执行镜像脚本，APK 403 不得被选中', () => {
   const app = fs.readFileSync(path.join(WEB, 'src/assets/app.js'), 'utf8');
-  // 根因回归：fetch(mode:'no-cors') 拿到不透明响应，读不到状态码 —— 403 与 200 等价，
-  // 且 403 回得更快，于是死线每次都被选成"最快线路"，用户点下载拿到错误页。
-  // 判活必须是 <script>/<img> 这类能对 HTTP 错误触发 error 的机制。
-  assert.match(app, /createElement\('script'\)/, '健康检查必须用 <script> 判活');
-  // 先剥离注释再断言：注释里为说明"为什么不用 no-cors"必然会出现该写法，
-  // 直接在全文上匹配会把文档当代码判红（本条测试第一版就踩了这个坑）。
+  // 跨域 fetch 无法读状态时返回 unknown；不能用 no-cors opaque response，也不能执行第三方镜像内容。
   const stripComments = (s) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
-  const fn = stripComments(app).match(/async function probeMirror\([\s\S]*?\n\}/);
+  const code = stripComments(app);
+  const fn = code.match(/async function probeMirror\([\s\S]*?\n\}/);
   assert.ok(fn, 'probeMirror 必须存在');
-  assert.doesNotMatch(fn[0], /fetch\(/, '健康检查不得用 fetch：no-cors 读不到状态码，403 与 200 无法区分');
-  // 反向确认这份断言真的会判红：measureSpeed 里确实有 fetch，若它被误并入 probeMirror 就会红
-  assert.match(stripComments(app), /function measureSpeed[\s\S]*?fetch\(/, '速度测量仍应使用 fetch（受控负控）');
+  assert.doesNotMatch(code, /createElement\(['"]script['"]\)/, '镜像响应不得作为脚本执行');
+  assert.match(code, /mode:\s*'cors'/, '探测必须读取可验证的 CORS 响应');
+  assert.match(fn[0], /measureSpeed\(speedUrl\)/, '提供 APK 时必须直接核验实际资产');
+  assert.match(fn[0], /ms === false\) return null/, 'APK 返回 HTTP 403/404 时必须判不可用');
+  assert.match(fn[0], /fetchStatus\(probeUrl\(template\)/, '没有目标 APK 时退回小 MANIFEST 探针');
   // 死线必须被停用，不能被选中
   assert.match(app, /btn\.disabled\s*=\s*isDead/, '死线按钮必须置为禁用');
   assert.match(app, /dead\.indexOf\(current\.id\)\s*>=\s*0/, '当前线路被判死时必须换走');
@@ -309,7 +307,7 @@ test('线路排序：未测到速度的线路不得因 ms=0 被排成最快', ()
 
 test('健康检查靶必须是小文件且与版本解绑（否则会下载整包）', () => {
   const rel = fs.readFileSync(path.join(WEB, 'src/assets/release.js'), 'utf8');
-  // <script> 判活会真正加载响应体：靶一旦是 APK 就是 150 MB。
+  // MANIFEST 保持为小文件；APK 可用性使用 HEAD 单独核验，不读取 APK 响应体。
   assert.match(rel, /PROBE_FILE = 'MANIFEST\.txt'/);
   assert.match(rel, /releases\/latest\/download\//, '靶必须指向 latest，与版本解绑');
 });

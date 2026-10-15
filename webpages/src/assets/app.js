@@ -55,91 +55,64 @@ async function deviceSignals() {
 /**
  * 线路健康检查 + 测速。
  *
- * **为什么不用 fetch(mode:'no-cors')**（2026-10-15 实修的真实缺陷）：
- * no-cors 拿到的是**不透明响应**，读不到状态码——403 与 200 在探针眼里完全一样。
- * gh-proxy.com 从 2026-10-15 起对该仓库返回 403，而 403 比 200 回得更快，
- * 于是它每次都被选成"最快线路"，用户点下载拿到的是错误页而不是 APK。
- * （实测：gh-proxy fetch 284ms "ok"，同时 <script> 判为 error；其余三条相反。）
- *
- * **为什么用 <script> 标签**：它对 HTTP 错误状态可靠触发 onerror、对 2xx 触发 onload，
- * 且不受 CORS 限制（CORS 模式下只有 gh-proxy 可读，等于只有死线能被判活）。
- * 代价是**会真正加载响应体**，所以靶必须是小文件 —— 见 release.js 的 probeUrl 说明。
- * 注意：onload 只代表"拿到了 2xx"，不代表内容是有效 JS；这里只关心可达性。
- *
- * 返回 { id, ms } 或 null（不可用）。
+ * 只对浏览器明确允许读取状态的 CORS 响应作判断。跨域策略阻止读取时返回
+ * unprobed；不能用 no-cors 的 opaque response，也不能把第三方响应当脚本执行。
+ * 当提供真实 APK URL 时，还要用 HEAD 单独验证下载资产，避免 MANIFEST 正常而 APK 返回 403。
+ * 返回 { id, ms }、{ id, ms, unprobed: true } 或 null（可确认不可用）。
  */
-/**
- * 速度测量：对**真实资产 URL** 做 no-cors fetch，到响应头到达即中止。
- *
- * 为什么打**真实资产**而不是 MANIFEST（2026-10-15 修正）：
- * 健康检查用的 MANIFEST.txt 只有约 1.4 KB、由 github.com 直接回；
- * 而用户真正下载的 150 MB APK 走 github.com -> release-assets.githubusercontent.com
- * 的**另一条链路**（实测重定向后的 host 就是 release-assets）。两者的首字节延迟并不同源，
- * 用小文件排序会把用户送到"探测很快、下载未必快"的线路上。
- *
- * 只等响应头，拿到即 abort：不消耗 150 MB 流量（abort 后客户端不再收包）。
- *
- * **已知局限（如实记，勿当已解决）**：这里量的是 TTFB，不是**吞吐**。
- * 静态页在 no-cors 下拿不到响应体（不透明响应），无法真正测下载速度；
- * 因此"首字节快、后续慢"的线路仍可能被排前。用户可手动切换，这是该局限的兜底。
- *
- * 注意：本函数**不判断可用性**——403 也是合法响应且回得很快。
- * 可用性由 probeMirror 的 <script> 健康检查单独负责，两者分工不可合并。
- */
-function measureSpeed(url) {
-  return new Promise((resolve) => {
-    if (!canProbe() || typeof fetch !== 'function') { resolve(null); return; }
-    const ctrl = new AbortController();
-    const started = performance.now();
-    const timer = setTimeout(() => { ctrl.abort(); resolve(null); }, PROBE_TIMEOUT_MS);
-    fetch(url, { mode: 'no-cors', cache: 'no-store', signal: ctrl.signal })
-      .then(() => {
-        const ms = Math.round(performance.now() - started);
-        clearTimeout(timer);
-        ctrl.abort();
-        resolve(ms);
-      })
-      .catch(() => { clearTimeout(timer); resolve(null); });
-  });
+async function fetchStatus(url, method) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), PROBE_TIMEOUT_MS);
+  try {
+    const response = await fetch(url, {
+      mode: 'cors', credentials: 'omit', cache: 'no-store', redirect: 'follow', method,
+      signal: ctrl.signal,
+    });
+    if (response.body) await response.body.cancel().catch(() => {});
+    return { ok: response.ok, status: response.status };
+  } catch {
+    // 网络失败与 CORS 拒绝对脚本都表现为 TypeError；没有可读 HTTP 状态就不能判死或判活。
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** 对真实 APK 的 HEAD 响应计时；null=无法判定，false=HTTP 错误，不读取响应体。 */
+async function measureSpeed(url) {
+  const started = performance.now();
+  const result = await fetchStatus(url, 'HEAD');
+  if (!result) return null;
+  if (!result.ok) return result.status === 403 || result.status === 404 ? false : null;
+  return Math.round(performance.now() - started);
 }
 
 function canProbe() {
   return typeof document !== 'undefined'
     && !!document.head
-    && typeof document.createElement === 'function';
+    && typeof document.createElement === 'function'
+    && typeof fetch === 'function'
+    && typeof AbortController === 'function';
 }
 
 async function probeMirror(template, speedUrlFor) {
-  // 环境不支持脚本加载：返回 unprobed，表示"未探测"而非"探测失败"，
-  // 调用方据此不标死线（否则会把全部线路误标为不可用）。
+  // 环境不支持读取响应状态：返回 unprobed，而非误判死线或健康线路。
   if (!canProbe()) return { id: template.id, ms: 0, unprobed: true };
-
-  const alive = await new Promise((resolve) => {
-    const script = document.createElement('script');
-    let settled = false;
-    const finish = (ok) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      script.remove();
-      resolve(ok);
-    };
-    const timer = setTimeout(() => finish(false), PROBE_TIMEOUT_MS);
-    script.onload = () => finish(true);
-    script.onerror = () => finish(false);
-    // 加时间戳绕过缓存：命中的缓存会掩盖"这条线路现在坏了"的事实
-    script.src = probeUrl(template) + '?dsh=' + Date.now();
-    document.head.appendChild(script);
-  });
-
-  // 健康检查不过就是死线，不测速——死线的 403 反而回得最快，测了只会误导排序
-  if (!alive) return null;
-
   const speedUrl = typeof speedUrlFor === 'function' ? speedUrlFor(template) : null;
-  if (!speedUrl) return { id: template.id, ms: 0 };
-  const ms = await measureSpeed(speedUrl);
-  // 速度测不到（超时/被 abort）时退化为"可达但无数据"，0 表示不参与"谁最快"的比较
-  return { id: template.id, ms: ms == null ? 0 : ms };
+  if (speedUrl) {
+    const ms = await measureSpeed(speedUrl);
+    if (ms === false) return null; // HTTP 403/404：真实 APK 资产不可用
+    if (ms == null) return { id: template.id, ms: 0, unprobed: true };
+    return { id: template.id, ms };
+  }
+
+  const manifest = await fetchStatus(probeUrl(template) + '?dsh=' + Date.now(), 'GET');
+  if (!manifest) return { id: template.id, ms: 0, unprobed: true };
+  if (!manifest.ok) {
+    return manifest.status === 403 || manifest.status === 404
+      ? null : { id: template.id, ms: 0, unprobed: true };
+  }
+  return { id: template.id, ms: 0 };
 }
 
 function readCache() {
@@ -175,21 +148,21 @@ function esc(s) {
 }
 
 /**
- * 下载前兜底：确认目标线路此刻仍可达（<script> 判活，与测速同一判据）。
+ * 下载前兜底：确认目标线路的 MANIFEST 与本次 APK 资产都返回可读的成功状态。
  * 为什么需要它：探测结果最长缓存 6 小时，且线路可能在页面打开后才失效；
  * 用户点"下载"却拿到 403 错误页是**最伤**的失败形态（体积 150 MB，失败一次代价很高）。
- * 这里在跳转前用一次小文件健康检查确认，坏了就顺延到下一个可用线路。
+ * 这里在跳转前检查小文件与 APK HEAD，已知不可用时顺延到下一个可确认线路。
  *
  * 注意：只改 href，不阻断导航 —— 检查超时也必须放行，不能让探针本身成为失败源。
  */
-function ensureUsableLine(candidates, onPick, done) {
+function ensureUsableLine(candidates, onPick, done, speedUrlFor) {
   const list = candidates.slice();
   let i = 0;
   const tryNext = () => {
     if (i >= list.length) return done(list[0], false);   // 全不可达：按原线路放行，交给浏览器
     const tpl = list[i++];
-    probeMirror(tpl).then((hit) => {
-      if (hit) { onPick(tpl); return done(tpl, true); }
+    probeMirror(tpl, speedUrlFor).then((hit) => {
+      if (hit && !hit.unprobed) { onPick(tpl); return done(tpl, true); }
       tryNext();
     });
   };
@@ -245,12 +218,12 @@ function runProbe(cb, speedUrlFor) {
     const probed = all.filter((r) => !r.unprobed);
     // 完全没有真正探测过（环境不支持）：不标死线、不排序、不写缓存
     if (!probed.length) { cb({ ok: [], dead: [] }); return; }
-    // 一旦有真结果，未探测成功的线路才可判死
-    const dead = all.filter((r) => r.unprobed).length
-      ? []                                                  // 探测不可用时不当判决
-      : MIRROR_TEMPLATES.filter((m) => !all.some((r) => r.id === m.id)).map((m) => m.id);
-    for (const hit of probed) healthyOnce.add(hit.id);
-    writeCache(rankBySpeed(probed)[0].id);
+    // 只把可读的 HTTP 403/404 判为死线，其余拒绝/网络错误均保持未知
+    const dead = rs.flatMap((r, i) => r === null ? [MIRROR_TEMPLATES[i].id] : []);
+    if (typeof speedUrlFor === 'function') {
+      for (const hit of probed) healthyOnce.add(hit.id);
+      if (probed.length) writeCache(rankBySpeed(probed)[0].id);
+    }
     cb({ ok: all, dead });
   });
 }
@@ -306,8 +279,9 @@ function mountStandaloneLines(data, current) {
   });
   box.appendChild(sel);
   el.body.appendChild(box);
-  // 此形态没有主下载按钮（架构未知/无匹配资产），拿不到具体资产名，
-  // 故不传 speedUrlFor：延迟回退为健康检查耗时，仅用于排序展示。
+  // 选一个当前 release 确有的 APK 作为 HEAD 探针；没有 APK 时只提供手动线路选择。
+  const probeAsset = SUPPORTED_ABIS.map((abi) => pickAsset(data.tag, abi, data.assets)).find(Boolean);
+  const speedUrlFor = probeAsset ? (tpl) => assetUrl(tpl, data.tag, probeAsset.name) : undefined;
   runProbe(({ ok, dead }) => {
     lastResults = ok;
     lastDead = dead;
@@ -326,7 +300,7 @@ function mountStandaloneLines(data, current) {
       if (typeof sel.onPick === 'function') sel.onPick(target);
     }
     paintLineSelector(sel, target, ok, dead);
-  });
+  }, speedUrlFor);
   return sel;
 }
 
@@ -441,7 +415,7 @@ function renderDownload(release, classification) {
     }, () => {
       // 必须重新触发导航：本次点击已被 preventDefault 吃掉
       window.location.href = main.href;
-    });
+    }, (tpl) => assetUrl(tpl, tag, asset.name));
   });
 
   sel = lineSelector(tag, asset.name, current, (tpl) => {
