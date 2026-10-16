@@ -5,6 +5,8 @@
 
 ## 当前入口
 
+- 旧快照的归一化证据需重算：旧算法会吞二进制及 JSON 有序映射差异，不能继续作为语义等价证明；新算法报告带 `normalizationVersion: 2`，见 [gotchas.md](gotchas.md) 坑 337。未重建 APK、未做设备验证，旧包不包含此次修复。
+
 - 本分支从 [安全加固宗旨](SECURITY-HARDENING.md) 与下方安全加固缺口进入；协调仓 `docs/REFACTOR-2026-10-05.md` 保留为历史计划与事实账入口。仓库地图见 [AGENTS.md](../../AGENTS.md)。
 - 恢复与用户数据：[PERSISTENT-DATA.md](PERSISTENT-DATA.md)；协调仓 `docs/RECOVERY-ARCH-0.14.5.md`。当前实现以源码和冻结后的证据为准。
 - 三层验收：[emulator-test-protocol.md](emulator-test-protocol.md)。旧包、热推或仅静态审计不能代替最终双 ABI 包的代码/CDP/ADB 用户层验收。

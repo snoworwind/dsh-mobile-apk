@@ -6,8 +6,8 @@
 //   ③ **真差异不得被吞掉**——这条是全案的分水岭：归一化若把「某包多了一条依赖」
 //      也一并抹平，那它就从防线变成了后门。
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { execFileSync, spawnSync } from 'node:child_process'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -195,6 +195,7 @@ test('B：重打包是幂等的（再跑一次字节不变）', () => {
   const one = makeTarball({ 'package/package.json': '{"name":"x","dependencies":{"b":"1","a":"2"}}\n' })
   try {
     canonicalizePackedManifest(one.tgz, 'once')
+    assert.equal(readFileSync(one.tgz).readUInt32LE(4), 0, 'gzip MTIME must not depend on the wall clock')
     const once = readFileSync(one.tgz).toString('binary')
     canonicalizePackedManifest(one.tgz, 'twice')
     assert.equal(readFileSync(one.tgz).toString('binary'), once, '重打包不幂等 ⇒ 每跑一次就换一份字节')
@@ -203,17 +204,91 @@ test('B：重打包是幂等的（再跑一次字节不变）', () => {
   }
 })
 
-test('skipped 可见：后缀命中的非 JSON 文件被登记而不是静默', () => {
+test('unknown JSON/JSONC retains its exact bytes and key order', () => {
   const root = fixture({
     // 带注释的 JSONC：.json 后缀但非严格 JSON（实测快照里有 36 个，都是第三方 tsconfig.json）
     [join('a', 'tsconfig.json')]: '{\n  // comment\n  "compilerOptions": {}\n}\n',
   })
   try {
     const report = normalizeSnapshot(root)
-    assert.equal(report.skipped.length, 1)
-    assert.equal(report.skipped[0].rule, 'json-key-order')
-    assert.equal(report.rules.find((r) => r.id === 'json-key-order').applied, 0)
+    assert.equal(report.skipped.length, 0)
+    assert.equal(report.rules.find((r) => r.id === 'package-json-key-order').applied, 0)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
+})
+
+test('binary differences survive UTF-8 replacement collisions', () => {
+  for (const filename of ['pty.node', 'not-normalized.json']) {
+    const one = fixture({ [filename]: Buffer.from([0x80]) })
+    const two = fixture({ [filename]: Buffer.from([0x81]) })
+    try {
+      assert.notEqual(normalizeSnapshot(one).normalizedManifestSha256, normalizeSnapshot(two).normalizedManifestSha256)
+    } finally { rmSync(one, { recursive: true, force: true }); rmSync(two, { recursive: true, force: true }) }
+  }
+})
+
+test('invalid UTF-8 in a normalized manifest fails closed', () => {
+  const root = fixture({ 'package.json': Buffer.concat([Buffer.from('{"name":"'), Buffer.from([0x80]), Buffer.from('"}')]) })
+  try { assert.throws(() => normalizeSnapshot(root), /encoded data|encoding|UTF-8/i) }
+  finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('__proto__ is retained as an own JSON field, including nested values', () => {
+  const input = '{"__proto__":{"injected":true},"nested":{"__proto__":123}}'
+  assert.deepEqual(JSON.parse(canonicalJson(input)), JSON.parse(input))
+  const one = fixture({ 'package.json': input })
+  const two = fixture({ 'package.json': '{"nested":{}}' })
+  try { assert.notEqual(normalizeSnapshot(one).normalizedManifestSha256, normalizeSnapshot(two).normalizedManifestSha256) }
+  finally { rmSync(one, { recursive: true, force: true }); rmSync(two, { recursive: true, force: true }) }
+})
+
+test('condition order and unknown application JSON order remain visible in snapshot digests', () => {
+  for (const [filename, oneText, twoText] of [
+    ['package.json', '{"exports":{"node":"./safe.cjs","default":"./other.cjs"}}', '{"exports":{"default":"./other.cjs","node":"./safe.cjs"}}'],
+    ['package.json', '{"imports":{"#x":{"node":"./safe.cjs","default":"./other.cjs"}}}', '{"imports":{"#x":{"default":"./other.cjs","node":"./safe.cjs"}}}'],
+    ['package.json', '{"custom":{"first":1,"second":2}}', '{"custom":{"second":2,"first":1}}'],
+    ['config.json', '{"first":1,"second":2}', '{"second":2,"first":1}'],
+  ]) {
+    const one = fixture({ [filename]: oneText })
+    const two = fixture({ [filename]: twoText })
+    try { assert.notEqual(normalizeSnapshot(one).normalizedManifestSha256, normalizeSnapshot(two).normalizedManifestSha256, filename + ': ' + oneText) }
+    finally { rmSync(one, { recursive: true, force: true }); rmSync(two, { recursive: true, force: true }) }
+  }
+})
+
+test('repacking preserves actual Node exports/imports resolution and __proto__ data', () => {
+  const manifest = '{"name":"probe","exports":{"node":{"require":"./safe.cjs","default":"./other.cjs"},"default":"./other.cjs"},"imports":{"#x":{"node":"./safe.cjs","default":"./other.cjs"}},"__proto__":{"keep":true}}'
+  const one = makeTarball({
+    'package/package.json': manifest,
+    'package/safe.cjs': 'module.exports = "safe"\n',
+    'package/other.cjs': 'module.exports = "other"\n',
+    'package/probe.cjs': 'console.log(JSON.stringify([require("probe"), require("#x")]))\n',
+  })
+  const root = fixture({})
+  try {
+    const load = () => {
+      execFileSync('tar', ['-xzf', one.tgz, '-C', root])
+      return execFileSync(process.execPath, [join(root, 'package/probe.cjs')], { encoding: 'utf8' }).trim()
+    }
+    assert.equal(load(), '["safe","safe"]')
+    canonicalizePackedManifest(one.tgz)
+    assert.equal(load(), '["safe","safe"]')
+    assert.deepEqual(JSON.parse(readFileSync(join(root, 'package/package.json'), 'utf8')), JSON.parse(manifest))
+  } finally { one.cleanup(); rmSync(root, { recursive: true, force: true }) }
+})
+
+test('actual CLI versions its digest and rejects invalid manifest bytes without writing a report', () => {
+  const root = fixture({ 'package.json': '{"name":"probe"}' })
+  const reports = fixture({})
+  const output = join(reports, 'report.json')
+  const cli = () => spawnSync(process.execPath, [join(import.meta.dirname, 'normalize-snapshot.mjs'), root, '--out', output], { encoding: 'utf8', timeout: 10000 })
+  try {
+    assert.equal(cli().status, 0)
+    assert.equal(JSON.parse(readFileSync(output, 'utf8')).normalizationVersion, 2)
+    rmSync(output)
+    writeFileSync(join(root, 'package.json'), Buffer.from([0x80]))
+    assert.notEqual(cli().status, 0)
+    assert.equal(existsSync(output), false)
+  } finally { rmSync(root, { recursive: true, force: true }); rmSync(reports, { recursive: true, force: true }) }
 })

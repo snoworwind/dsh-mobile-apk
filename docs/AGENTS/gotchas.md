@@ -2120,3 +2120,13 @@ spawnSync("node", ["--version"])               status=0  v24.18.0        ← 走
 **证据**：`node --test scripts/source-build/*.test.mjs` 包含篡改哈希、删除输入、普通/忽略/staged 源码注入、身份篡改、合法锁文件变化以及真实 outputs CLI 拒绝且不覆盖原报告的负控。日志在 `.deploy-tmp/security-provenance-20261016/`；最终结果以 `all-source-tests.log` 为准。新校验器另对既有 `cb8876a` 的真实 WSL 构建目录复核三组件成功；发现的两处宿主 npm 字面量 `D:/.../.npm-cache` 已原样移至该隔离目录 `.deploy-tmp/provenance-recheck-caches/`，移动清单见 `cache-moves.json`，未放宽未登记输入判据。
 
 **边界**：这修复来源记录的内部一致性，不提供对任意同 UID 恶意构建代码的隔离；若校验器、Git 对象库或构建执行环境本身不可信，仍须独立可信执行与复核。文件在检查之间被修改又恢复、依赖本体行为以及运行时安全不由本检查证明。本轮未改 Android 或运行时源码，未重建 APK、未做设备验证；旧 APK 不标记为包含本轮修复。
+
+337. **快照归一化丢失原字节、特殊字段和条件导出顺序，旧摘要不能证明语义等价**
+
+**现象与真因**：`normalizeSnapshot` 原先把所有文件先解码 UTF-8 再哈希，二进制 `80` 与 `81` 都变成替换字符，摘要相同。`canonicalJson` 用普通对象承接 `__proto__`，触发原型 setter 并丢字段。把所有 JSON 递归排序还会吞掉应用自定义的有序映射差异；同一函数用于 `export-dsh-engine.mjs` 的真实 tarball 重打包时，能将条件导出的 `default` 提前，改变 Node 实际加载的代码。Node 的条件导出明确按键序匹配，见 https://nodejs.org/api/packages.html#conditional-exports 。此外，本机 bsdtar 的 gzip 头带当前秒数，全套回归跨秒时暴露既有重打包不幂等。
+
+**修法与调用链**：无规则文件直接哈希 Buffer；命中规则的文本采用严格 UTF-8 解码，非法编码拒绝。JSON 重建使用无原型对象。通用 JSON 排序退出快照规则，只对 `package.json` 顶层元数据和四个依赖映射排序，保留 `exports`、`imports` 及未知扩展字段内部顺序；打包与摘要共用 `canonicalPackageJson`。tar 输出由 Node zlib 压缩，gzip 时间戳固定零。报告增加 `normalizationVersion: 2`；旧版摘要不能与 v2 比较，也不能继续作为语义等价证明，需从原始快照重新计算；原 APK 字节哈希、签名及提交身份不因本修复改变。
+
+**反证与证据**：把最终专项用例接到旧模块 `bc65a17`，Windows 下 17 例中 9 过、8 失败；新模块 17 例全过。真实 tarball 解包后运行 Node，自引用 exports 与 `#x` imports 在旧重打包后从 `safe` 变成 `other`，新实现保持 `safe`。覆盖二进制碰撞、严格解码、嵌套特殊字段、条件和自定义映射顺序、依赖映射正例、gzip 时间戳、真实 CLI 输出版本及拒绝时不生成报告。命令：`node --test scripts/source-build/normalize-snapshot.test.mjs`；全套为 `node --test scripts/source-build/*.test.mjs`：Windows 58 通过、0 失败、23 项 Linux 用例跳过，WSL 补跑 81 全过、0 跳过。执行地图、维护文档生成块及 `git diff --check` 通过。日志在 `.deploy-tmp/security-normalization-20261016/{negative-old,fixed-tests,all-source-tests,linux-source-tests,code-map,maintenance-docs}.log`。Git fixture 需要允许临时 `.git/config` 写入；沙箱下的权限失败不算测试结果。
+
+**边界**：本轮为构建链内部归一化修复，未构建 APK、未做设备验证；没有把旧包记为包含修复。旧 APK 的归一化证据待重算，最终来源包仍需按风险分档及候选要求验收。该摘要仅覆盖列出的规则与文件内容/链接目标，不提供对恶意构建进程的隔离，也不覆盖所有文件系统元数据。

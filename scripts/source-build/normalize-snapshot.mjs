@@ -37,6 +37,7 @@ import { existsSync, lstatSync, mkdtempSync, readFileSync, readdirSync, readlink
 import { tmpdir } from 'node:os'
 import { join, relative, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { gzipSync } from 'node:zlib'
 
 const sha256 = (data) => createHash('sha256').update(data).digest('hex')
 /** 时间戳字段的固定哨兵值：保留键位（差异可见）但抹掉取值（差异无语义）。 */
@@ -54,14 +55,14 @@ const TIMESTAMP_SENTINEL = '<normalized-timestamp>'
 const ENGINE_ROOT = 'usr/lib/node_modules/@deepseek-ai/dsh'
 
 /**
- * 规范化 JSON：递归按字典序重建对象（JSON 对象键序按规范无语义），
- * 并把 `blankFields` 列出的字段值替换成哨兵。
+ * 仅供已确认键序无语义的状态对象：递归排序并替换指定时间戳。
+ * 不能用于任意应用 JSON 或 package.json 的条件导出。
  */
 export function canonicalJson(text, blankFields = []) {
   const walk = (value) => {
     if (Array.isArray(value)) return value.map(walk)
     if (value && typeof value === 'object') {
-      const out = {}
+      const out = Object.create(null)
       for (const key of Object.keys(value).sort()) {
         out[key] = blankFields.includes(key) ? TIMESTAMP_SENTINEL : walk(value[key])
       }
@@ -72,11 +73,29 @@ export function canonicalJson(text, blankFields = []) {
   return JSON.stringify(walk(JSON.parse(text)), null, 2) + '\n'
 }
 
+/** Only package metadata and dependency maps have an established order-independent contract.
+ * Keep exports/imports and unknown extension fields intact: conditional resolution uses key order.
+ * https://nodejs.org/api/packages.html#conditional-exports
+ */
+export function canonicalPackageJson(text) {
+  const value = JSON.parse(text)
+  if (!value || Array.isArray(value) || typeof value !== 'object') throw new Error('package.json must be an object')
+  const unorderedMaps = new Set(['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'])
+  const result = Object.create(null)
+  for (const key of Object.keys(value).sort()) {
+    const item = value[key]
+    if (unorderedMaps.has(key) && item && !Array.isArray(item) && typeof item === 'object') {
+      result[key] = Object.fromEntries(Object.keys(item).sort().map(name => [name, item[name]]))
+    } else result[key] = item
+  }
+  return JSON.stringify(result, null, 2) + '\n'
+}
+
 /**
  * 把 tarball 内 `package/package.json` 的键按规范重排，整体重打包（坑 210）。
  *
  * 与快照级归一化同源：**构建期写进去的规范形态**与**校验期算出来的**必须是同一件事，
- * 故共用 `canonicalJson` 并放在同一个模块里。
+ * 故共用 `canonicalPackageJson` 并放在同一个模块里。
  *
  * 为什么需要：`pnpm pack` 产出的 package.json **键序不稳定**——实测 316 个包里 260 个的
  * tarball 哈希两次构建不同，而 version 全部相同，差异只在对象键序。下游整套哈希
@@ -92,7 +111,7 @@ export function canonicalJson(text, blankFields = []) {
  *   ① 条目顺序 —— 显式传入**递归排序后**的路径清单，顺序由我们给，不由 readdir 决定；
  *   ② 时间戳   —— 先 `utimesSync` 把整棵树钉到固定时刻，再打包；
  *   ③ 属主     —— 不指定：CI 上恒为同一个用户，跨运行本来就不变；
- *   ④ gzip 头  —— tar 内部接管 `-f`，gzip 经管道读写，不写原文件名与时间戳。
+ *   ④ gzip 头  —— Node zlib 不记录文件名且时间戳恒为零，避免 bsdtar 写入当前时间。
  * 保留 npm 的 `package/` 前缀——消费方 `inject-dsh-engine-packages.mjs` 按
  * `--strip-components=1` 解包，前缀层数不能变。
  */
@@ -121,9 +140,12 @@ export function canonicalizePackedManifest(tarball, name = '<tarball>') {
     if (!existsSync(join(stage, 'package.json'))) {
       throw new Error(`${name}: packed tarball has no package/package.json`)
     }
-    writeFileSync(join(stage, 'package.json'), canonicalJson(readFileSync(join(stage, 'package.json'), 'utf8')))
+    const manifest = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(readFileSync(join(stage, 'package.json')))
+    writeFileSync(join(stage, 'package.json'), canonicalPackageJson(manifest))
     const entries = sortedEntryList(stage).map((rel) => join('package', rel))
-    execFileSync('tar', ['-czf', tarball, '-C', work, ...entries])
+    const archive = join(work, 'repacked.tar')
+    execFileSync('tar', ['-cf', archive, '-C', work, ...entries])
+    writeFileSync(tarball, gzipSync(readFileSync(archive), { level: 9 }))
   } finally {
     rmSync(work, { recursive: true, force: true })
   }
@@ -204,13 +226,11 @@ export function blankTimestampLine(text, field, pathForError = '<yaml>') {
  */
 export const RULES = [
   {
-    id: 'json-key-order',
-    // 宽匹配（后缀）⇒ strict:false：.json 后缀下混有带注释的 tsconfig.json（实测 36 个），
-    // 那不是 JSON，规则对其不适用，登记后放过。
-    strict: false,
-    note: 'JSON 对象键序按规范无语义（RFC 8259 §4），递归排序键不影响任何读取方',
-    match: (p) => p.endsWith('.json'),
-    apply: (text) => canonicalJson(text),
+    id: 'package-json-key-order',
+    strict: true,
+    note: '仅排序 package.json 顶层元数据及依赖映射；条件导出、扩展字段内部键序保留，其他 JSON 原字节计入',
+    match: (p) => p === 'package.json' || p.endsWith('/package.json'),
+    apply: (text) => canonicalPackageJson(text),
   },
   {
     id: 'yaml-mapping-key-order',
@@ -270,24 +290,16 @@ export function normalizeSnapshot(root) {
       manifest.push(`${entry.path}\0symlink\0${entry.body}`)
       continue
     }
-    let text = entry.body.toString('utf8')
+    let text
     let touched = false
     for (const rule of RULES) {
       if (!rule.match(entry.path)) continue
-      try {
-        text = rule.apply(text, entry.path)
-      } catch (error) {
-        // 「规则不适用于这个文件」与「这个文件有问题」是两回事，按**匹配方式的宽窄**区分：
-        //   - 宽匹配（按后缀命中的 json-key-order）：文件根本不是 JSON 时规则本就不适用
-        //     ⇒ 登记后放过（实测 1430 个 .json 里有 36 个是带注释的 tsconfig.json）。
-        //   - 精确匹配（按路径命中的那三条 pnpm/yaml 规则）：那些文件**应当**是已知形态，
-        //     对不上就是前提失效 ⇒ 一律响亮失败（故它们声明 strict 且抛普通 Error，
-        //     不会因为恰好是 SyntaxError 就滑进「跳过」路径）。
-        // 放过不等于静默：跳过的进 report.skipped[] 并在 CLI 打出，外部人看得到。
-        if (rule.strict || !(error instanceof SyntaxError)) throw error
-        skipped.push({ path: entry.path, rule: rule.id, reason: error.message.split('\n')[0] })
-        continue
+      if (text === undefined) {
+        // Lossy UTF-8 decoding must never collapse different bytes to the same digest.
+        text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(entry.body)
       }
+      // All rules are closed, explicit contracts. Invalid text must fail, never fall back.
+      text = rule.apply(text, entry.path)
       ruleCounts.set(rule.id, (ruleCounts.get(rule.id) ?? 0) + 1)
       touched = true
     }
@@ -295,10 +307,11 @@ export function normalizeSnapshot(root) {
     if (touched && Buffer.from(text, 'utf8').includes(0)) {
       throw new Error(`${entry.path}: 被文本规则命中但内容是二进制——规则清单有误`)
     }
-    manifest.push(`${entry.path}\0${touched ? 'normalized' : 'raw'}\0${sha256(text)}`)
+    manifest.push(`${entry.path}\0${touched ? 'normalized' : 'raw'}\0${sha256(touched ? text : entry.body)}`)
   }
   manifest.sort()
   return {
+    normalizationVersion: 2,
     fileCount: entries.length,
     normalizedManifestSha256: sha256(manifest.join('\n')),
     rules: RULES.map((rule) => ({
@@ -307,7 +320,7 @@ export function normalizeSnapshot(root) {
       note: rule.note,
       applied: ruleCounts.get(rule.id) ?? 0,
     })),
-    // 规则不适用而原样入摘要的文件；它们的内容若不稳定，摘要就会不同 ⇒ 届时由比对暴露
+    // 保留报告字段兼容；v2 不再尝试归一化任意 JSON/JSONC，未命中规则者直接按字节计入。
     skipped,
     manifest,
   }
