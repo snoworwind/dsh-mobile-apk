@@ -2138,3 +2138,13 @@ spawnSync("node", ["--version"])               status=0  v24.18.0        ← 走
 **修法**：文件与目录记 `mode & 07777`，目录本身入摘要而非只遍历子文件；FIFO、socket、设备节点等不支持的类型失败关闭。链接继续只记目标、不跟随；报告保留文件数量并另加 `entryCount`。报告版本升为 `normalizationVersion: 3`，v1/v2 不能与当前版直接比较，必须从原始快照重算。
 
 **证据**：`node --test scripts/source-build/normalize-snapshot.test.mjs` 在 WSL 20/20 通过、0 跳过，Windows 18 通过、2 项 Unix 用例跳过。将新用例接到 `1a93af6` 模块，WSL 16 过、4 失败（含报告版本），证明能捕获旧行为。命令、原始日志在 `.deploy-tmp/security-audit-20261016/normalization-{negative,linux,windows}.log`。L1 构建链内部改动，未构建 APK、未做设备验证；不覆盖属主、ACL、xattr 或恶意进程并发置换，不能据摘要宣称整个运行环境等价。
+
+339. **来源链初建/续跑未封住外部目录与报告叶子链接，宿主写入可越出隔离目录**
+
+**现象与真因**：旧 `prepareSourceWorkspace` 续跑只核对少数顶层目录、拒绝指向原仓的链接，初次检出还漏掉写入根 confinement。`.deploy-tmp/source-build` 或其 `source-build-policy.json` 指向无关外部目录/文件，后续 workflow 的重定向、复制和脚本写入都会跟随；指向尚不存在文件的链接还会被 `existsSync` 当作不存在，漏掉解析。真实 runner 受控负例中外部 sentinel 被从 `keep unrelated policy` 覆盖为 `policy`。
+
+**修法**：`canonicalPath` 使用 lstat/readlink 解析 dangling link 并拒绝循环；初次 checkout 与续跑统一调用 `rejectEscapedWriteRoots`，递归覆盖实际宿主写树，包括报告、插件、三组件、补丁 scripts/vendor 及输出。跟随树内目录别名并按物理目录去重，外逃叶子和嵌套父目录均拒绝。仅具体 bootstrap/快照 staging 子树中的宿主不存在的 Android runtime 前缀可保留，兼容 Termux 原前缀、壳重定位前缀及相对别名；报告树无此豁免。
+
+**证据**：WSL `node --test scripts/source-build/local-source-workspace.test.mjs` 13/13；接到旧模块的完整负控 7 过、6 失败，含真实 runner 写出副作用，修复后执行步骤前拒绝且外部文件不变。现有 `cb8876a` 独立来源缓存只读调用扫描通过，未启动 workflow、未改缓存，防止误伤实际 pnpm/runtime 链接。证据在 `.deploy-tmp/security-audit-20261016/source-{fixed,negative,cache-readonly}.log`。最终来源套件 89/89、0 跳过，见同目录 `all-source-tests.log`。
+
+**边界**：L1 构建编排修复，未构建 APK、未做设备验证；不是通用恶意进程沙箱，不保证检查后并发置换、硬链接、显式外部工具缓存的隔离。新增宿主写树时须同步本扫描与负控。

@@ -30,6 +30,8 @@ java -classpath gradle/wrapper/gradle-wrapper.jar org.gradle.wrapper.GradleWrapp
 
 `node scripts/source-build/run-local-source-chain.mjs --list` / `--dry-run` 只读 committed HEAD 的 workflow；实际执行在原仓之外的独立浅检出。未提交源码不参与构建。用 `--build-workspace /tmp/dsh-build --from <阶段>` 指定可复核的续跑目录，必须属于同一 source/commit；输出留在该目录，不自动回写 base。隔离检出禁用 LFS smudge，sources 阶段负责重建 base，不能跳过缺失的实际输入。
 
+初次检出与续跑均递归检查宿主写树的目录和文件链接，包括 dangling link；只允许树内别名及具体 staging 子树的 Android runtime 前缀。新增宿主写树须同步 `local-source-workspace.mjs` 与负控。现有来源缓存的只读兼容扫描及真实 runner 外部文件负控见 [gotchas.md](gotchas.md) 坑 339；此检查不等于恶意构建进程沙箱。
+
 三项目组件的来源证明改为本次 APK commit、原目录、包身份、逐文件 SHA-256 与真实输出 SHA-256；不再用独立 host 仓旧 pin 与当前 APK 副本硬比。目录、tgz 以及独立仓入口不变。完整外部消费者迁移仍待确认。
 
 组件来源证明在输入、输出阶段均从固定 Git 提交独立重建清单；可写报告不能作为最终输入哈希的信任根。新增源码、报告篡改、合法锁文件变化与实际 CLI 负控的复核命令和边界见 [gotchas.md](gotchas.md) 坑 336。宿主 npm 配置若在组件目录生成未登记缓存，须移至构建目录的专用缓存区并留移动证据，不加入源码白名单。
