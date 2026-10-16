@@ -2218,3 +2218,5 @@ spawnSync("node", ["--version"])               status=0  v24.18.0        ← 走
 **修法**：主入口仅无条件调用同提交的来源工作流，删除已无效的 ABI/suffix/审计开关；保留来源链现有 ARM64 能力。上传只对现有精确证据清单启用隐藏文件，未扩大为整个临时目录。使用说明见 build-and-env.md 的 GitHub Actions 来源构建入口。
 
 **验证与边界**：入口 YAML 回归包含旧构建 job 注入与条件调用负控；既有来源链 Bash 回归继续覆盖插件失败即停止。该 L1 改动未做设备验证，不宣称双 ABI、发布或设备验收已完成；云端执行结果以本次 Actions 记录为准。
+
+本轮实际验证：WSL 来源链 Node 测试 91/91、Python 测试 3/3 通过，执行地图检查通过。推送 `0bc7264` 后 dispatch 返回 HTTP 422 `Actions has been disabled for this repository`；GitHub Actions 页面明确显示 fork 因使用规模暂停，需维护者重新启用。仓库权限 API 的 enabled=true 和 workflow enable 均未解除该限制，故未启动云端构建、未产出本轮 APK。
