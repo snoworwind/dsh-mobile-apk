@@ -65,6 +65,18 @@ describe('useShellState（ST-09）', () => {
     expect(shown(el)).toBe('c')
   })
 
+  it('late native bridge readiness refreshes mounted state without focus or remount', async () => {
+    let value = 'fallback'
+    const el = await render(() => value)
+    value = 'native'
+    await act(async () => { window.dispatchEvent(new Event('dsh-native-bridge-ready')) })
+    expect(shown(el)).toBe('native')
+    await act(async () => { root!.unmount(); root = undefined })
+    value = 'after-unmount'
+    await act(async () => { window.dispatchEvent(new Event('dsh-native-bridge-ready')) })
+    expect(shown(el)).not.toBe('after-unmount')
+  })
+
   it('可选轮询：到点即重读', async () => {
     vi.useFakeTimers()
     let value = 'a'

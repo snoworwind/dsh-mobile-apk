@@ -195,6 +195,7 @@ Harness按固定0.2.0-rc.2源码完成全仓构建；prepare-harness-vendor-over
 
 | 差异点 | 现象 / 规则 | 出处 |
 |---|---|---|
+| Windows Node 26 与 UI 测试 | Vitest 2/jsdom 的 localStorage 在当前 Node 26.5.0 worker 中为 undefined；不要删用例或用 storage mock 掩盖。使用本机来源链的 Node 22.22.1、相同输入和完整兄弟 vendor 布局复核可全部通过；保存失败与复核日志，隔离包目录内不要挂整个 vendor（会误收集 Node test 文件） | 坑 342 |
 | WSL（Windows 特有） | 快照构建必须在 WSL（tar 解压/符号链接/relocate 需 Linux 语义）；Windows 直读 WSL 9p 文件 = EACCES，校验走 `wsl tar -tvf` 视图；wsl.exe 输出前有 localhost 代理噪音行，解析时过滤 | 坑 6 |
 | ADB 真机特有步骤 | 同签名 debug.keystore 才能覆盖安装；配对走真实 `adb pair`、码值只进 argv（第 4 节 AdbState.kt）；CDP 每次重启 pid 变 | 坑 10/14、第 2/4 节 |
 | run-as 限制 | run-as 裸环境无 termux-exec 钩子 → `not executable: 64-bit ELF` / `CANNOT LINK` 是**假错误**；验证快照内二进制须带全套引擎 env（`LD_PRELOAD` + `TERMUX_EXEC__*` + `LD_LIBRARY_PATH` + `OPENSSL_CONF`） | 坑 22 |

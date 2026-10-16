@@ -2168,3 +2168,19 @@ spawnSync("node", ["--version"])               status=0  v24.18.0        ← 走
 **修法**：在已有静态命令归一化后，识别动词前的 `--user` 参数与 put/delete/reset。保留 get/list 只读请求；动态载荷仍沿用已有拒绝规则。三个公开入口 `execAdbShell`、`execAdbLine`、`controlExec(shExec)` 均由同一执行前校验约束。源码与生成 `lib/index.js` 同步。
 
 **证据与边界**：bridge 全套 158/158、0 跳过，新增用例逐条验证恶意写操作不入生产 ControlQueue、合法读取仍入队；临时恢复旧检查时专项负控失败。日志 `.deploy-tmp/security-high-20261016/bridge-all.log`、`bridge-old-policy-negative.log`。最初混用 Windows/Linux esbuild 导致完整构建失败；隔离 Linux 同版依赖、保留完整仓库 fixture 布局后，`npm run build` 与 `npm test` 内再次完整构建均成功，输入与全部 lib 已逐字节同步核对，见 `bridge-full-build.log`。这是原有危险操作防线的定点修复，不把文本黑名单宣称为任意 shell 沙箱。ADB 当前无设备、MuMu 两端口未开放，前提见 `device-preflight.log`；未热推、未构建 APK、未做设备验证，CDP/ADB 即时层仍阻塞；进入候选前必须补验。
+
+342. **主 WebView 的不可信 HTML 子帧可直接调用完整原生桥（2026-10-16）**
+
+**现象与前提**：主 WebView 将 AndroidBridge 和 BackGateBridge 直接通过 `addJavascriptInterface` 注入；Android 将对象暴露给所有 frame，不受 iframe 的 opaque origin 限制。当前固定引擎提交 `639ed015397290b3745d163aafe02ffee4aa3f84` 的 `HtmlBody.tsx` 在用户开启交互预览后以 `sandbox="allow-scripts"` 加载 blob HTML，bootstrap 使用 document.write 执行文件内容。恶意预览脚本因而可以调用 `setScreenScope`、`getPickToken` 等业务桥，突破预览隔离。这是需要开启交互预览并打开恶意 HTML 的高风险调用链；未声称已在真实设备重现。
+
+**真因**：原生桥没有 frame 身份或调用能力认证；顶层导航的 `shouldOverrideUrlLoading` 不能阻止已加载子帧调用注入对象。官方边界见 [Android 原生桥风险说明](https://developer.android.com/privacy-and-security/risks/insecure-webview-native-bridges)。
+
+**修法**：MainFrameBridge 成为唯一直接注入主 WebView 的 transport，仅暴露 invoke。每 WebView 随机生成 256-bit nonce，仅在精确引擎 origin 的顶层 JS 闭包安装同步 facade；认证在 JSON 解析和反射分派前完成，只能调用已注册并带注解的业务方法，严格检查实参数量/类型。nonce 不写入 DOM、全局属性或公开函数源码。AndroidX document-start 优先，旧 provider 采用页面生命周期求值回退，执行时仍复查实际 origin/top；桥迟到通过 ready 事件刷新 useShellState。renderer 丢失或 Activity 销毁撤销 transport。同步返回、null、void 与方法重载保持兼容；源码与 UI lib 同步。
+
+**边界**：真正同源子帧可以按浏览器 SOP 调用父页面的 facade，nonce 不是同源 XSS 沙箱。交互预览必须保持 opaque sandbox，不能添加 allow-same-origin。主引擎顶层与本机调试器仍是受信面。
+
+**持续回归**：bootstrap 测试已接入 PR Gate 和来源链 workflow（本地 runner 同样读取这份 workflow）；来源链 Node 回归命令本机实际运行 118/118、0 跳过，见 `source-workflow-regressions.log`，不等于远端 CI 已执行。最终输入/生成文件摘要在 `final-input-sha256.txt`。
+
+**证据**：WSL Java 17/Android SDK 的 `:app:testDebugUnitTest` 全量 1240/1240、0 跳过（含新增 MainFrameBridgeTest 8 项）；直接调用生产 AndroidBridge 验证错误 nonce 不能写屏幕范围或读取 picker token，正确 nonce 保留功能。临时禁用 constant-time nonce 比较时 8 项中 2 项失败，恢复源文件后重跑全量成功。`node --test scripts/tests/main-frame-bridge.test.mjs` 从生产 Kotlin 提取实际 bootstrap，7/7，覆盖 opaque/同源 child 不安装 facade、不可信顶层、同步值/重载、公开函数不泄 nonce、重复注入、导航后 origin 复查；VM 不等于 Android frame 验收。UI `npm run build` 成功，Node 22 同源码/测试副本完整套件 711/711、0 跳过；副本按真实仓库布局提供 vendor 输入。Windows Node 26 下原套件因 localStorage undefined 失败，原始日志保留，未弱化或跳过断言。桥对称、代码地图、Kotlin 注释、Manifest、安全 IO 与 Kotlin 数量门禁均通过。
+
+**证据入口与未验范围**：`.deploy-tmp/security-high-20261016/` 下 `kotlin-all.log`、`native-negative.log`、`frame-js-tests.log`、`ui-build.log`、`ui-all-tests.log`（Windows 原始失败）、`ui-all-tests-node22-final.log`、`ui-source-parity.txt` 与 `check-*.log`。当前 ADB 无设备、MuMu 16416/16384 无监听，见 `device-preflight.log`。按 AGENTS §4.2/§2.1，本改动即时 CDP/ADB 两层仍阻塞，**未做设备验证**、未构建新 APK，不具备候选验收结论。原生改动不能热推代验；后续只能从已提交 HEAD 经来源链构建，装机补做恶意 opaque 预览拒绝、可信顶层正常设置/返回与生命周期恢复的真实自主任务，并覆盖竖横屏及发布前 arm64。

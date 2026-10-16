@@ -14,7 +14,13 @@
 
 ## 1. 信任与线程边界
 
-主WebView只对精确受管引擎origin开放androidBridge与dshBackBridge；匿名BrowserHost网页不挂桥、不注入EngineAuth cookie/token。@JavascriptInterface运行在JavaBridge线程；涉及UI的调用必须marshal主线程且返回真实结算/超时，不把任务已提交写成已完成。bridge不存在、畸形/空回包均结构化拒绝。
+主 WebView 只直接注入 `__dshNativeBridge.invoke(capability, bridge, method, arguments)`；`androidBridge` 与 `dshBackBridge` 是保留原同步 ABI 的 JavaScript facade，不再直接 addJavascriptInterface。MainFrameBridge 为每实例生成随机 nonce，先认证再解析参数，仅分派已登记的 `@JavascriptInterface` 方法，并核对实参数量和类型；返回 `{ok,value,void}` JSON，facade 保留同步值、null 与 void，拒绝回包抛出错误。Activity 销毁时 `close` 撤销 transport。
+
+`MainActivity.configureWebView` 注册两份业务对象；支持的 provider 用精确 `EngineAuth.BASE_URL` 的 document-start 脚本安装 facade，旧 provider 在 `onPageStarted/onPageFinished` 用顶层 evaluateJavascript 回退。同一脚本执行时必须同时满足 `window === window.top` 与精确 `location.origin`，避免排队期间跨源导航获得能力；nonce 仅留在外层词法闭包，不能出现在公开方法的函数源码中。重复安装保留已有 facade。安装完成的 `dsh-native-bridge-ready` 事件使 `useShellState` 重读真实状态；返回层栈仍由页面完成后的原生回读拉平。
+
+HTML 文档预览使用 `sandbox="allow-scripts"` 的 opaque 子帧：它能看见原始 transport，但没有闭包 nonce，不能调用业务方法。此边界依赖预览保留 opaque origin，**不得添加 `allow-same-origin`**。真正同源子帧按浏览器 SOP 可访问父页面的公开 facade；该机制不承诺隔离同源任意脚本或可信顶层 XSS。匿名 BrowserHost 网页不挂桥、不注入 EngineAuth cookie/token。
+
+原生 invoke 与业务方法运行在 JavaBridge 线程；涉及 UI 的调用必须 marshal 主线程且返回真实结算/超时，不把任务已提交写成已完成。bridge 不存在、畸形/空回包均结构化拒绝。`scripts/tests/main-frame-bridge.test.mjs` 直接执行生产 bootstrap，属于 JavaScript 回归证据，不替代 Android frame、CDP 或 ADB 验收。
 
 | 通道 | 当前职责 |
 |---|---|

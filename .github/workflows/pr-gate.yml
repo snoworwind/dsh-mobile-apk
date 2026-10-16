@@ -25,6 +25,9 @@ jobs:
       - name: APK 组装、版本与签名回归
         if: always()
         run: node --test scripts/check-apk-signatures.test.mjs scripts/resolve-version-suffix.test.mjs scripts/build-apk-engine.test.mjs scripts/check-third-party.test.mjs
+      - name: 主 WebView 顶层原生桥回归
+        if: always()
+        run: node --test scripts/tests/main-frame-bridge.test.mjs
       - name: 冲突标记检查
         if: always()
         run: |

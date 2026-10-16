@@ -118,7 +118,7 @@ sequenceDiagram
 | K01 | 启动与引导面 | 点开 App 到引擎页面可见的进程入口、引导页与 WebView 宿主 | LAUNCHER 图标、VIEW/SEND 来件 | 引导与启动 | 引擎进程与快照面、鉴权探活、诊断落盘 | 系统启动器与分享面板、BootReceiver、悬浮球跳转 | MainActivity.kt,EngineStartFlow.kt,GuidePageRenderer.kt,ForegroundPageRecoveryPolicy.kt | 高 |
 | K02 | 引擎生命周期与保活 | 起 node 引擎、Activity独立观察启动准备窗、5s 探活、看门狗重启熔断与日志落盘 | EngineStartFlow.start及生命周期结束后排队启动前台服务、EngineService先前台提升后初始化及5s tick | 引导与启动 | K01,K03 | MainActivity、BootReceiver、EngineStartFlow | EngineManager.kt,EngineService.kt,WatchdogV2.kt,LogCollector.kt | 高 |
 | K03 | 快照事务与更新链 | 内嵌快照暂存交换事务与回滚（插件故障走**清单式外科拔除**，不整份回滚），兼历史在线事务恢复与清单合并 | 启动流判指纹不新鲜 / APK 覆盖安装 / WebView 导出 | 快照与更新 | 引导启动流、引擎探活、构建快照资产 | EngineStartFlow.runFlow、EngineService 看门狗、引导页按钮、MainActivity 的 WebView 回调 | SnapshotTransaction.kt,SnapshotFs.kt,SnapshotRefreshPolicy.kt,PublicRepoProvision.kt,PluginMounts.kt,SnapshotUserData.kt,SnapshotFingerprintPolicy.kt,ProfilePackageManifest.kt | 高 |
-| K04 | 桥与控制协议面 | 页面 JS 桥面、引擎鉴权与控制队列承载 | 页面调 androidBridge；EngineService 起控制承载 | 稳态控制 | 引导与启动（EngineService/MainActivity）、无障碍与虚拟屏宿主、快照与更新（UndoGate） | MainActivity 装桥；EngineService.onCreate 起 ControlCarrier；看门狗 tick 调 UndoGate | app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt,app/src/main/java/com/dsharnessmobile/shell/ControlPoller.kt,app/src/main/java/com/dsharnessmobile/shell/EngineAuth.kt,app/src/main/java/com/dsharnessmobile/shell/ControlProtocolV2.kt | 高 |
+| K04 | 桥与控制协议面 | 顶层同步 facade 与 nonce dispatcher、引擎鉴权与控制队列承载 | 页面调 androidBridge；EngineService 起控制承载 | 稳态控制 | 引导与启动（EngineService/MainActivity）、无障碍与虚拟屏宿主、快照与更新（UndoGate） | MainActivity 注册并注入 MainFrameBridge；EngineService.onCreate 起 ControlCarrier；看门狗 tick 调 UndoGate | app/src/main/java/com/dsharnessmobile/shell/MainFrameBridge.kt,app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt,app/src/main/java/com/dsharnessmobile/shell/ControlPoller.kt,app/src/main/java/com/dsharnessmobile/shell/EngineAuth.kt,app/src/main/java/com/dsharnessmobile/shell/ControlProtocolV2.kt | 高 |
 | K05 | 无障碍控制面 | 按需取语义树并对设备执行点击输入滚动截屏 | 控制队列取活 + 无障碍服务回调 | 稳态控制 | K04 控制协议、K06 特权执行 | ControlCarrier 控制队列取活、onServiceConnected、ADB 键盘广播 | DeviceControlService.kt,GlobalActionCatalog.kt,AdbKeyboardService.kt,AdbKeyboardReceiver.kt | 高 |
 | K06 | 特权执行、屏幕范围与本地文件面 | Shizuku 特权 shell 通道、屏幕范围门与本地文件出入口 | 引擎 sh* op / 设置页范围写面 / 外部分享与打开 intent | 稳态控制 | 控制队列承载、引擎 bridge 插件、虚拟屏注册表、无障碍控制面 | 引擎 androidPrivilege 服务面与页面桥 | ShellOps.kt,ScreenScope.kt,ShizukuTransport.kt,ShizukuBindState.kt,ShizukuUserService.kt,ShizukuProbe.kt,ShizukuSupport.kt,ProcIo.kt,FileIncoming.kt,PathOpen.kt,ExternalLinks.kt,ConfigTransfer.kt,RootGrant.kt,RootAccess.kt,OwnershipRepairCore.kt,OwnershipRepair.kt,RootRepairMain.kt,RootExecutionFence.kt,RootMaintenanceLease.kt,RootOwnershipJobs.kt,LeaseClearProbe.kt | 高 |
 | K07 | 虚拟屏宿主 | Shizuku 建屏与 viewer Surface 交接的生命周期编排 | 模型 vd 工具 / 侧栏桥面 / Activity 生命周期 | 交互面 | Shizuku 特权通道、K05 无障碍控制面、K08 浏览器宿主 | MainActivity、DeviceControlService 与 ControlCarrier、侧栏面板 | VdisplayController.kt,VdisplayHost.kt,VdisplayOps.kt | 高 |
@@ -440,7 +440,7 @@ sequenceDiagram
 | K03 | 开发选项与诊断 | boot-fail.log、update-status.txt 与 diagnostics 镜像目录是本块失败终态的落盘点 | app/src/main/java/com/dsharnessmobile/shell/EngineManager.kt:193 |
 | K03 | 公共导出目录供给 | Documents/dshdata 的创建与**结果记账**（`status|trigger|epochMs|detail` 落在私有目录）；触发点经 onCreate/onResume 与「引擎是否在跑」解耦，且除 OK 外每轮都重试——旧实现只从 startEngine()/shellEnv() 进入，引擎活着早退就永远不再供给（0.14.1 用户反馈：Documents 下一直没有 dshdata）。存储 chip 的判据取该结果，只有 OK 才显示「已就绪」；授权路线按 SDK 分流（API<30 无 All Files Access，改请求运行时 READ/WRITE） | app/src/main/java/com/dsharnessmobile/shell/PublicRepoProvision.kt:1、EngineManager.kt:790、MainActivity.kt:354 |
 | K04 | 引导与启动 | MainActivity/EngineService 是桥与控制承载的唯一安装与起停点（EngineAuth.initContext 必须先于装桥） | app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:160 |
-| K04 | 交互面 | 主 WebView 的 addJavascriptInterface 是桥方法唯一暴露点，页面侧类型面在 dsh-client-ui-responsive/src/client/android-bridge.ts | app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:719 |
+| K04 | 交互面 | 主 WebView 仅 addJavascriptInterface MainFrameBridge；可信顶层同步 facade 经 invoke 认证后分派 AndroidBridge/BackGateBridge，页面类型面保持原 ABI | app/src/main/java/com/dsharnessmobile/shell/MainFrameBridge.kt:36 |
 | K04 | 无障碍控制面 | ControlCarrier.handle 的兜底分支把语义/输入类 op 交给 DeviceControlService，a11y 缺席时返回结构化拒绝 | app/src/main/java/com/dsharnessmobile/shell/ControlCarrier.kt:110 |
 | K04 | 插件面 | 控制队列的 exact 路由、令牌校验与 pv/caps 协商在 plugins/dsh-android-bridge/src/control-queue.ts | plugins/dsh-android-bridge/src/control-queue.ts:347 |
 | K04 | 快照与更新 | UndoGate 调急救 CLI 按壳侧 known-good ID 回撤并把现场镜像到共享目录；成功回滚后复位看门狗锁存 | app/src/main/java/com/dsharnessmobile/shell/UndoGate.kt:278-434 |
@@ -701,6 +701,8 @@ sequenceDiagram
 - **公共 APK 下载页安全边界**：构建期 release JSON 通过 HTML raw-text 安全序列化，摘要只取官方 GitHub MANIFEST；运行期禁止把镜像响应作为脚本执行，探测只信可读 CORS 状态，对具体 APK 做 HEAD，无法确认的镜像不参与自动选择。入口见 `webpages/tools/build.mjs`、`webpages/src/assets/app.js` 与 `webpages/src/assets/release.js`。
 
 #### K04 桥与控制协议面
+
+- **当前主 frame 桥调用链**：`MainActivity.configureWebView` 创建 `MainFrameBridge` 并只挂 `__dshNativeBridge`，`register` 登记 AndroidBridge 与 BackGateBridge。document-start 优先、`onPageStarted/onPageFinished` 顶层求值回退，脚本在执行时复查精确引擎 origin 与 top；facade 闭包保存 nonce，调用 `invoke → nonce 验证 → 声明方法/实参数量/类型验证 → 业务对象 → MainActivity callback`，同步结果返回页面。首次安装发布 `dsh-native-bridge-ready`，`useShellState` 监听后重读，`onDestroy` 调 `close` 撤销。HTML opaque 预览子帧无 nonce；真实同源子帧可依 SOP 调父 facade，预览不得加 `allow-same-origin`，完整边界见 `BRIDGE-API.md` §1。
 
 - **0.14.3当前桥增量**：browserHostCommand为session/uiTab/nativeTab窄导航，不暴露任意JS/controlExec；配置桥MainActivity→EngineManager→SnapshotUserData，不mounted legacy ConfigTransfer。root状态的ownership合并当前lease给honest pending，request不是repair已完成；v4 configuration追加回读完整UID/anchor、旧transaction不重排。当前签名与线程/结果语义见 [桥协议](<dsh-mobile-apk/docs/AGENTS/BRIDGE-API.md>)。下方旧坐标是原始历史协议描述，不作为本轮新head验证。
 
@@ -2100,6 +2102,8 @@ app/src/main/java/com/dsharnessmobile/shell/SnapshotFileMode.kt
 app/src/main/java/com/dsharnessmobile/shell/DownloadSaver.kt
 app/src/main/java/com/dsharnessmobile/shell/FactoryProfilePatch.kt
 app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt
+app/src/main/java/com/dsharnessmobile/shell/MainFrameBridge.kt
+app/src/test/java/com/dsharnessmobile/shell/MainFrameBridgeTest.kt
 app/src/main/java/com/dsharnessmobile/shell/EngineAuth.kt
 app/src/main/java/com/dsharnessmobile/shell/PluginMounts.kt
 app/src/main/java/com/dsharnessmobile/shell/UndoGate.kt

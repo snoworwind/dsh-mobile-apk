@@ -52,10 +52,12 @@ export function useShellState<T>(getter: () => T, options: ShellStateOptions = {
     }
     document.addEventListener('visibilitychange', onVisible)
     window.addEventListener('focus', onVisible)
+    window.addEventListener('dsh-native-bridge-ready', onVisible)
     const timer = pollMs !== undefined && pollMs > 0 ? window.setInterval(onVisible, pollMs) : undefined
     return () => {
       document.removeEventListener('visibilitychange', onVisible)
       window.removeEventListener('focus', onVisible)
+      window.removeEventListener('dsh-native-bridge-ready', onVisible)
       if (timer !== undefined) window.clearInterval(timer)
     }
   }, [refresh, pollMs])

@@ -47,6 +47,8 @@ import kotlin.math.ceil
  */
 class MainActivity : ComponentActivity() {
 
+  private var mainFrameBridge: MainFrameBridge? = null
+
   internal lateinit var webView: WebView
     private set
   /** Lazily-created untrusted BrowserHost surface, geometrically owned by the Files sidebar stage. */
@@ -751,6 +753,8 @@ class MainActivity : ComponentActivity() {
   }
 
   override fun onDestroy() {
+    mainFrameBridge?.close()
+    mainFrameBridge = null
     engineFlow.destroy() // Invalidate and cancel startup callers before destroying their page owners.
     pageRecovery.pause()
     // #128 L1：控制面不再持有已销毁 Activity 的 WebView。
@@ -844,6 +848,9 @@ class MainActivity : ComponentActivity() {
   }
 
   private fun configureWebView() {
+    val nativeBridge = MainFrameBridge()
+    mainFrameBridge = nativeBridge
+    webView.addJavascriptInterface(nativeBridge, MainFrameBridge.TRANSPORT)
     // WebView 远程调试（debug 构建）：真机/模拟器 CDP 自动化验证 UI 行为。
     // AGP 8 默认不生成 BuildConfig，用 debuggable 标志判断。
     val debuggable = (applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
@@ -933,6 +940,7 @@ class MainActivity : ComponentActivity() {
        */
       override fun onRenderProcessGone(view: WebView, detail: android.webkit.RenderProcessGoneDetail): Boolean {
         if (pageRecovery.rendererGone) return true // Duplicate callbacks must not destroy or recreate twice.
+        nativeBridge.close()
         try {
           LogCollector.writeBootDiag(
             this@MainActivity,
@@ -967,6 +975,8 @@ class MainActivity : ComponentActivity() {
        */
       override fun onPageStarted(view: WebView, url: String, favicon: android.graphics.Bitmap?) {
         super.onPageStarted(view, url, favicon)
+        // Old providers lack document-start injection. Evaluation still checks origin and top frame at execution time.
+        if (isEngineSource(url)) view.evaluateJavascript(nativeBridge.bootstrapScript(), null)
         if (isEngineSource(url)) enginePageFailed = false
         // 新文档：上一文档的层栈信号作废（页面插件在新文档里重新推）。
         if (isEngineSource(url)) backGateState.onPageStarted()
@@ -990,6 +1000,7 @@ class MainActivity : ComponentActivity() {
 
       override fun onPageFinished(view: WebView, url: String) {
         super.onPageFinished(view, url)
+        if (isEngineSource(url)) view.evaluateJavascript(nativeBridge.bootstrapScript(), null)
         if (!pageUiActive || view !== webView) return // Resume replays theme/insets/routes; do not restart background page probes.
         // 层栈缓存拉平（插件可能晚于首帧挂载，初始上行信号会漏）。
         if (isEngineSource(url)) pullBackGateState(view)
@@ -1095,7 +1106,8 @@ class MainActivity : ComponentActivity() {
         return true
       }
     }
-    webView.addJavascriptInterface(
+    nativeBridge.register(
+      "androidBridge",
       AndroidBridge(
         onPickRequest = { callbackId -> dirPickerController.pickDirectoryWithPermissionCheck(callbackId) },
         onKeepScreen = { enable -> keepScreenOn(enable) },
@@ -1219,13 +1231,22 @@ class MainActivity : ComponentActivity() {
         // 后台自动请求落不到用户眼前 ⇒ 管理器列表里根本没有本应用、状态恒 denied）。
         onRequestShizukuPermission = { ShizukuTransport.requestPermission(this).toString() },
       ),
-      "androidBridge",
     )
     // Startup ownership repair is owned by EngineStartFlow/EngineService before transaction recovery.
     // 返回策略（计划 §5.1 方案 1）：页面 → 壳的层栈上行接口。独立接口对象，只暴露
     // setAvailable/getBackAvailable 两个方法（授权面窄于 androidBridge 的 34 个方法）；
     // addJavascriptInterface 的方法调用是同步的——正是「同步决策」需要的形态。
-    webView.addJavascriptInterface(BackGateBridge(backGateState), "dshBackBridge")
+    nativeBridge.register("dshBackBridge", BackGateBridge(backGateState))
+    if (WebViewShim.supports(androidx.webkit.WebViewFeature.DOCUMENT_START_SCRIPT)) {
+      try {
+        androidx.webkit.WebViewCompat.addDocumentStartJavaScript(
+          webView, nativeBridge.bootstrapScript(), setOf(EngineAuth.BASE_URL),
+        )
+      } catch (_: UnsupportedOperationException) {
+        // Broken/older providers keep the origin-checked top-document lifecycle fallback.
+        Log.w(TAG, "native bridge document-start unavailable; using page lifecycle injection")
+      }
+    }
     installBackGate()
     // 0.13.3 W2：引擎 /api 全前缀走浏览器鉴权（401）。WebView 首屏先换好 cookie：
     // Kotlin 侧 P0（engine.log token 交换）/P1（credentials 密钥自 mint）拿到 cookie 后

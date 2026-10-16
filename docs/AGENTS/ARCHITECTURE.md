@@ -15,19 +15,22 @@
 | 文件 | 职责一句话 | 被引用 |
 |---|---|---|
 | MainActivity.kt | 主 WebView 宿主/生命周期/桥接线/insets（手机/宽屏动态top单层消费）/BrowserHost 与 VdisplayHost 生命周期编排 | 几乎所有协作类（构造注入） |
-| GuidePageRenderer.kt | 引导页纯代码 UI 渲染 + GuidePhase 状态机 + 结构化启动诊断/端口重试与SafeMode分流 + WebUI/引导页切换 + APK 自更新交互 | MainActivity |
+| GuidePageRenderer.kt | 引导页纯代码 UI 渲染 + GuidePhase 状态机 + 结构化启动诊断/端口重试与SafeMode分流 + WebUI/引导页切换 | MainActivity |
 | GuideChrome.kt | 引导页控件句柄束（GuideChrome/GuideCallbacks 数据类，DsUi 消费方） | GuidePageRenderer、MainActivity、WatchdogV2、EngineService |
 | EngineStartFlow.kt / ForegroundPageRecoveryPolicy.kt | CAS generation/token启动所有权；前台页面generation与一次安静恢复，后台不运行freeze监控；销毁取消caller不取消共享root worker。0.14.8 P1：拿不到所有权时按 destroyed（不启动）/ running（boot-fail 留痕 + 有界等待后续跑）分开处置，不再静默丢弃 | MainActivity、GuidePageRenderer |
 | ConfigTransfer.kt | legacy 配置导入导出未挂载；同文件 DirectoryPickerController 的 SAF 注册仍在用；活动配置读写归 EngineManager→SnapshotUserData | MainActivity（仅选择器） |
 | DownloadSaver.kt | 引擎源下载落盘（exports 优先/MediaStore 回退）+ 外链系统浏览器打开 | MainActivity |
 | WebUiChrome.kt | 窗口 UI chrome：沉浸式/剪贴板/常亮/主题推送（真源统一走 ShellState） | MainActivity |
 | FileIncoming.kt | 外部来件（VIEW/SEND）校验净化→临时工作区→通知引擎；queued source 保留到浏览器草稿 claim 或 TTL | MainActivity、EngineService |
-| AndroidBridge.kt | `window.androidBridge` 全部 @JavascriptInterface（计数由 check-bridge-symmetry 守；含设置/chooser/ScreenScope/BrowserHost/虚拟屏/BackGate 接线） | MainActivity（唯一 addJavascriptInterface 点） |
+| AndroidBridge.kt | `window.androidBridge` 同步业务方法声明（计数由 check-bridge-symmetry 守）；不直接挂到 WebView，由 MainFrameBridge 认证分派 | MainActivity、MainFrameBridge |
+| MainFrameBridge.kt | 主 WebView 唯一原生 transport：nonce 认证、声明方法与实参类型校验、可信顶层同步 facade；Activity 销毁时撤销 | MainActivity（唯一主 WebView addJavascriptInterface 点）、AndroidBridge、BackGateBridge |
 | BrowserHost.kt / BrowserHostNavigationPolicy.kt / BrowserOverlayPolicy.kt / BrowserHostProfile.kt | Session/tab 捕获目标与 model/UI focus 分离；每tab无桥WebView先验证nonDefault profile，再允许HTTP/loopback并保留受保护控制origin拒绝；stage/letterbox/TTL租约（客户端可见时1000ms续租、原生4000ms过期）；前台只重放新鲜舞台；不支持profile拒绝、不回Default | MainActivity、可信browserHostCommand、模型controlOp |
 | ScreenScope.kt | 0.14 新增：ScreenScope/ScreenTargets/ScreenScopePrefs——用户屏幕范围的 native 真源（损坏/未知回落 virtual-only） | AndroidBridge、DeviceControlService |
 | WebViewShim.kt | WebView 版本敏感面唯一入口：provider 回读（`getCurrentWebViewPackage`+major 解析单实现）、androidx.webkit 特性门、settings 两档（baseline=引擎页/控制台，+isolation=BrowserHost）；LocalDocs 静态文档面刻意不走 baseline | MainActivity、BrowserHost、ConsoleActivity、EngineManager |
 
 注入方向：MainActivity 字段初始化阶段 `by lazy`/直接构造各协作类并传 `this`（如 `engineFlow = EngineStartFlow(this)`）；ActivityResult 注册必须在 STARTED 前，故 dirPickerController/mediaPickerController 为字段直接构造。协作类只回调 MainActivity 的 internal 方法，不持有彼此。
+
+主页面桥依赖方向为 `MainActivity.configureWebView → MainFrameBridge.register(AndroidBridge/BackGateBridge) → 顶层 facade → invoke → 业务方法/Activity 回调`。document-start 与生命周期回退只负责交付同一闭包脚本，后者执行时再次核对 origin；能力认证、opaque HTML 子帧与真实同源子帧的边界统一见 `BRIDGE-API.md` §1。BrowserHost 保持独立的无桥 WebView。
 
 ## 2. 悬浮球（OverlayService 及协作模块）
 
