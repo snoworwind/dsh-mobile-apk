@@ -844,6 +844,48 @@ test('S-5 反证：危险命令黑名单在服务面生效（工具壳之外同�
   assert.equal(await takeNext(queue, 80), null, '混淆写法同样不得进入控制队列')
 })
 
+test('settings writes with user options and namespace resets never reach the privileged queue', async () => {
+  a11yOnlinePrefs()
+  useScope('all')
+  for (const command of [
+    'settings --user 0 put secure accessibility_enabled 1',
+    'settings --user current delete secure enabled_accessibility_services',
+    'settings --user 0 --user current put global adb_enabled 1',
+    'settings reset secure untrusted_defaults',
+    'settings --user 0 reset secure untrusted_clear',
+    'cmd settings --user current put secure accessibility_enabled 1',
+    'cmd settings delete secure enabled_accessibility_services',
+    'cmd settings reset secure untrusted_defaults',
+    '/system/bin/cmd settings --user 0 reset secure untrusted_clear',
+    '/system/bin/settings --user 0 p"ut" secure accessibility_enabled 1',
+    'settings\t--user\t0\tput\tglobal\tadb_enabled\t1',
+  ]) {
+    const queue = new ControlQueue()
+    const svc = service(queue)
+    for (const invoke of [
+      () => svc.execAdbShell(command, { session: TEST_SESSION }),
+      () => svc.execAdbLine(command, { session: TEST_SESSION }),
+      () => svc.controlExec('shExec', { command }, 500, { session: TEST_SESSION }),
+    ]) {
+      const result = invoke()
+      const unexpected = await takeNext(queue, 30)
+      if (unexpected !== null) queue.cancel('unexpected privileged dispatch')
+      assert.equal(unexpected, null, `${command} must be rejected before dispatch`)
+      assert.equal((await result).ok, false)
+    }
+  }
+  for (const command of ['settings --user 0 get secure accessibility_enabled', 'settings --user current list secure',
+    'cmd settings --user current get secure accessibility_enabled', 'cmd settings list global']) {
+    const queue = new ControlQueue()
+    const svc = service(queue)
+    const result = svc.controlExec('shExec', { command }, 500, { session: TEST_SESSION })
+    const request = queue.take()
+    assert.equal(request?.args.command, command, 'read-only settings queries remain available')
+    queue.settle(request.reqId, { ok: true, data: { ok: true, stdout: '' } })
+    assert.equal((await result).ok, true)
+  }
+})
+
 test('fx2：调用者伪造内部标记不能通过公开执行入口', async () => {
   a11yOnlinePrefs()
   useScope('all')

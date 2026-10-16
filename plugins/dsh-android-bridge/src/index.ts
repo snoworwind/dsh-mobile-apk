@@ -388,7 +388,8 @@ function looksDangerousAdb(command: string): boolean {
   const c = view.text.toLowerCase()
   if (view.dynamic && /\b(?:settings|pm|appops|content|svc|mount|cmd|input)\b/.test(c)) return true
   const PATTERNS_ADB = [
-    /\bsettings\s+(put|delete)\b/,
+    // settings accepts global --user options before its verb; reset is a namespace-wide write.
+    /\bsettings\s+(?:--user\s+\S+\s+)*(put|delete|reset)\b/,
     /\bpm\s+(grant|revoke|set-permission|uninstall|install|disable-user|enable)\b/,
     /\bappops\s+(set|reset)\b/,
     /\bcontent\s+(insert|update|delete)\b/,

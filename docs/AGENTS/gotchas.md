@@ -2158,3 +2158,13 @@ spawnSync("node", ["--version"])               status=0  v24.18.0        ← 走
 **证据**：隔离 WSL `npm test` 编译并运行插件完整套件 170/170、0 跳过；旧实现五个专项负控全部失败。真实双 HTTP 服务证明 same/cross-origin 跳转拒绝，目标无凭据请求；覆盖 Anthropic、Gemini、Bearer+custom、无密钥及主动正/负控，普通 200 仍成功。回显 URL/query/header、特殊编码、畸形 Unicode 与原有 `invalid model` 诊断回归通过。真实 `apply()` → 注册工具 execute → discover 在临时 DSH_HOME 落盘，日志与工具结果均无 raw/encoded 凭据。源码/测试输入与本仓逐字节一致，编译 JS 已同步核对；测试生成的最小 catalog JSON 已移出本仓 lib，防止误热推，正式目录快照仍由来源链 `gen-model-catalog.mjs` 从对应引擎生成。证据在 `.deploy-tmp/security-credentials-20261016/{test,negative-test,negative-build,restored-build}.log`、`final-copy-parity.log` 和 `source-output-sha256.txt`。
 
 **验收边界**：这是凭据出口与 runtime 行为修复，代码层与宿主真实 HTTP 反证已完成；即时 CDP/ADB 用户层因设备不可用而阻塞，不计通过。WSL `adb devices -l` 为空，Windows 16416/16384 端口未开放，原始前提见 `.deploy-tmp/security-audit-20261016/device-preflight.log`。未构建 APK、未热推、未做设备验证，不具备候选验收结论。待设备上线，按 `hot-push.mjs --plugin plugins/dsh-model-capability` 开发验收并补两方向真实自主任务；最终 APK 仍须来源链重建并重验。诊断去敏覆盖本次已知请求凭据，不宣称能发现任意未知秘密。
+
+341. **危险 ADB 写操作检查漏掉 settings 全局参数与 reset（2026-10-16）**
+
+**现象与前提**：会话已有 `danger-full-access` 与设备 shell 权限、但危险操作开关关闭时，`settings --user 0 put secure accessibility_enabled 1` 仍可进入特权控制队列。`cmd settings`、绝对路径和 namespace `reset` 同样存在漏检。它违反危险写操作必须再获许可的边界，不是无鉴权远程执行。
+
+**真因**：`looksDangerousAdb` 的匹配只接受紧随 settings 的 put/delete；Android CLI 允许动词前出现 `--user <id|current>`，且 reset 也是写操作。语法以 AOSP SettingsService 为准；原有 shell 归一化不负责补齐缺失的 CLI 语法。
+
+**修法**：在已有静态命令归一化后，识别动词前的 `--user` 参数与 put/delete/reset。保留 get/list 只读请求；动态载荷仍沿用已有拒绝规则。三个公开入口 `execAdbShell`、`execAdbLine`、`controlExec(shExec)` 均由同一执行前校验约束。源码与生成 `lib/index.js` 同步。
+
+**证据与边界**：bridge 全套 158/158、0 跳过，新增用例逐条验证恶意写操作不入生产 ControlQueue、合法读取仍入队；临时恢复旧检查时专项负控失败。日志 `.deploy-tmp/security-high-20261016/bridge-all.log`、`bridge-old-policy-negative.log`。最初混用 Windows/Linux esbuild 导致完整构建失败；隔离 Linux 同版依赖、保留完整仓库 fixture 布局后，`npm run build` 与 `npm test` 内再次完整构建均成功，输入与全部 lib 已逐字节同步核对，见 `bridge-full-build.log`。这是原有危险操作防线的定点修复，不把文本黑名单宣称为任意 shell 沙箱。ADB 当前无设备、MuMu 两端口未开放，前提见 `device-preflight.log`；未热推、未构建 APK、未做设备验证，CDP/ADB 即时层仍阻塞；进入候选前必须补验。
