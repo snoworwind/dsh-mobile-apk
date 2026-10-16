@@ -152,6 +152,17 @@ test('source reset restores inputs but preserves ignored dependencies', linux, (
   assert.equal(existsSync(join(source, 'untracked.txt')), false)
   assert.equal(readFileSync(join(source, 'node_modules/sentinel'), 'utf8'), 'keep')
 }))
+test('fresh no-checkout source clone skips reset until it has a HEAD', linux, () => fixture(root => {
+  const source = join(root, '.deploy-tmp/deepseek-harness')
+  mkdirSync(source, { recursive: true })
+  const git = (...args) => execFileSync('git', ['-C', source, ...args], { env: { PATH: '/usr/bin:/bin', HOME: root, GIT_CONFIG_NOSYSTEM: '1' } })
+  git('init', '-q')
+  const checkout = step('Checkout pinned DeepSeek Harness source')
+  const reset = checkout.slice(checkout.indexOf('test "$(realpath'), checkout.indexOf('\ngit -C .deploy-tmp/deepseek-harness checkout --detach'))
+  const r = bash(reset, root)
+  assert.equal(r.status, 0, r.stderr)
+  assert.equal(existsSync(join(source, '.git')), true)
+}))
 test('deploy cleanup is scoped and rejects empty workspace and linked parent', linux, () => fixture(root => {
   const harness = step('Build and pack DeepSeek Harness from source')
   const cleanup = harness.slice(harness.indexOf('test -n "$GITHUB_WORKSPACE"'), harness.indexOf('\ncorepack pnpm@12.2.0 --pm-on-fail=ignore --filter'))
