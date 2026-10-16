@@ -152,16 +152,21 @@ test('source reset restores inputs but preserves ignored dependencies', linux, (
   assert.equal(existsSync(join(source, 'untracked.txt')), false)
   assert.equal(readFileSync(join(source, 'node_modules/sentinel'), 'utf8'), 'keep')
 }))
-test('fresh no-checkout source clone skips reset until it has a HEAD', linux, () => fixture(root => {
+test('fresh no-checkout source clone with HEAD but empty index skips reset', linux, () => fixture(root => {
   const source = join(root, '.deploy-tmp/deepseek-harness')
   mkdirSync(source, { recursive: true })
   const git = (...args) => execFileSync('git', ['-C', source, ...args], { env: { PATH: '/usr/bin:/bin', HOME: root, GIT_CONFIG_NOSYSTEM: '1' } })
-  git('init', '-q')
+  git('init', '-q'); git('config', 'user.name', 'Fixture'); git('config', 'user.email', 'fixture@example.invalid')
+  writeFileSync(join(source, 'source.txt'), 'pinned'); git('add', '.'); git('commit', '-qm', 'fixture')
+  git('read-tree', '--empty'); rmSync(join(source, 'source.txt'))
+  assert.notEqual(git('rev-parse', '--verify', 'HEAD').toString().trim(), '')
+  assert.equal(git('ls-files').toString(), '')
   const checkout = step('Checkout pinned DeepSeek Harness source')
   const reset = checkout.slice(checkout.indexOf('test "$(realpath'), checkout.indexOf('\ngit -C .deploy-tmp/deepseek-harness checkout --detach'))
   const r = bash(reset, root)
   assert.equal(r.status, 0, r.stderr)
   assert.equal(existsSync(join(source, '.git')), true)
+  assert.equal(git('ls-files').toString(), '')
 }))
 test('deploy cleanup is scoped and rejects empty workspace and linked parent', linux, () => fixture(root => {
   const harness = step('Build and pack DeepSeek Harness from source')

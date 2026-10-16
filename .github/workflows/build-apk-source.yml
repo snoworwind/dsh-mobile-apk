@@ -130,9 +130,9 @@ jobs:
           # A previous interrupted build may have modified tracked inputs before this checkout.
           # Reset only this dedicated source checkout; preserve ignored dependency caches.
           test "$(realpath .deploy-tmp/deepseek-harness)" = "$(realpath .)/.deploy-tmp/deepseek-harness"
-          # A fresh --no-checkout clone has no HEAD/index paths yet; only reset
-          # after a prior checkout exists (for interrupted-build recovery).
-          if git -C .deploy-tmp/deepseek-harness rev-parse --verify HEAD >/dev/null 2>&1; then
+          # A fresh --no-checkout clone has HEAD but an empty index; only reset
+          # after tracked paths have been populated (for interrupted-build recovery).
+          if [ -n "$(git -C .deploy-tmp/deepseek-harness ls-files)" ]; then
             git -C .deploy-tmp/deepseek-harness checkout -- .
             git -C .deploy-tmp/deepseek-harness clean -fdq
           fi
