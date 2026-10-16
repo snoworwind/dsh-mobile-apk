@@ -2251,7 +2251,7 @@ spawnSync("node", ["--version"])               status=0  v24.18.0        ← 走
 
 **证据与边界**：源码调用顺序确认于 `EngineProbe.check()` → `EngineAuth.attach()` → Cookie header 设置；静态确认，无设备动态利用复现。严重性按跨应用会话凭据泄露评为高。Android 指导：[Security checklist — localhost ports](https://developer.android.com/privacy-and-security/security-tips?authuser=1&hl=en)。修复与设备复验完成前不得将此项视为已关闭。
 
-350. **云端来源构建继承 Termux 子仓 Windows npm cache（2026-10-17）**
+351. **云端来源构建继承 Termux 子仓 Windows npm cache（2026-10-17）**
 
 **现象与真因**：来源链构建快照、APK 和单测均完成；末尾 `record-project-components.mjs outputs` 报 `untracked component inputs`，路径为 `dsh-shell-termux/D:/coding/dsh-mobile/.npm-cache/...`。根因是被提交的 `dsh-shell-termux/.npmrc` 固定 Windows 开发机缓存路径；Linux npm 把该相对解释后的目录写入源码组件树，污染生产输入，正确触发来源证明拒绝。
 
