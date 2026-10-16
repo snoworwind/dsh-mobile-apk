@@ -230,3 +230,5 @@ gh workflow run build-apk-source.yml --repo snoworwind/dsh-mobile-apk --ref secu
 来源链预检的 provenance 夹具必须隔离 CI 仓库环境，复验时带 `GITHUB_REPOSITORY` 与 `GITHUB_SERVER_URL` 跑工作流同一组 Node 测试；否则本地通过不足以覆盖云端身份优先级。根因及修复见 gotchas.md 坑 347。
 
 **2026-10-17 云端核验快照**：Actions 已由用户重新启用。`81dc50c` 的 [源码构建 38935633493](https://github.com/snoworwind/dsh-mobile-apk/actions/runs/38935633493) 已通过原失败的输入预检、签名工具预检与固定来源检出，记录时正在编译 Harness；尚未取得最终 APK/上传成功结论。后续状态以该运行页面为准。旧禁用与夹具故障分别见坑 346、347。
+
+**云端 npm 缓存隔离**：来源工作流在依赖预检前覆盖 npm 缓存到 `$RUNNER_TEMP/dsh-npm-cache`，否则 `dsh-shell-termux/.npmrc` 的 Windows 绝对路径会被 Linux npm 落入组件树，并在 provenance 输出复核时报未跟踪输入。根因及反证见 gotchas.md 坑 350。

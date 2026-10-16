@@ -24,6 +24,15 @@ test('source workflow uploads explicitly listed hidden provenance with APK', () 
   assert.doesNotMatch(upload, /^            \.deploy-tmp\/\*\*$/m)
 })
 
+test('source build overrides the checked-in Windows npm cache before any npm install', () => {
+  const source = read('build-apk-source.yml')
+  const setup = source.indexOf('      - name: Isolate npm cache from checked-in developer settings')
+  const firstInstall = source.indexOf('npm ci')
+  assert.notEqual(setup, -1)
+  assert.ok(firstInstall === -1 || setup < firstInstall)
+  assert.match(source.slice(setup, source.indexOf('\n      - name:', setup + 1)), /npm_config_cache=\$RUNNER_TEMP\/dsh-npm-cache/)
+})
+
 test('draft workflow builds read-only and publishes only this run artifacts as a draft', () => {
   const workflow = read('release-source-draft.yml')
   assert.match(workflow, /SOURCE_REF: \$\{\{ github.ref \}\}/)

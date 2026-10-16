@@ -2240,3 +2240,19 @@ spawnSync("node", ["--version"])               status=0  v24.18.0        ← 走
 **现象与真因**：草稿流程 build job 在来源链 Python 预检处报 `missing evidence: scripts/patches/tests/fixtures/*-0.2.0-rc.2/**`，来源 APK 尚未开始构建。校验器用 `pathlib.Path.glob` 解释 Actions 上传清单的递归目录模式，但它对中间通配符目录与 `**` 的组合未按 Actions 的目录内容语义匹配。
 
 **修法**：改为 Python `glob.glob(..., recursive=True)`，并仍要求匹配项至少包含一个实际文件；固定文件证据逐项检查不变。WSL Linux 与 Actions 同命令的 Python 8/8、Node 93/93 通过，涵盖缺证据拒绝和成功打包全项隐藏证据。首次 run 38937039856 失败无 APK/Release；修复后的首次重跑仍以 Actions 验证为准。
+
+350. **loopback URL 精确匹配仍无法认证 3080 端口的监听进程，探活可能泄露会话 Cookie（2026-10-17，待修）**
+
+**触发条件**：其他 Android 应用先在本机 `127.0.0.1:3080` 监听，而 DSH 引擎尚未启动或暂时退出；随后壳侧触发 `EngineProbe.check()`。Android 官方安全清单明确指出，localhost 端口可被设备上的其他应用访问，不应单独用于敏感 IPC。
+
+**现象与根因**：`EngineProbe.check()` 在识别监听者身份前调用 `EngineAuth.attach(conn)`，向精确 loopback URL 发送已保存的会话 Cookie。`EngineAuth.confineConnection()` 只校验请求 URL 并关闭重定向，不能证明该端口由壳侧引擎持有；因此伪造监听者可直接收到 Cookie。已记录的重定向防护（坑 316）仅阻止初始连接之后的跨源转发，不能阻止连接到伪造的初始监听者。
+
+**修复方向**：认证凭据与敏感请求载荷只在壳侧能证明当前引擎进程归属后发送；逐一审查探活、Cookie 刷新、RPC、通知与控制队列的请求路径。仅凭 HTTP 状态码、当前 generation 的旧 token 行或精确 loopback URL 不足以证明监听进程身份；需另找可在真实调用链上核验的归属凭证。
+
+**证据与边界**：源码调用顺序确认于 `EngineProbe.check()` → `EngineAuth.attach()` → Cookie header 设置；静态确认，无设备动态利用复现。严重性按跨应用会话凭据泄露评为高。Android 指导：[Security checklist — localhost ports](https://developer.android.com/privacy-and-security/security-tips?authuser=1&hl=en)。修复与设备复验完成前不得将此项视为已关闭。
+
+350. **云端来源构建继承 Termux 子仓 Windows npm cache（2026-10-17）**
+
+**现象与真因**：来源链构建快照、APK 和单测均完成；末尾 `record-project-components.mjs outputs` 报 `untracked component inputs`，路径为 `dsh-shell-termux/D:/coding/dsh-mobile/.npm-cache/...`。根因是被提交的 `dsh-shell-termux/.npmrc` 固定 Windows 开发机缓存路径；Linux npm 把该相对解释后的目录写入源码组件树，污染生产输入，正确触发来源证明拒绝。
+
+**修法**：来源 workflow 在任何预检/依赖步骤前创建 `$RUNNER_TEMP/dsh-npm-cache` 并通过 `$GITHUB_ENV` 设置 `npm_config_cache`，覆盖仓内 `.npmrc`，缓存不再进入组件树。保留来源证明门禁，不忽略污染目录。入口回归检查覆盖覆盖设置位置；WSL Linux 实跑来源 Node/Python 测试。失败 run 38935633493 因来源输入污染无可用 artifact；旧提交运行不能代替修复后重跑。
