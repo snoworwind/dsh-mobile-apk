@@ -33,7 +33,15 @@ function fixture(fn) {
   git('add', '.')
   git('commit', '-qm', 'fixture')
   const commit = git('rev-parse', 'HEAD')
-  try { return fn({ root, commit }) } finally { rmSync(root, { recursive: true, force: true }) }
+  // Fixtures own their provenance identity, including child CLI processes.
+  // GitHub Actions supplies GITHUB_REPOSITORY, which otherwise overrides origin.
+  const previousRepository = process.env.DSH_SOURCE_REPOSITORY
+  process.env.DSH_SOURCE_REPOSITORY = FIXTURE_REPOSITORY
+  try { return fn({ root, commit }) } finally {
+    if (previousRepository === undefined) delete process.env.DSH_SOURCE_REPOSITORY
+    else process.env.DSH_SOURCE_REPOSITORY = previousRepository
+    rmSync(root, { recursive: true, force: true })
+  }
 }
 
 test('project component source files and actual built outputs bind to the same commit', () => fixture(({ root, commit }) => {
@@ -189,3 +197,17 @@ test('actual source workflow verifies project components without an independent 
   assert.deepEqual(Object.keys(report.components), dirs)
   assert.equal(report.projectCommit, commit)
 }))
+
+test('fixture identity overrides CI environment and restores the caller override', () => {
+  const previous = process.env.DSH_SOURCE_REPOSITORY
+  process.env.DSH_SOURCE_REPOSITORY = 'https://github.com/outer/build'
+  try {
+    fixture(({ root, commit }) => {
+      assert.equal(captureProjectInputs(root, commit).sourceRepository, FIXTURE_REPOSITORY)
+    })
+    assert.equal(process.env.DSH_SOURCE_REPOSITORY, 'https://github.com/outer/build')
+  } finally {
+    if (previous === undefined) delete process.env.DSH_SOURCE_REPOSITORY
+    else process.env.DSH_SOURCE_REPOSITORY = previous
+  }
+})

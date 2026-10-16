@@ -2220,3 +2220,9 @@ spawnSync("node", ["--version"])               status=0  v24.18.0        ← 走
 **验证与边界**：入口 YAML 回归包含旧构建 job 注入与条件调用负控；既有来源链 Bash 回归继续覆盖插件失败即停止。该 L1 改动未做设备验证，不宣称双 ABI、发布或设备验收已完成；云端执行结果以本次 Actions 记录为准。
 
 本轮实际验证：WSL 来源链 Node 测试 91/91、Python 测试 3/3 通过，执行地图检查通过。推送 `0bc7264` 后 dispatch 返回 HTTP 422 `Actions has been disabled for this repository`；GitHub Actions 页面明确显示 fork 因使用规模暂停，需维护者重新启用。仓库权限 API 的 enabled=true 和 workflow enable 均未解除该限制，故未启动云端构建、未产出本轮 APK。
+
+347. **来源证明测试夹具继承 CI 仓库身份导致云端预检立即失败（2026-10-17）**
+
+**现象与真因**：Actions run `38935337988` 在来源链预检中 120 项测试通过 119 项；夹具期望 `fixture/fork`，实际拿到 `snoworwind/dsh-mobile-apk`。来源解析按 DSH_SOURCE_REPOSITORY、GitHub 环境、git origin 优先级工作，测试仅配置临时 origin，未隔离 runner 自带的 GITHUB_REPOSITORY；本地没有该变量所以未复现。
+
+**修法与证据**：仅在同步测试夹具生命周期设置并恢复 DSH_SOURCE_REPOSITORY，子 CLI 一并继承夹具身份；生产来源解析和拒绝伪造的判据不变。新增外层覆盖恢复用例；用 GITHUB_REPOSITORY=snoworwind/dsh-mobile-apk 与 GITHUB_SERVER_URL=https://github.com 执行与云端相同的完整 Node 预检，保留伪造输入、错误仓库与缺失 origin 的负控。日志在 `.deploy-tmp/actions-source-ci-env/`。本 L1 测试修复未做设备验证。

@@ -228,3 +228,5 @@ gh workflow run build-apk.yml --repo snoworwind/dsh-mobile-apk --ref security/ha
 ```
 
 成功后从该次 Actions 的 Artifacts 下载 `dsh-mobile-apk-arm64-source-<commit>`，内含 APK、SHA-256 和列举的来源证明文件；上传显式包含隐藏目录内的证据，且不上传整个临时目录。当前仅 ARM64、版本后缀固定 `-source`，不支持 x86_64 或双 ABI，不创建 Release。云端任务上限 180 分钟，沿用来源链全部测试与产物门禁。入口回归为 `node --test scripts/source-build/cloud-workflow.test.mjs`，含旧链与条件分流的受控负控。该 L1 入口改动未做设备验证，云端成功也不等于设备验收通过。
+
+来源链预检的 provenance 夹具必须隔离 CI 仓库环境，复验时带 `GITHUB_REPOSITORY` 与 `GITHUB_SERVER_URL` 跑工作流同一组 Node 测试；否则本地通过不足以覆盖云端身份优先级。根因及修复见 gotchas.md 坑 347。
