@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto'
 import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { isDeepStrictEqual } from 'node:util'
 
 const COMPONENTS = ['dsh-shell-termux', 'dsh-client-ui-responsive', 'dsh-host-web-compat']
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
@@ -11,6 +12,30 @@ const git = (root, ...args) => execFileSync('git', ['-C', root, ...args], { maxB
 
 function verifyCommit(root, commit) {
   if (!/^[a-f0-9]{40}$/.test(commit ?? '') || git(root, 'rev-parse', 'HEAD').toString().trim() !== commit) throw new Error('project component provenance requires the checked-out GITHUB_SHA')
+}
+
+function rejectUntrackedInputs(root, commit, directory) {
+  const untracked = new Set([
+    ...git(root, 'ls-files', '--others', '--exclude-standard', '-z', '--', directory).toString().split('\0').filter(Boolean),
+    // Git ignore rules do not constrain TypeScript's include:[src]. Generated lib/node_modules
+    // remain allowed, but even an ignored token*.ts under src is an uncommitted compiler input.
+    ...git(root, 'ls-files', '--others', '-z', '--', `${directory}/src`).toString().split('\0').filter(Boolean),
+    // A staged addition is absent from ls-files --others, but is still absent from the pin.
+    ...git(root, 'diff', '--cached', '--name-only', '--diff-filter=A', '-z', commit, '--', directory).toString().split('\0').filter(Boolean),
+  ])
+  if (untracked.size) throw new Error(`untracked component inputs: ${[...untracked].sort().join(', ')}`)
+}
+
+function committedComponent(root, commit, directory) {
+  const files = git(root, 'ls-tree', '-r', '--name-only', '-z', commit, '--', directory).toString().split('\0').filter(Boolean).sort()
+  if (!files.includes(`${directory}/package.json`)) throw new Error(`project component missing from commit: ${directory}`)
+  const inputFiles = Object.fromEntries(files.map(path => [path.slice(directory.length + 1), sha256(git(root, 'show', `${commit}:${path}`))]))
+  const manifest = JSON.parse(git(root, 'show', `${commit}:${directory}/package.json`).toString())
+  if (manifest.name !== `@dsh-android/${directory}`) throw new Error(`component package identity changed: ${directory}`)
+  return {
+    source: 'checked-in project component', sourceCommit: commit, directory,
+    packageName: manifest.name, packageVersion: manifest.version, inputFiles,
+  }
 }
 
 /**
@@ -37,23 +62,12 @@ export function captureProjectInputs(root, commit, sourceRepository = resolveSou
   verifyCommit(root, commit)
   const report = { schema: 1, sourceRepository, projectCommit: commit, components: {} }
   for (const directory of COMPONENTS) {
-    const files = git(root, 'ls-tree', '-r', '--name-only', '-z', commit, '--', directory).toString().split('\0').filter(Boolean).sort()
-    if (!files.includes(`${directory}/package.json`)) throw new Error(`project component missing from commit: ${directory}`)
-    const untracked = git(root, 'ls-files', '--others', '--exclude-standard', '-z', '--', directory).toString().split('\0').filter(Boolean)
-    if (untracked.length) throw new Error(`untracked component inputs: ${untracked.join(', ')}`)
-    const inputFiles = {}
-    for (const path of files) {
-      const committed = git(root, 'show', `${commit}:${path}`)
-      const actual = readFileSync(join(root, path))
-      if (!actual.equals(committed)) throw new Error(`component input differs from project commit: ${path}`)
-      inputFiles[path.slice(directory.length + 1)] = sha256(committed)
+    const component = committedComponent(root, commit, directory)
+    rejectUntrackedInputs(root, commit, directory)
+    for (const [path, hash] of Object.entries(component.inputFiles)) {
+      if (sha256(readFileSync(join(root, directory, path))) !== hash) throw new Error(`component input differs from project commit: ${directory}/${path}`)
     }
-    const manifest = JSON.parse(readFileSync(join(root, directory, 'package.json'), 'utf8'))
-    if (manifest.name !== `@dsh-android/${directory}`) throw new Error(`component package identity changed: ${directory}`)
-    report.components[directory] = {
-      source: 'checked-in project component', sourceCommit: commit, directory,
-      packageName: manifest.name, packageVersion: manifest.version, inputFiles,
-    }
+    report.components[directory] = component
   }
   const cordisKey = '@deepseek-ai/cordis'
   const overlay = JSON.parse(readFileSync(join(root, 'scripts/snapshot-config/engine-overlay.json'), 'utf8'))
@@ -74,10 +88,20 @@ function libraryFiles(root, prefix = 'lib') {
 export function captureProjectOutputs(root, commit, inputs) {
   verifyCommit(root, commit)
   if (inputs.schema !== 1 || inputs.projectCommit !== commit) throw new Error('project component input provenance belongs to a different commit')
-  const report = structuredClone(inputs)
+  const sourceRepository = resolveSourceRepository(root)
+  if (inputs.sourceRepository !== sourceRepository || !isDeepStrictEqual(Object.keys(inputs.components ?? {}).sort(), [...COMPONENTS].sort())) {
+    throw new Error('input provenance differs from project commit or source repository')
+  }
+  const report = { schema: 1, sourceRepository, projectCommit: commit, components: {} }
   for (const directory of COMPONENTS) {
-    const component = report.components[directory]
-    if (component?.sourceCommit !== commit || component.directory !== directory) throw new Error(`invalid component input provenance: ${directory}`)
+    // The report is writable by dependency/build scripts. Reconstruct its immutable fields from
+    // Git, rather than trusting hashes that an attacker can rewrite together with the sources.
+    const component = committedComponent(root, commit, directory)
+    const claimed = inputs.components[directory]
+    if (!Object.keys(component).every(key => isDeepStrictEqual(component[key], claimed?.[key]))) {
+      throw new Error(`input provenance differs from project commit: ${directory}`)
+    }
+    rejectUntrackedInputs(root, commit, directory)
     const outputFiles = {}
     const componentRoot = join(root, directory)
     for (const path of ['package.json', ...libraryFiles(componentRoot)]) outputFiles[path] = sha256(readFileSync(join(componentRoot, path)))
@@ -94,6 +118,7 @@ export function captureProjectOutputs(root, commit, inputs) {
       }
     }
     component.outputFiles = outputFiles
+    report.components[directory] = component
   }
   return report
 }

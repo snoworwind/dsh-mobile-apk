@@ -2110,3 +2110,13 @@ spawnSync("node", ["--version"])               status=0  v24.18.0        ← 走
 **修法（本机绕行，不改仓库）**：需要 node 子进程的套件用 `--pool=threads`（vitest 的 worker_threads 不经 execPath）；`node --test` 改成逐文件直跑（`for f in scripts/*.test.mjs; do node "$f"; done`）；依赖 `spawnSync(process.execPath, …)` 的门禁（`check-release-gates.mjs` 的 node --check 全量扫描即其一）在本机**不可判**——按环境阻塞记账，**不得据此判仓库红**，要拿真结论请在 WSL/Windows 开发机上跑。
 
 **判据**：`node -e 'console.log(process.execPath)'` 打 `linker64` 即命中本坑；打 `.../files/usr/bin/node` 则本坑不适用。
+
+336. **组件来源报告可与源码一起被改写，不能充当自身的信任根**
+
+**现象与真因**：`record-project-components.mjs` 的 `inputs` 在构建前把提交文件哈希写入可写 JSON，`outputs` 原先仅验证报告的提交号，再按报告里的 `inputFiles` 检查工作树。依赖安装或构建期间同时改写源码和报告哈希，或从报告删除被改文件，最终校验仍通过；报告中的仓库/包身份也可被改写。构建后新增源码未再次扫描，Git 忽略的 `src/token*.ts` 还会避开最初的 untracked 检查，但仍属于 TypeScript 的 `include:[src]`。WSL 受控反例在旧实现得到 8 通过、4 失败，失败均为本应拒绝却未抛异常。
+
+**修法**：输入和输出阶段共用 `committedComponent`，直接从指定 Git 提交重算完整路径集合、哈希与包身份；输出阶段先逐项核对输入报告与提交内容、实际来源仓库及三组件集合，再按重算清单检查工作树，不按报告提供的路径读文件。两阶段都拒绝组件内非忽略新增文件、`src` 内包含忽略项的新增文件及相对固定提交的 staged additions。合法 `lib` 构建产物保持允许；依赖准备有意实现的 `package-lock.json` 仍保留提交输入哈希并另记实际锁文件哈希，不能改写原输入身份。
+
+**证据**：`node --test scripts/source-build/*.test.mjs` 包含篡改哈希、删除输入、普通/忽略/staged 源码注入、身份篡改、合法锁文件变化以及真实 outputs CLI 拒绝且不覆盖原报告的负控。日志在 `.deploy-tmp/security-provenance-20261016/`；最终结果以 `all-source-tests.log` 为准。新校验器另对既有 `cb8876a` 的真实 WSL 构建目录复核三组件成功；发现的两处宿主 npm 字面量 `D:/.../.npm-cache` 已原样移至该隔离目录 `.deploy-tmp/provenance-recheck-caches/`，移动清单见 `cache-moves.json`，未放宽未登记输入判据。
+
+**边界**：这修复来源记录的内部一致性，不提供对任意同 UID 恶意构建代码的隔离；若校验器、Git 对象库或构建执行环境本身不可信，仍须独立可信执行与复核。文件在检查之间被修改又恢复、依赖本体行为以及运行时安全不由本检查证明。本轮未改 Android 或运行时源码，未重建 APK、未做设备验证；旧 APK 不标记为包含本轮修复。

@@ -17,13 +17,14 @@ function fixture(fn) {
   git('config', 'user.name', 'Fixture')
   git('config', 'user.email', 'fixture@example.invalid')
   git('remote', 'add', 'origin', FIXTURE_REPOSITORY + '.git')
-  writeFileSync(join(root, '.gitignore'), '.deploy-tmp/\ndsh-shell-termux/lib/\ndsh-client-ui-responsive/lib/\n')
+  writeFileSync(join(root, '.gitignore'), '.deploy-tmp/\ndsh-shell-termux/lib/\ndsh-client-ui-responsive/lib/\ntoken*\n')
   for (const directory of dirs) {
     mkdirSync(join(root, directory, 'src'), { recursive: true })
     mkdirSync(join(root, directory, 'lib'))
     writeFileSync(join(root, directory, 'src/index.ts'), 'export const value = 1\n')
     writeFileSync(join(root, directory, 'lib/index.js'), 'export const value = 1\n')
     writeFileSync(join(root, directory, 'package.json'), JSON.stringify({ name: `@dsh-android/${directory}`, version: '1.0.0', dependencies: { '@deepseek-ai/cordis': '4.0.4' } }) + '\n')
+    writeFileSync(join(root, directory, 'package-lock.json'), '{"lockfileVersion":3}\n')
   }
   mkdirSync(join(root, 'scripts/snapshot-config'), { recursive: true })
   mkdirSync(join(root, 'scripts/source-build'))
@@ -97,6 +98,79 @@ test('a source rewrite during build cannot be attributed to the original input c
   const inputs = captureProjectInputs(root, commit)
   writeFileSync(join(root, 'dsh-client-ui-responsive/src/index.ts'), 'unexpected source rewrite')
   assert.throws(() => captureProjectOutputs(root, commit, inputs), /source changed during build/)
+}))
+
+test('rewriting source and its mutable input hash report cannot forge committed provenance', () => fixture(({ root, commit }) => {
+  const inputs = captureProjectInputs(root, commit)
+  const payload = 'export const value = "injected"\n'
+  writeFileSync(join(root, 'dsh-shell-termux/src/index.ts'), payload)
+  writeFileSync(join(root, 'dsh-shell-termux/lib/index.js'), payload)
+  inputs.components['dsh-shell-termux'].inputFiles['src/index.ts'] = sha256(Buffer.from(payload))
+  assert.throws(() => captureProjectOutputs(root, commit, inputs), /input provenance differs from project commit/)
+}))
+
+test('removing a modified source from the input report cannot hide it', () => fixture(({ root, commit }) => {
+  const inputs = captureProjectInputs(root, commit)
+  writeFileSync(join(root, 'dsh-shell-termux/src/index.ts'), 'injected source')
+  delete inputs.components['dsh-shell-termux'].inputFiles['src/index.ts']
+  assert.throws(() => captureProjectOutputs(root, commit, inputs), /input provenance differs from project commit/)
+}))
+
+test('source additions during build are rejected, including Git-ignored source names', () => fixture(({ root, commit }) => {
+  const inputs = captureProjectInputs(root, commit)
+  for (const name of ['added.ts', 'token-added.ts']) {
+    const path = join(root, 'dsh-client-ui-responsive/src', name)
+    writeFileSync(path, 'export const injected = true\n')
+    assert.throws(() => captureProjectOutputs(root, commit, inputs), /untracked component inputs/)
+    rmSync(path)
+  }
+}))
+
+test('staging an extra compiler input cannot hide it from the pinned commit check', () => fixture(({ root, commit }) => {
+  const inputs = captureProjectInputs(root, commit)
+  writeFileSync(join(root, 'dsh-shell-termux/src/staged.ts'), 'export const injected = true\n')
+  execFileSync('git', ['-C', root, 'add', 'dsh-shell-termux/src/staged.ts'])
+  assert.throws(() => captureProjectOutputs(root, commit, inputs), /untracked component inputs/)
+}))
+
+test('ignored compiler inputs are rejected before build and lock realization remains recorded', () => fixture(({ root, commit }) => {
+  const path = join(root, 'dsh-shell-termux/src/token-injected.ts')
+  writeFileSync(path, 'export const injected = true\n')
+  assert.throws(() => captureProjectInputs(root, commit), /untracked component inputs/)
+  rmSync(path)
+  const inputs = captureProjectInputs(root, commit)
+  const lock = '{"lockfileVersion":3,"packages":{"resolved":{}}}\n'
+  writeFileSync(join(root, 'dsh-shell-termux/package-lock.json'), lock)
+  const outputs = captureProjectOutputs(root, commit, inputs)
+  assert.equal(outputs.components['dsh-shell-termux'].resolvedLockSha256, sha256(Buffer.from(lock)))
+  assert.equal(outputs.components['dsh-shell-termux'].inputFiles['package-lock.json'], sha256(Buffer.from('{"lockfileVersion":3}\n')))
+}))
+
+test('forged component and repository identities are rejected at output capture', () => fixture(({ root, commit }) => {
+  for (const mutate of [
+    inputs => { inputs.sourceRepository = 'https://github.com/other/repository' },
+    inputs => { inputs.components['dsh-shell-termux'].packageVersion = '9.9.9' },
+  ]) {
+    const inputs = captureProjectInputs(root, commit)
+    mutate(inputs)
+    assert.throws(() => captureProjectOutputs(root, commit, inputs), /input provenance differs from project commit/)
+  }
+}))
+
+test('actual output CLI rejects forged source hashes without overwriting the input report', () => fixture(({ root, commit }) => {
+  const inputs = captureProjectInputs(root, commit)
+  const payload = 'export const value = "injected"\n'
+  writeFileSync(join(root, 'dsh-shell-termux/src/index.ts'), payload)
+  inputs.components['dsh-shell-termux'].inputFiles['src/index.ts'] = sha256(Buffer.from(payload))
+  const reportPath = join(root, 'inputs.json')
+  const before = JSON.stringify(inputs) + '\n'
+  writeFileSync(reportPath, before)
+  const result = spawnSync(process.execPath, [join(root, 'scripts/source-build/record-project-components.mjs'), 'outputs', reportPath], {
+    cwd: root, encoding: 'utf8', timeout: 10000, env: { ...process.env, GITHUB_SHA: commit, DSH_SOURCE_REPOSITORY: FIXTURE_REPOSITORY },
+  })
+  assert.notEqual(result.status, 0)
+  assert.match(result.stderr, /input provenance differs from project commit/)
+  assert.equal(readFileSync(reportPath, 'utf8'), before)
 }))
 
 test('actual source workflow verifies project components without an independent host checkout', { skip: process.platform !== 'linux' }, () => fixture(({ root, commit }) => {

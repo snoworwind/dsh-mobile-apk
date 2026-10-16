@@ -30,6 +30,8 @@ java -classpath gradle/wrapper/gradle-wrapper.jar org.gradle.wrapper.GradleWrapp
 
 三项目组件的来源证明改为本次 APK commit、原目录、包身份、逐文件 SHA-256 与真实输出 SHA-256；不再用独立 host 仓旧 pin 与当前 APK 副本硬比。目录、tgz 以及独立仓入口不变。完整外部消费者迁移仍待确认。
 
+组件来源证明在输入、输出阶段均从固定 Git 提交独立重建清单；可写报告不能作为最终输入哈希的信任根。新增源码、报告篡改、合法锁文件变化与实际 CLI 负控的复核命令和边界见 [gotchas.md](gotchas.md) 坑 336。宿主 npm 配置若在组件目录生成未登记缓存，须移至构建目录的专用缓存区并留移动证据，不加入源码白名单。
+
 开发期按 AGENTS §2.2 选择测试，文档生成块用 `node scripts/check-maintenance-docs.mjs --write` 更新，再不带参数检查；该维护提示不替代功能门禁。最终完整验收与发布资格仍由双 ABI、设备三层及覆盖升级证据决定。
 
 来源链产物的复核面固定在交付目录：APK 一份，加 `verify-source-apk.sh`、`SHA256SUMS.txt`、内嵌快照的归一化摘要，以及 workflow 上传清单同款的 `evidence/`。`bc6637f` 的 arm64 产物按此复核通过：APK 内 `assets/snapshot.tar.xz` 与打包门禁实际校验的那份快照逐字节相同（同一 SHA-256），解包重跑 `normalize-snapshot.mjs` 得到的语义摘要与链条记录一致，内嵌引擎为固定的 0.2.0-rc.2；「未取 LFS」的判据是隔离检出里 `base/*.tar.xz` 仍为 133 字节指针、APK 内无基座归档载荷，运行时由已验签的 Termux 仓库包组装。复核三签时必须显式 `--min-sdk-version 18`（默认按清单 minSdk 26 会把在场的 v1 报成 false，见 [gotchas.md](gotchas.md) 坑 325）；宿主 npm 缓存路径会在 WSL 内落成 `D:/` 目录，不参与注入（坑 326）。字节级可复现不成立，判据是语义归一化摘要；该产物未做设备验收。
