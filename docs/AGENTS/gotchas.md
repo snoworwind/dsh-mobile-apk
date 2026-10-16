@@ -2130,3 +2130,11 @@ spawnSync("node", ["--version"])               status=0  v24.18.0        ← 走
 **反证与证据**：把最终专项用例接到旧模块 `bc65a17`，Windows 下 17 例中 9 过、8 失败；新模块 17 例全过。真实 tarball 解包后运行 Node，自引用 exports 与 `#x` imports 在旧重打包后从 `safe` 变成 `other`，新实现保持 `safe`。覆盖二进制碰撞、严格解码、嵌套特殊字段、条件和自定义映射顺序、依赖映射正例、gzip 时间戳、真实 CLI 输出版本及拒绝时不生成报告。命令：`node --test scripts/source-build/normalize-snapshot.test.mjs`；全套为 `node --test scripts/source-build/*.test.mjs`：Windows 58 通过、0 失败、23 项 Linux 用例跳过，WSL 补跑 81 全过、0 跳过。执行地图、维护文档生成块及 `git diff --check` 通过。日志在 `.deploy-tmp/security-normalization-20261016/{negative-old,fixed-tests,all-source-tests,linux-source-tests,code-map,maintenance-docs}.log`。Git fixture 需要允许临时 `.git/config` 写入；沙箱下的权限失败不算测试结果。
 
 **边界**：本轮为构建链内部归一化修复，未构建 APK、未做设备验证；没有把旧包记为包含修复。旧 APK 的归一化证据待重算，最终来源包仍需按风险分档及候选要求验收。该摘要仅覆盖列出的规则与文件内容/链接目标，不提供对恶意构建进程的隔离，也不覆盖所有文件系统元数据。
+
+338. **字节相同不代表可运行：归一化摘要遗漏权限、空目录和特殊条目**
+
+**现象与真因**：继续沿快照复核边界测试，发现 `collectEntries` 只收文件和链接，不记 Unix mode、空目录，遇到 FIFO 等特殊条目直接跳过。WSL 反例中同一个 `run.sh` 从 0755 改为 0644 后，真实执行从输出 `safe` 变为 `EACCES`，旧摘要仍相同；0600/0644 的私有权限差异、创建空工作目录、加入 FIFO 也不改变旧摘要。这属于构建证明的漏检，不是对任意应用控制权限的漏洞结论。
+
+**修法**：文件与目录记 `mode & 07777`，目录本身入摘要而非只遍历子文件；FIFO、socket、设备节点等不支持的类型失败关闭。链接继续只记目标、不跟随；报告保留文件数量并另加 `entryCount`。报告版本升为 `normalizationVersion: 3`，v1/v2 不能与当前版直接比较，必须从原始快照重算。
+
+**证据**：`node --test scripts/source-build/normalize-snapshot.test.mjs` 在 WSL 20/20 通过、0 跳过，Windows 18 通过、2 项 Unix 用例跳过。将新用例接到 `1a93af6` 模块，WSL 16 过、4 失败（含报告版本），证明能捕获旧行为。命令、原始日志在 `.deploy-tmp/security-audit-20261016/normalization-{negative,linux,windows}.log`。L1 构建链内部改动，未构建 APK、未做设备验证；不覆盖属主、ACL、xattr 或恶意进程并发置换，不能据摘要宣称整个运行环境等价。

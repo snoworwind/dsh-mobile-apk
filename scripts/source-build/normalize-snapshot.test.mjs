@@ -7,7 +7,7 @@
 //      也一并抹平，那它就从防线变成了后门。
 import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -285,10 +285,50 @@ test('actual CLI versions its digest and rejects invalid manifest bytes without 
   const cli = () => spawnSync(process.execPath, [join(import.meta.dirname, 'normalize-snapshot.mjs'), root, '--out', output], { encoding: 'utf8', timeout: 10000 })
   try {
     assert.equal(cli().status, 0)
-    assert.equal(JSON.parse(readFileSync(output, 'utf8')).normalizationVersion, 2)
+    assert.equal(JSON.parse(readFileSync(output, 'utf8')).normalizationVersion, 3)
     rmSync(output)
     writeFileSync(join(root, 'package.json'), Buffer.from([0x80]))
     assert.notEqual(cli().status, 0)
     assert.equal(existsSync(output), false)
   } finally { rmSync(root, { recursive: true, force: true }); rmSync(reports, { recursive: true, force: true }) }
+})
+
+test('executable and private file mode changes cannot share a semantic digest', { skip: process.platform === 'win32' }, () => {
+  const root = fixture({ 'run.sh': '#!/bin/sh\nprintf safe\n' })
+  const file = join(root, 'run.sh')
+  try {
+    chmodSync(file, 0o755)
+    assert.equal(execFileSync(file, [], { encoding: 'utf8' }), 'safe')
+    const executable = normalizeSnapshot(root).normalizedManifestSha256
+    chmodSync(file, 0o644)
+    assert.equal(spawnSync(file).error?.code, 'EACCES')
+    const nonExecutable = normalizeSnapshot(root).normalizedManifestSha256
+    assert.notEqual(nonExecutable, executable)
+    chmodSync(file, 0o600)
+    assert.notEqual(normalizeSnapshot(root).normalizedManifestSha256, nonExecutable)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('empty directories and their access modes remain visible', () => {
+  const root = fixture({})
+  try {
+    const missing = normalizeSnapshot(root).normalizedManifestSha256
+    mkdirSync(join(root, 'workspace'))
+    const present = normalizeSnapshot(root)
+    assert.notEqual(present.normalizedManifestSha256, missing)
+    assert.equal(present.fileCount, 0)
+    assert.equal(present.entryCount, 1)
+    if (process.platform !== 'win32') {
+      chmodSync(join(root, 'workspace'), 0o700)
+      assert.notEqual(normalizeSnapshot(root).normalizedManifestSha256, present.normalizedManifestSha256)
+    }
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('unsupported FIFO entries fail closed instead of vanishing from evidence', { skip: process.platform !== 'linux' }, () => {
+  const root = fixture({})
+  try {
+    execFileSync('mkfifo', [join(root, 'fifo')])
+    assert.throws(() => normalizeSnapshot(root), /unsupported snapshot entry type/)
+  } finally { rmSync(root, { recursive: true, force: true }) }
 })

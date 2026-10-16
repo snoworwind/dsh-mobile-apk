@@ -259,7 +259,7 @@ export const RULES = [
 
 const norm = (p) => p.split(sep).join('/')
 
-/** 收集快照内全部条目：常规文件记内容，符号链接记**指向**（不跟随——链接目标变了是真差异）。 */
+/** 收集条目、Unix 权限及空目录；拒绝不能安全摘要的特殊文件。链接不跟随。 */
 export function collectEntries(root) {
   const entries = []
   const walk = (dir) => {
@@ -268,8 +268,12 @@ export function collectEntries(root) {
       const rel = norm(relative(root, full))
       const st = lstatSync(full)
       if (st.isSymbolicLink()) entries.push({ path: rel, kind: 'symlink', body: readlinkSync(full) })
-      else if (st.isDirectory()) walk(full)
-      else if (st.isFile()) entries.push({ path: rel, kind: 'file', body: readFileSync(full) })
+      else if (st.isDirectory()) {
+        entries.push({ path: rel, kind: 'directory', mode: st.mode & 0o7777 })
+        walk(full)
+      }
+      else if (st.isFile()) entries.push({ path: rel, kind: 'file', mode: st.mode & 0o7777, body: readFileSync(full) })
+      else throw new Error(`${rel}: unsupported snapshot entry type`)
     }
   }
   walk(root)
@@ -290,6 +294,10 @@ export function normalizeSnapshot(root) {
       manifest.push(`${entry.path}\0symlink\0${entry.body}`)
       continue
     }
+    if (entry.kind === 'directory') {
+      manifest.push(`${entry.path}\0directory\0${entry.mode.toString(8)}`)
+      continue
+    }
     let text
     let touched = false
     for (const rule of RULES) {
@@ -307,12 +315,13 @@ export function normalizeSnapshot(root) {
     if (touched && Buffer.from(text, 'utf8').includes(0)) {
       throw new Error(`${entry.path}: 被文本规则命中但内容是二进制——规则清单有误`)
     }
-    manifest.push(`${entry.path}\0${touched ? 'normalized' : 'raw'}\0${sha256(touched ? text : entry.body)}`)
+    manifest.push(`${entry.path}\0${touched ? 'normalized' : 'raw'}\0${entry.mode.toString(8)}\0${sha256(touched ? text : entry.body)}`)
   }
   manifest.sort()
   return {
-    normalizationVersion: 2,
-    fileCount: entries.length,
+    normalizationVersion: 3,
+    fileCount: entries.filter(entry => entry.kind !== 'directory').length,
+    entryCount: entries.length,
     normalizedManifestSha256: sha256(manifest.join('\n')),
     rules: RULES.map((rule) => ({
       id: rule.id,
