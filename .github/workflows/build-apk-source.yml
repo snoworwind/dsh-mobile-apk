@@ -10,6 +10,7 @@ permissions:
 jobs:
   build-arm64:
     runs-on: ubuntu-latest
+    timeout-minutes: 180
     env:
       DSH_APK_DIR: ${{ github.workspace }}
     steps:
@@ -863,4 +864,6 @@ jobs:
             scripts/patches/tests/fixtures/manifest.json
             scripts/patches/tests/fixtures/*-0.2.0-rc.2/**
           if-no-files-found: error
+          # Only explicitly listed evidence files below .deploy-tmp are uploaded.
+          include-hidden-files: true
           retention-days: 30

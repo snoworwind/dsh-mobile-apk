@@ -31,7 +31,7 @@ function bash(script, root, extra = {}) {
   return r
 }
 const linux = { skip: process.platform !== 'linux' }
-const buildYaml = readFileSync(join(ROOT, '.github/workflows/build-apk.yml'), 'utf8').replaceAll('\r\n', '\n')
+
 const pluginDirs = JSON.parse(readFileSync(join(ROOT, 'scripts/plugin-dirs.json'), 'utf8')).dirs
 const buildableDirs = pluginDirs.filter(d => JSON.parse(readFileSync(join(ROOT, d, 'package.json'), 'utf8')).scripts?.build)
 function preparePluginBuild(root) {
@@ -57,7 +57,7 @@ function preparePluginBuild(root) {
   chmodSync(join(root, 'bin/npm'), 0o755)
 }
 for (const [label, script] of [
-  ['normal', step('准备并构建插件（统一清单、锁解析与单次构建）', buildYaml)],
+
   ['source', step('Build project plugins from source')],
 ]) {
   test(label + ' plugin preparation: manifest order, one install and build per package', linux, () => fixture(root => {

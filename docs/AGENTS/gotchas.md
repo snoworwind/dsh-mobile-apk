@@ -2210,3 +2210,11 @@ spawnSync("node", ["--version"])               status=0  v24.18.0        ← 走
 **修法**：检查器在当前快照暂存根内解析请求路径的真实文件位置，并从归档读取该规范成员；解析目标必须留在暂存根内，读到的仍是归档字节。为保持补丁夹具与上游字节一致，在 `.gitattributes` 中对该生成夹具禁用行尾转换。回归夹具同时包含软链和 `.pnpm` 实文件，另保留旧 P1、缺成员和坏 tar 负控。
 
 **证据与边界**：WSL `node scripts/check-perf-instrumentation.test.mjs` 全部通过；`--self-test` 与 `check-code-map.mjs` 通过。修复版检查器对实际 ARM64 `snapshot.tar.xz` 检查 3/3 成员通过，两个出厂 profile 的 bundles 均为 2、死键为空。该问题是构建门禁误报，不代表应用快照缺包；设备验证尚未执行。
+
+346. **云端默认构建入口仍分流到旧 LFS 链，来源证据隐藏目录被默认排除（2026-10-17）**
+
+**现象与真因**：`build-apk.yml` 默认 `source_audit=false`，实际执行旧底座构建，文档却说已复用来源链；`build-apk-source.yml` 虽列举 `.deploy-tmp` 内来源证明，upload-artifact 默认排除隐藏文件，可能只收到 APK 而缺证据。
+
+**修法**：主入口仅无条件调用同提交的来源工作流，删除已无效的 ABI/suffix/审计开关；保留来源链现有 ARM64 能力。上传只对现有精确证据清单启用隐藏文件，未扩大为整个临时目录。使用说明见 build-and-env.md 的 GitHub Actions 来源构建入口。
+
+**验证与边界**：入口 YAML 回归包含旧构建 job 注入与条件调用负控；既有来源链 Bash 回归继续覆盖插件失败即停止。该 L1 改动未做设备验证，不宣称双 ABI、发布或设备验收已完成；云端执行结果以本次 Actions 记录为准。

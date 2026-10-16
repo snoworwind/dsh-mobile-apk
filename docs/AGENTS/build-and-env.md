@@ -218,3 +218,13 @@ Harness按固定0.2.0-rc.2源码完成全仓构建；prepare-harness-vendor-over
 ## Android SDK 许可资产
 
 `third-party-licenses.json` 除 dpkg 矩阵还登记 Shizuku api/provider/aidl/shared 13.1.5（官方固定版本 POM 的 MIT 许可）。`check-third-party.mjs` 校验实际 Gradle 版本与固定 MIT 文本 SHA256；本地和 portable 构建门禁从实际快照生成 notices，再将 `LICENSES/*.txt` 和 notices 复制到 `assets/licenses/`。缺文本、改文本、未登记版本或无法核实依赖必须拒打包；PR 与本地入口跑 `check-third-party.test.mjs`。最终包另需检查两个 ABI 的实际 assets，源码门禁不替代它。
+
+## GitHub Actions 来源构建入口（2026-10-17）
+
+本分支的 `build-apk` 与 `build-apk-source` 都运行同一条 ARM64 来源链，不再提供旧 LFS 底座构建选项。手动运行时必须选 `security/hardening`，默认分支 `main` 上的旧工作流不代表本分支。CLI：
+
+```bash
+gh workflow run build-apk.yml --repo snoworwind/dsh-mobile-apk --ref security/hardening
+```
+
+成功后从该次 Actions 的 Artifacts 下载 `dsh-mobile-apk-arm64-source-<commit>`，内含 APK、SHA-256 和列举的来源证明文件；上传显式包含隐藏目录内的证据，且不上传整个临时目录。当前仅 ARM64、版本后缀固定 `-source`，不支持 x86_64 或双 ABI，不创建 Release。云端任务上限 180 分钟，沿用来源链全部测试与产物门禁。入口回归为 `node --test scripts/source-build/cloud-workflow.test.mjs`，含旧链与条件分流的受控负控。该 L1 入口改动未做设备验证，云端成功也不等于设备验收通过。
