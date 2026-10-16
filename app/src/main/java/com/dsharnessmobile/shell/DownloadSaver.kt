@@ -21,12 +21,17 @@ internal const val SESSION_EXPORT_PATH = "/api/session.export"
 
 /** 命中判定：引擎源 + 会话导出路径 + GET（HEAD 是前端预检，不得触发跳转）。 */
 internal fun isSessionExport(url: String, method: String): Boolean {
-  return method == "GET" && isEngineSource(url) && url.contains(SESSION_EXPORT_PATH)
+  if (method != "GET" || !isEngineSource(url)) return false
+  return try {
+    java.net.URI(url).rawPath == SESSION_EXPORT_PATH
+  } catch (_: Exception) {
+    false
+  }
 }
 
 /**
- * 浏览器下载落盘（自 MainActivity 拆出）：会话日志导出（/api/session.export）与其余
- * 引擎源下载统一走 app 内下载（优先 Documents/dshdata/exports，未授权回退
+ * 浏览器下载落盘（自 MainActivity 拆出）：仅精确的会话日志导出（/api/session.export）
+ * 走 app 内下载（优先 Documents/dshdata/exports，未授权回退
  * MediaStore.Downloads）——浏览器导航带 Origin:null 会被 dsh 的 /api browser-trust
  * fence 拒绝（403），app 内 HttpURLConnection 无浏览器标记 → fence 放行（403 修复路径）。
  * 另承载引擎同源外链的系统浏览器打开（URL 分流的另一半）。
@@ -62,9 +67,9 @@ internal class DownloadSaver(private val activity: MainActivity, private val dsh
    * 通过 dsh 的 /api browser-trust fence（浏览器导航 403 的修复路径）。
    */
   fun downloadToDownloads(url: String, contentDisposition: String?) {
-    if (!isEngineSource(url)) {
-      activity.showTestNotification("下载被拒绝", "仅支持从本机引擎导出文件")
-      pushExportResult(false, "仅支持从本机引擎导出文件")
+    if (!isSessionExport(url, "GET")) {
+      activity.showTestNotification("下载被拒绝", "仅支持从本机引擎导出会话日志")
+      pushExportResult(false, "仅支持从本机引擎导出会话日志")
       return
     }
     if (!exportDownloading.compareAndSet(false, true)) return

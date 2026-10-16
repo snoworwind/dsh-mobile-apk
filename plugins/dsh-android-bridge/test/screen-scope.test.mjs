@@ -886,6 +886,50 @@ test('settings writes with user options and namespace resets never reach the pri
   }
 })
 
+test('package manager aliases and app-data mutation verbs never reach the privileged queue', async () => {
+  a11yOnlinePrefs()
+  useScope('all')
+  const deniedCommands = [
+    'pm clear com.example.target',
+    'cmd package clear com.example.target',
+    'cmd package --user 0 clear com.example.target',
+    'cmd package grant com.example.target android.permission.CAMERA',
+    'cmd package revoke com.example.target android.permission.CAMERA',
+    'cmd package install-existing com.example.target',
+    'cmd package install-commit 42',
+    'cmd package uninstall com.example.target',
+    'pm reset-permissions',
+    'cmd package set-permission-flags com.example.target android.permission.CAMERA user-set',
+    'pm clear-permission-flags com.example.target android.permission.CAMERA user-set',
+    'cmd package suspend com.example.target',
+    'pm hide com.example.target',
+    'cmd package disable-user --user 0 com.example.target',
+  ]
+  for (const [index, command] of deniedCommands.entries()) {
+    const queue = new ControlQueue()
+    const svc = service(queue)
+    const invoke = index % 3 === 0
+      ? () => svc.execAdbShell(command, { session: TEST_SESSION })
+      : index % 3 === 1
+        ? () => svc.execAdbLine(command, { session: TEST_SESSION })
+        : () => svc.controlExec('shExec', { command }, 500, { session: TEST_SESSION })
+    const result = invoke()
+    const unexpected = await takeNext(queue, 30)
+    if (unexpected !== null) queue.cancel('unexpected privileged dispatch')
+    assert.equal(unexpected, null, `${command} must be rejected before dispatch`)
+    assert.equal((await result).ok, false)
+  }
+  for (const command of ['pm list packages', 'cmd package list packages', 'cmd package path com.example.target']) {
+    const queue = new ControlQueue()
+    const svc = service(queue)
+    const result = svc.execAdbShell(command, { session: TEST_SESSION })
+    const request = await takeNext(queue)
+    assert.equal(request?.args.command, command, 'read-only package queries remain available')
+    queue.settle(request.reqId, { ok: true, data: { ok: true, stdout: '' } })
+    assert.equal((await result).ok, true)
+  }
+})
+
 test('fx2：调用者伪造内部标记不能通过公开执行入口', async () => {
   a11yOnlinePrefs()
   useScope('all')

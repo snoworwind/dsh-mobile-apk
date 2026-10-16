@@ -390,7 +390,8 @@ function looksDangerousAdb(command: string): boolean {
   const PATTERNS_ADB = [
     // settings accepts global --user options before its verb; reset is a namespace-wide write.
     /\bsettings\s+(?:--user\s+\S+\s+)*(put|delete|reset)\b/,
-    /\bpm\s+(grant|revoke|set-permission|uninstall|install|disable-user|enable)\b/,
+    // `pm` is a shell wrapper for `cmd package`; keep their state-changing verbs on one deny floor.
+    /\b(?:pm|cmd\s+package)\s+(?:--user(?:\s+\S+)?\s+)*(?:grant|revoke|clear|reset-permissions|(?:set|clear)-permission-flags|install(?:-[a-z0-9-]+)?|uninstall(?:-[a-z0-9-]+)?|disable-user|enable|disable|suspend|unsuspend|hide|unhide|set-[a-z0-9-]+)\b/,
     /\bappops\s+(set|reset)\b/,
     /\bcontent\s+(insert|update|delete)\b/,
     /\bsvc\b/,

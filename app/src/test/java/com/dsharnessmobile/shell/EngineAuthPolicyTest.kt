@@ -145,4 +145,16 @@ class EngineAuthPolicyTest {
     val minted = EngineAuth.mintedMaxAgeMs(engineMaxAgeMs)
     assertTrue("expiresAt - issuedAt <= engineMaxAge 才不会被引擎拒", minted <= engineMaxAgeMs)
   }
+
+  @Test
+  fun `session export accepts only the exact local endpoint path`() {
+    assertTrue(isSessionExport("http://127.0.0.1:3080/api/session.export?sessionId=abc", "GET"))
+    assertFalse(isSessionExport("http://127.0.0.1:3080/api/file?path=/private/key#/api/session.export", "GET"))
+    assertFalse(isSessionExport("http://127.0.0.1:3080/api/file?next=/api/session.export", "GET"))
+    assertFalse(isSessionExport("http://127.0.0.1:3080/api/session.export/extra", "GET"))
+    assertTrue(isSessionExport("http://127.0.0.1:3080/api/session.export#fragment", "GET"))
+    assertFalse(isSessionExport("http://127.0.0.1:3080/api/session.export", "POST"))
+    assertFalse(isSessionExport("http://127.0.0.1:30800/api/session.export", "GET"))
+    assertFalse(isSessionExport("http://user@127.0.0.1:3080/api/session.export", "GET"))
+  }
 }

@@ -5,6 +5,8 @@
 
 ## 当前入口
 
+- 包管理器别名/清数据漏检与子帧特权下载路由已按源码边界收紧，见 [gotchas.md](gotchas.md) 坑 343、344。代码及服务队列反证完成；**未做设备验证**。尤其是 `shouldOverrideUrlLoading` 的 WebView 子 frame/真实 gesture 事实，须等设备在线后核验，不能用 JVM 判据替代。
+
 - 主 WebView 子帧越权的源码修复与代码层反证已完成，见 [gotchas.md](gotchas.md) 坑 342。**未做设备验证**，不能声称恶意 HTML 的 Android 设备攻击复现/修复验收已完成；原生壳改动须来源链新包，不能热推代验。真实同源页面仍属受信面，预览 sandbox 必须继续保持 opaque。
 
 - settings 危险写操作的选项/reset 漏检已修，见 [gotchas.md](gotchas.md) 坑 341。代码层真实控制队列正反证通过；无在线设备，**未做设备验证**，即时 CDP/ADB 层仍阻塞，不构成候选验收。

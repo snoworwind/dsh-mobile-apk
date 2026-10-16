@@ -2184,3 +2184,21 @@ spawnSync("node", ["--version"])               status=0  v24.18.0        ← 走
 **证据**：WSL Java 17/Android SDK 的 `:app:testDebugUnitTest` 全量 1240/1240、0 跳过（含新增 MainFrameBridgeTest 8 项）；直接调用生产 AndroidBridge 验证错误 nonce 不能写屏幕范围或读取 picker token，正确 nonce 保留功能。临时禁用 constant-time nonce 比较时 8 项中 2 项失败，恢复源文件后重跑全量成功。`node --test scripts/tests/main-frame-bridge.test.mjs` 从生产 Kotlin 提取实际 bootstrap，7/7，覆盖 opaque/同源 child 不安装 facade、不可信顶层、同步值/重载、公开函数不泄 nonce、重复注入、导航后 origin 复查；VM 不等于 Android frame 验收。UI `npm run build` 成功，Node 22 同源码/测试副本完整套件 711/711、0 跳过；副本按真实仓库布局提供 vendor 输入。Windows Node 26 下原套件因 localStorage undefined 失败，原始日志保留，未弱化或跳过断言。桥对称、代码地图、Kotlin 注释、Manifest、安全 IO 与 Kotlin 数量门禁均通过。
 
 **证据入口与未验范围**：`.deploy-tmp/security-high-20261016/` 下 `kotlin-all.log`、`native-negative.log`、`frame-js-tests.log`、`ui-build.log`、`ui-all-tests.log`（Windows 原始失败）、`ui-all-tests-node22-final.log`、`ui-source-parity.txt` 与 `check-*.log`。当前 ADB 无设备、MuMu 16416/16384 无监听，见 `device-preflight.log`。按 AGENTS §4.2/§2.1，本改动即时 CDP/ADB 两层仍阻塞，**未做设备验证**、未构建新 APK，不具备候选验收结论。原生改动不能热推代验；后续只能从已提交 HEAD 经来源链构建，装机补做恶意 opaque 预览拒绝、可信顶层正常设置/返回与生命周期恢复的真实自主任务，并覆盖竖横屏及发布前 arm64。
+
+343. **包管理危险写操作可经 `cmd package` 别名与 `pm clear` 绕过（2026-10-16）**
+
+**现象与前提**：已有 `danger-full-access` 会话、ADB 特权通道和 `all` 屏幕范围时，危险操作开关关闭仍允许 `cmd package grant/revoke/install/uninstall` 与 `pm clear <package>` 入队；clear 可抹掉目标应用用户数据。测试替身证明服务端把这些原样派发为 `shExec`，未对设备执行。
+
+**真因**：过滤器识别了部分 `pm` 动词，也有独立且更窄的 `cmd package` 匹配；漏了两个命令入口同义且有破坏性的动词。Android AOSP `pm` 脚本把参数直接转交 `cmd package`，见 [AOSP pm wrapper](https://android.googlesource.com/platform/frameworks/base/+/61e5ff785d23/cmds/pm/pm)。
+
+**修法**：`pm` 和 `cmd package` 统一使用同一组拒绝动词，并覆盖用户选项、权限变更、安装/卸载、清数据、禁用/隐藏/挂起及其它 `set-*` 写面；`list`、`path` 等查询仍可用。共同执行点保留原会话与危险检查。
+
+**证据与边界**：真实生产 `AndroidPrivilegeService.execAdbShell → ControlQueue` 反例验证见 `.deploy-tmp/security-high-20261016/bridge-cmd-package-probe.log` 与 `bridge-pm-clear-probe.log`（不含设备执行）；新回归通过三个公开服务入口确认拒绝在入队前发生，并确认只读查询继续工作。shell 命令静态策略仍不是完整命令解释器沙箱。
+
+344. **子帧导航被提升为主页面，并可混淆原生会话下载路由（2026-10-16）**
+
+**现象与前提**：主 WebView 的 URL 拦截器未区分 main frame 与子 frame；子帧请求引擎同源 URL 时，壳会主动在同一个 WebView `loadUrl`，把导航提升到原生桥已授权的 top document。另 `isSessionExport` 用整个 URL 的 `contains` 判路由，查询串或 fragment 含 `/api/session.export` 的 `/api/file` 也会被作为会话导出。此时 DownloadSaver 经 `HttpURLConnection` 附带引擎 Cookie，绕过浏览器端的 Host/Origin 检查并将响应写入用户下载区。交互式恶意 HTML 预览是触发前提；反例确认的是路由/predicate 逻辑，未声称在真实 WebView 复现。
+
+**修法**：除 blob/data/about 预览文档外，子帧导航不再接管 top WebView 或打开外部应用；仅 main-frame 且带真实 gesture 的 GET 可触发会话导出。谓词现在逐段解析 URL，只接受精确引擎 origin 和完整 `/api/session.export` path；下载回调及保存函数再次校验同一白名单，其他 API 不经壳侧 Cookie 代理。
+
+**证据与边界**：Kotlin JVM 用例覆盖查询、fragment、path 前后缀、方法、端口和 userinfo；壳侧单测验证实际纯判据。设备暂不可用，Android WebView 的子 frame 导航回调与真实下载行为仍待 CDP/ADB 核验，不把静态谓词反例当设备利用证明。

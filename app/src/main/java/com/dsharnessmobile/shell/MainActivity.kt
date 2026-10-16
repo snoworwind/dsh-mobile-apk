@@ -861,11 +861,19 @@ class MainActivity : ComponentActivity() {
     webView.webViewClient = object : WebViewClient() {
       override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
         val url = request.url.toString()
+        // Untrusted HTML previews live in child frames. Never promote their navigation to the native-
+        // privileged top document or open an external app on their behalf. Blob/data preview contents
+        // remain renderable; network navigations in subframes are blocked.
+        if (!request.isForMainFrame) {
+          val scheme = request.url.scheme?.lowercase()
+          return scheme != "blob" && scheme != "data" && scheme != "about"
+        }
         // 会话日志导出（issue apk#6 + 403 修复）：浏览器导航带 Origin:null /
         // sec-fetch-site 标记，会被 dsh 的 /api browser-trust fence 拒绝
         // （403 forbidden，防 DNS rebinding/跨站）。改为 app 内下载：
         // HttpURLConnection 无浏览器标记 → fence 放行（MuMu 实测验证）。
         if (isSessionExport(url, request.method)) {
+          if (!request.hasGesture()) return true
           downloadSaver.downloadToDownloads(url, null)
           return true
         }
@@ -1017,10 +1025,9 @@ class MainActivity : ComponentActivity() {
         if (isEngineSource(url)) deliverRecoveryNotice()
       }
     }
-    // WebView 下载：会话日志导出与其余引擎源下载统一走 DownloadSaver（app 内
-    // 下载优先 Documents/dshdata/exports，未授权回退 MediaStore.Downloads）。
+    // WebView 下载：只接受精确的会话导出端点，其他响应不附带原生引擎 Cookie。
     webView.setDownloadListener { url, _userAgent, contentDisposition, _mimeType, _contentLength ->
-      downloadSaver.downloadToDownloads(url, contentDisposition)
+      if (isSessionExport(url, "GET")) downloadSaver.downloadToDownloads(url, contentDisposition)
     }
     webView.webChromeClient = object : WebChromeClient() {
       /**

@@ -19,7 +19,7 @@
 | GuideChrome.kt | 引导页控件句柄束（GuideChrome/GuideCallbacks 数据类，DsUi 消费方） | GuidePageRenderer、MainActivity、WatchdogV2、EngineService |
 | EngineStartFlow.kt / ForegroundPageRecoveryPolicy.kt | CAS generation/token启动所有权；前台页面generation与一次安静恢复，后台不运行freeze监控；销毁取消caller不取消共享root worker。0.14.8 P1：拿不到所有权时按 destroyed（不启动）/ running（boot-fail 留痕 + 有界等待后续跑）分开处置，不再静默丢弃 | MainActivity、GuidePageRenderer |
 | ConfigTransfer.kt | legacy 配置导入导出未挂载；同文件 DirectoryPickerController 的 SAF 注册仍在用；活动配置读写归 EngineManager→SnapshotUserData | MainActivity（仅选择器） |
-| DownloadSaver.kt | 引擎源下载落盘（exports 优先/MediaStore 回退）+ 外链系统浏览器打开 | MainActivity |
+| DownloadSaver.kt | 精确会话导出路由的应用内落盘（exports 优先/MediaStore 回退）+ 外链系统浏览器打开 | MainActivity；主 frame 且用户触发后下载 |
 | WebUiChrome.kt | 窗口 UI chrome：沉浸式/剪贴板/常亮/主题推送（真源统一走 ShellState） | MainActivity |
 | FileIncoming.kt | 外部来件（VIEW/SEND）校验净化→临时工作区→通知引擎；queued source 保留到浏览器草稿 claim 或 TTL | MainActivity、EngineService |
 | AndroidBridge.kt | `window.androidBridge` 同步业务方法声明（计数由 check-bridge-symmetry 守）；不直接挂到 WebView，由 MainFrameBridge 认证分派 | MainActivity、MainFrameBridge |
