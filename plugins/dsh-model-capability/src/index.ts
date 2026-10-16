@@ -22,6 +22,7 @@ import {
   canApplyReasoningEfforts,
   effortsFrom,
   normalizeReasoningEfforts,
+  providerDiagnostic,
   probePassive,
   probeOpenAICompletionsReasoningEfforts,
   probeResponsesReasoningEfforts,
@@ -178,7 +179,7 @@ let snapshotTried = false
  * 引擎 stdout（engine.log）轮转很快、只留极短尾部，自动补给的静默失败在真机上无法定位——
  * 这条文件轨迹是现场排障的唯一可靠面（不含任何凭据）。
  */
-function diag(message: string): void {
+function writeDiagnostic(message: string): void {
   if (process.env.DSH_MODEL_CAPABILITY_TRACE === '0') return
   try {
     const home = process.env.DSH_HOME ?? '/data/user/0/com.dsharnessmobile.shell/files/home/.dsh'
@@ -643,7 +644,18 @@ export function patchesFrom(report: ProbeReport): ModelPatch[] {
 export function apply(ctx: Context, config: PluginConfig = {}) {
   const c = ctx as unknown as CtxLike
   const settings = c.settings
-  const log = c.logger?.('dsh-model-capability')
+  const diagnosticConfigs = new Map<string, ProviderConfig>()
+  const safeDiagnostic = (message: string): string => {
+    for (const provider of diagnosticConfigs.values()) message = providerDiagnostic(message, provider)
+    return message
+  }
+  const diag = (message: string): void => writeDiagnostic(safeDiagnostic(message))
+  const rawLog = c.logger?.('dsh-model-capability')
+  const log = rawLog === undefined ? undefined : {
+    info: (message: string) => rawLog.info?.(safeDiagnostic(message)),
+    warn: (message: string) => rawLog.warn?.(safeDiagnostic(message)),
+    debug: (message: string) => rawLog.debug?.(safeDiagnostic(message)),
+  }
   // diag() 落在 $DSH_HOME/model-capability.log：引擎 stdout 轮转太快，写回被拒的真因只有这里留得住。
   const logWithTrace = log === undefined ? undefined : { ...log, trace: diag }
   const snapshot = loadCatalogSnapshot()
@@ -782,6 +794,7 @@ export function apply(ctx: Context, config: PluginConfig = {}) {
         // 凭据不可读不阻断被动探测（有些端点 /models 免鉴权）
       }
     }
+    diagnosticConfigs.set(route, config)
     return config
   }
 
@@ -996,10 +1009,10 @@ export function apply(ctx: Context, config: PluginConfig = {}) {
             const found = await discover(route, { offline: true, useCachedModelsDev: true, allowModelsDevNetwork: false }, section?.value)
             if (!found) continue
             const result = await applyModelPatch(settings, route, patchesFrom(found.report), logWithTrace)
-            filled.push({ route, wrote: result.wrote, reason: result.reason, changes: result.changes })
+            filled.push({ route, wrote: result.wrote, reason: safeDiagnostic(result.reason), changes: result.changes.map(safeDiagnostic) })
             diag('manual fill ' + route + ': wrote=' + String(result.wrote) + ' reason=' + result.reason + ' changes=' + JSON.stringify(result.changes))
           } catch (error) {
-            filled.push({ route, wrote: false, reason: (error as Error)?.message ?? String(error), changes: [] })
+            filled.push({ route, wrote: false, reason: safeDiagnostic((error as Error)?.message ?? String(error)), changes: [] })
             diag('manual fill ' + route + ' failed: ' + ((error as Error)?.message ?? String(error)))
           }
         }

@@ -12,7 +12,9 @@
 //   - 「仅改 apiKey / baseURL 而模型集合未变」不得触发任何能力补齐。
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { copyFileSync, existsSync, renameSync, rmSync } from 'node:fs'
+import { copyFileSync, existsSync, renameSync, rmSync, mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { readFileSync } from 'node:fs'
 import { apply } from '../lib/index.js'
 
@@ -139,6 +141,35 @@ const withModel = (route, model) => (s) => ({
 
 // 所有用例都在一个「已配置的非内置 provider」上跑：gateway 不在出货目录的任何条目里。
 const GATEWAY = 'my-custom-gateway'
+
+test('production discover does not log provider URL credentials or reflected fetch credentials', async (t) => {
+  const previousHome = process.env.DSH_HOME
+  const previousFetch = globalThis.fetch
+  const home = mkdtempSync(join(tmpdir(), 'dsh-credential-log-'))
+  process.env.DSH_HOME = home
+  t.after(() => {
+    globalThis.fetch = previousFetch
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+    rmSync(home, { recursive: true, force: true })
+  })
+  const secrets = ['log-user-secret', 'log-password-secret', 'query-secret /+', 'api-secret /+', 'custom-secret /+']
+  const baseURL = `https://${secrets[0]}:${secrets[1]}@example.test/v1?key=${encodeURIComponent(secrets[2])}`
+  const c = makeCtx({ [GATEWAY]: { baseURL, api: 'anthropic-messages', apiKey: secrets[3], headers: { 'x-custom-key': secrets[4] }, models: ['example-model'] } })
+  const tools = new Map()
+  c.ctx.tools.register = (tool) => tools.set(tool.name, tool)
+  globalThis.fetch = async () => { throw new Error(`invalid model ${baseURL} ${secrets.join(' ')} ${secrets.map(encodeURIComponent).join(' ')}`) }
+  apply(c.ctx, { autoApply: false, modelsDev: false })
+  t.after(() => c.dispose())
+  const result = await tools.get('model_capability_probe').execute({ provider: GATEWAY, source: 'endpoint' })
+  const diagnostic = readFileSync(join(home, 'model-capability.log'), 'utf8')
+  assert.ok(diagnostic.includes(`discover(${GATEWAY})`))
+  assert.ok(JSON.stringify(result).includes('invalid model'))
+  for (const secret of secrets.flatMap((value) => [value, encodeURIComponent(value)])) {
+    assert.equal(diagnostic.includes(secret), false, `log leaked ${secret}`)
+    assert.equal(JSON.stringify(result).includes(secret), false, `tool leaked ${secret}`)
+  }
+})
 
 // ── A1 正向：保存新模型 -> 补缺失能力 ────────────────────────────────────────
 test('A1 保存新模型：只针对该模型补缺失能力，且一次只写一轮', async (t) => {

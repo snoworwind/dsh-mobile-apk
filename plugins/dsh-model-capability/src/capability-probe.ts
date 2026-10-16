@@ -144,7 +144,7 @@ export interface FetchResponseLike {
 
 export type FetchLike = (
   url: string,
-  init?: { headers?: Record<string, string>; method?: string; body?: string; signal?: AbortSignal },
+  init?: { headers?: Record<string, string>; method?: string; body?: string; signal?: AbortSignal; redirect?: 'error' },
 ) => Promise<FetchResponseLike>
 
 const KNOWN_MODALITIES: Modality[] = ['text', 'image', 'audio', 'pdf']
@@ -313,20 +313,32 @@ export interface ProbeOptions {
   fetchImpl?: FetchLike
 }
 
+function endpointUrl(base: string, path: string): string {
+  try {
+    const parsed = new URL(base)
+    parsed.pathname = parsed.pathname.replace(/\/+$/, '') + path
+    return parsed.toString()
+  } catch { return base.replace(/\/+$/, '') + path }
+}
+
 function passiveEndpoints(config: ProviderConfig): string[] {
-  const base = config.baseURL.replace(/\/+$/, '')
   const api = (config.api ?? '').toLowerCase()
-  if (api.includes('ollama')) return [`${base}/api/tags`]
+  if (api.includes('ollama')) return [endpointUrl(config.baseURL, '/api/tags')]
   if (api.includes('google') || api.includes('gemini')) {
-    return [`${base}/models${config.apiKey ? `?key=${encodeURIComponent(config.apiKey)}` : ''}`]
+    return [endpointUrl(config.baseURL, '/models')]
   }
   // openai-completions / anthropic-messages / openrouter all answer GET /models.
-  return [`${base}/models`]
+  return [endpointUrl(config.baseURL, '/models')]
 }
 
 function authHeaders(config: ProviderConfig): Record<string, string> {
   const headers: Record<string, string> = { accept: 'application/json', ...(config.headers ?? {}) }
   const api = (config.api ?? '').toLowerCase()
+  // Keep Gemini credentials out of URL audit trails, proxy logs and error messages.
+  if (config.apiKey && (api.includes('google') || api.includes('gemini'))) {
+    headers['x-goog-api-key'] = config.apiKey
+    return headers
+  }
   if (config.apiKey && !Object.keys(headers).some((k) => k.toLowerCase() === 'authorization')) {
     if (api.includes('anthropic')) {
       headers['x-api-key'] = config.apiKey
@@ -338,6 +350,43 @@ function authHeaders(config: ProviderConfig): Record<string, string> {
   return headers
 }
 
+/** Scrub request credentials before diagnostics cross into tools, reports or logs. */
+export function diagnosticText(text: string, url: string, headers: Record<string, string>): string {
+  const secrets = new Set<string>()
+  let safeUrl = '[endpoint]'
+  try {
+    const parsed = new URL(url)
+    for (const value of [parsed.username, parsed.password, ...parsed.searchParams.values()]) {
+      if (value) { secrets.add(value); try { secrets.add(decodeURIComponent(value)) } catch { /* malformed encoding */ } }
+    }
+    parsed.username = ''; parsed.password = ''; parsed.search = ''; parsed.hash = ''
+    safeUrl = parsed.toString()
+  } catch { /* Invalid URLs must not echo potentially embedded credentials. */ }
+  let result = text.split(url).join(safeUrl)
+  for (const [name, value] of Object.entries(headers)) {
+    if (/^(accept|content-type|anthropic-version)$/i.test(name)) continue
+    if (value) {
+      secrets.add(value)
+      if (/^Bearer\s+/i.test(value)) secrets.add(value.replace(/^Bearer\s+/i, ''))
+    }
+  }
+  const forms = [...secrets].flatMap((value) => {
+    const encoded = [value]
+    for (const encode of [encodeURIComponent, encodeURI]) {
+      try { encoded.push(encode(value)) } catch { /* Lone surrogates still receive raw redaction. */ }
+    }
+    return encoded
+  })
+    .filter(Boolean).sort((a, b) => b.length - a.length)
+  for (const secret of forms) result = result.split(secret).join('[redacted]')
+  return result
+}
+
+/** Apply the same request-aware redaction to caller logs and error responses. */
+export function providerDiagnostic(text: string, config: ProviderConfig): string {
+  return diagnosticText(text, config.baseURL, authHeaders(config))
+}
+
 async function getJson(
   fetchImpl: FetchLike,
   url: string,
@@ -347,22 +396,25 @@ async function getJson(
 ): Promise<unknown | undefined> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
+  const safeUrl = diagnosticText(url, url, init.headers)
   try {
-    const response = await fetchImpl(url, { ...init, signal: controller.signal })
-    report.fetched.push(init.method === 'GET' ? url : `${url} (${init.method})`)
+    // Custom credential headers survive cross-origin fetch redirects. Only the
+    // configured endpoint is authorized to receive these credentials.
+    const response = await fetchImpl(url, { ...init, signal: controller.signal, redirect: 'error' })
+    report.fetched.push(init.method === 'GET' ? safeUrl : `${safeUrl} (${init.method})`)
     if (!response.ok) {
-      report.notes.push(`${init.method} ${url} -> HTTP ${response.status}`)
+      report.notes.push(`${init.method} ${safeUrl} -> HTTP ${response.status}`)
       return undefined
     }
     const text = await response.text()
     try {
       return JSON.parse(text)
     } catch {
-      report.notes.push(`${init.method} ${url} returned a non-JSON body`)
+      report.notes.push(`${init.method} ${safeUrl} returned a non-JSON body`)
       return undefined
     }
   } catch (error) {
-    report.notes.push(`${init.method} ${url} failed: ${(error as Error)?.message ?? String(error)}`)
+    report.notes.push(`${init.method} ${safeUrl} failed: ${diagnosticText((error as Error)?.message ?? String(error), url, init.headers)}`)
     return undefined
   } finally {
     clearTimeout(timer)
@@ -390,7 +442,7 @@ export async function probePassive(config: ProviderConfig, options: ProbeOptions
   for (const url of passiveEndpoints(config)) {
     const payload = await getJson(fetchImpl, url, { headers, method: 'GET' }, timeoutMs, report)
     if (payload === undefined) continue
-    const parsed = parseDescriptor(payload, url)
+    const parsed = parseDescriptor(payload, diagnosticText(url, url, headers))
     report.notes.push(...parsed.notes)
     for (const model of parsed.models) {
       const { id, reasoningEfforts, ...patch } = model
@@ -416,7 +468,7 @@ export async function probePassive(config: ProviderConfig, options: ProbeOptions
     const base = config.baseURL.replace(/\/+$/, '')
     for (const id of (config.models ?? []).slice(0, Math.max(0, maxRequests - report.fetched.length))) {
       const payload = await getJson(
-        fetchImpl, `${base}/api/show`, { headers, method: 'POST', body: JSON.stringify({ model: id }) }, timeoutMs, report,
+        fetchImpl, endpointUrl(base, '/api/show'), { headers, method: 'POST', body: JSON.stringify({ model: id }) }, timeoutMs, report,
       )
       if (payload === undefined) continue
       const parsed = parseOllamaShow(payload)
@@ -434,6 +486,7 @@ export async function probePassive(config: ProviderConfig, options: ProbeOptions
     const found = byId.get(id)
     return !found || Object.keys(found.sources).length === 0
   })
+  report.notes = report.notes.map((note) => diagnosticText(note, config.baseURL, headers))
   return report
 }
 
@@ -475,6 +528,7 @@ export async function probeReasoningEfforts(request: ActiveProbeRequest): Promis
   const fetchImpl = request.fetchImpl ?? (globalThis.fetch as unknown as FetchLike | undefined)
   const timeoutMs = request.timeoutMs ?? 20_000
   const result: ActiveProbeResult = { accepted: [], rejected: [], inconclusive: [], dropped: [] }
+  const diagnostic = (text: string): string => diagnosticText(text, request.url, request.headers)
   if (typeof fetchImpl !== 'function') {
     for (const level of request.levels) result.inconclusive.push({ level, reason: 'no fetch implementation available' })
     return result
@@ -484,14 +538,16 @@ export async function probeReasoningEfforts(request: ActiveProbeRequest): Promis
     const timer = setTimeout(() => controller.abort(), timeoutMs)
     try {
       const response = await fetchImpl(request.url, {
+        redirect: 'error',
         headers: request.headers,
         method: 'POST',
         body: JSON.stringify(request.negativeControlBody),
         signal: controller.signal,
       })
-      const body = await response.text().catch(() => '')
+      const rawBody = await response.text().catch(() => '')
+      const body = diagnostic(rawBody)
       const rejected = !response.ok && (response.status === 400 || response.status === 422)
-        && isReasoningEffortValidationError(body)
+        && isReasoningEffortValidationError(rawBody)
       result.negativeControl = {
         accepted: response.ok,
         status: response.status,
@@ -506,7 +562,7 @@ export async function probeReasoningEfforts(request: ActiveProbeRequest): Promis
         return result
       }
     } catch (error) {
-      result.negativeControl = { accepted: false, reason: (error as Error)?.message ?? String(error) }
+      result.negativeControl = { accepted: false, reason: diagnostic((error as Error)?.message ?? String(error)) }
       for (const level of request.levels) {
         result.inconclusive.push({ level, reason: 'negative control request failed; capability is unknown' })
       }
@@ -520,21 +576,23 @@ export async function probeReasoningEfforts(request: ActiveProbeRequest): Promis
     const timer = setTimeout(() => controller.abort(), timeoutMs)
     try {
       const response = await fetchImpl(request.url, {
+        redirect: 'error',
         headers: request.headers,
         method: 'POST',
         body: JSON.stringify(request.body(level)),
         signal: controller.signal,
       })
-      const body = await response.text().catch(() => '')
+      const rawBody = await response.text().catch(() => '')
+      const body = diagnostic(rawBody)
       if (response.ok) {
         result.accepted.push(level)
-      } else if ((response.status === 400 || response.status === 422) && isReasoningEffortValidationError(body)) {
+      } else if ((response.status === 400 || response.status === 422) && isReasoningEffortValidationError(rawBody)) {
         result.rejected.push({ level, status: response.status })
       } else {
         result.inconclusive.push({ level, status: response.status, reason: body.slice(0, 160) })
       }
     } catch (error) {
-      result.inconclusive.push({ level, reason: (error as Error)?.message ?? String(error) })
+      result.inconclusive.push({ level, reason: diagnostic((error as Error)?.message ?? String(error)) })
     } finally {
       clearTimeout(timer)
     }
@@ -564,7 +622,7 @@ export async function probeResponsesReasoningEfforts(
   }
   const base = config.baseURL.replace(/\/+$/, '')
   return probeReasoningEfforts({
-    url: `${base}/responses`,
+    url: endpointUrl(base, '/responses'),
     headers: { ...authHeaders(config), 'content-type': 'application/json' },
     levels: candidates,
     fetchImpl: options.fetchImpl,
@@ -612,7 +670,7 @@ export async function probeOpenAICompletionsReasoningEfforts(
     reasoning_effort: effort,
   })
   return probeReasoningEfforts({
-    url: `${base}/chat/completions`,
+    url: endpointUrl(base, '/chat/completions'),
     headers: { ...authHeaders(config), 'content-type': 'application/json' },
     levels: candidates,
     fetchImpl: options.fetchImpl,

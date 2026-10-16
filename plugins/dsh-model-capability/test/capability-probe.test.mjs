@@ -2,6 +2,7 @@
 // what the configured endpoint explicitly states — never a URL or model-name guess.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { createServer } from 'node:http'
 import {
   THINKING_LEVELS,
   effortsFrom,
@@ -12,6 +13,101 @@ import {
   probeReasoningEfforts,
 } from '../lib/capability-probe.js'
 import { providerFromSettings } from '../lib/settings-config.js'
+
+test('Gemini credentials use a header and never appear in the passive report', async () => {
+  let seen
+  const report = await probePassive({ route: 'gemini', api: 'google-generative-ai', baseURL: 'https://example.test/v1', apiKey: 'secret-gemini-key' }, {
+    fetchImpl: async (url, init) => {
+      seen = { url, init }
+      return jsonResponse({ models: [] })
+    },
+  })
+  assert.equal(seen.url, 'https://example.test/v1/models')
+  assert.equal(seen.init.headers['x-goog-api-key'], 'secret-gemini-key')
+  assert.equal(JSON.stringify(report).includes('secret-gemini-key'), false)
+})
+
+test('all probe diagnostics redact URL and header secrets while retaining useful errors', async () => {
+  const secrets = ['url-user-secret', 'url-password-secret', 'query-secret /+', 'header-secret /+', 'bearer-secret /+']
+  const baseURL = `https://${secrets[0]}:${secrets[1]}@example.test/v1?key=${encodeURIComponent(secrets[2])}`
+  const headers = { 'x-api-key': secrets[3], authorization: `Bearer ${secrets[4]}` }
+  const echoed = `invalid model: ${baseURL} ${secrets.join(' ')} ${secrets.map(encodeURIComponent).join(' ')}`
+  const assertSafe = (value) => {
+    const text = JSON.stringify(value)
+    for (const secret of secrets.flatMap((value) => [value, encodeURIComponent(value)])) assert.equal(text.includes(secret), false, secret)
+    assert.ok(text.includes('invalid model'))
+  }
+  const passiveError = await probePassive({ route: 'test', baseURL, headers }, { fetchImpl: async () => { throw new Error(echoed) } })
+  assertSafe(passiveError)
+  const passiveSuccess = await probePassive({ route: 'test', baseURL, headers }, { fetchImpl: async () => jsonResponse({ data: [{ id: 'example-model' }] }) })
+  for (const secret of secrets) assert.equal(JSON.stringify(passiveSuccess).includes(secret), false)
+  for (const negativeControlBody of [undefined, {}]) {
+    for (const throws of [true, false]) {
+      const result = await probeReasoningEfforts({ url: baseURL, headers, levels: ['low'], body: () => ({}), negativeControlBody,
+        fetchImpl: async () => { if (throws) throw new Error(echoed); return { ok: false, status: 400, text: async () => echoed } },
+      })
+      assertSafe(result)
+    }
+  }
+})
+
+test('malformed Unicode credentials cannot crash diagnostic redaction', async () => {
+  const secret = 'malformed-\ud800-secret'
+  const headers = { 'x-api-key': secret }
+  const fetchImpl = async () => { throw new Error(`invalid model: ${secret}`) }
+  const passive = await probePassive({ route: 'test', baseURL: 'https://example.test', headers }, { fetchImpl })
+  assert.ok(passive.notes.some((note) => note.includes('invalid model: [redacted]')))
+  assert.equal(JSON.stringify(passive).includes('malformed-'), false)
+  for (const negativeControlBody of [undefined, {}]) {
+    const active = await probeReasoningEfforts({ url: 'https://example.test/responses', headers, levels: ['low'], body: () => ({}), negativeControlBody, fetchImpl })
+    assert.equal(JSON.stringify(active).includes('malformed-'), false)
+    assert.ok(JSON.stringify(active).includes('invalid model: [redacted]'))
+  }
+})
+
+test('real fetch refuses redirect credential forwarding in passive and active probes', async (t) => {
+  const received = []
+  const listen = async (handler) => {
+    const server = createServer(handler)
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+    t.after(() => new Promise((resolve) => { server.closeAllConnections(); server.close(resolve) }))
+    return `http://127.0.0.1:${server.address().port}`
+  }
+  const target = await listen((req, res) => {
+    received.push(req.headers)
+    res.end(JSON.stringify({ data: [] }))
+  })
+  let destination = target + '/sink'
+  let successful = false
+  const origin = await listen((req, res) => {
+    if (successful) { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ data: [] })); return }
+    res.writeHead(307, { location: destination }); res.end()
+  })
+  for (const sameOrigin of [false, true]) {
+    destination = sameOrigin ? origin + '/sink' : target + '/sink'
+    for (const config of [
+      { api: 'anthropic-messages', apiKey: 'anthropic-secret' },
+      { api: 'google-generative-ai', apiKey: 'gemini-secret' },
+      { api: 'openai-completions', apiKey: 'bearer-secret', headers: { 'x-tenant-key': 'tenant-secret' } },
+      {},
+    ]) {
+      const report = await probePassive({ route: 'test', baseURL: origin, ...config })
+      assert.equal(report.fetched.length, 0)
+      assert.ok(report.notes.some((note) => note.includes('failed')))
+    }
+    const headers = { 'x-api-key': 'active-secret', 'x-tenant-key': 'tenant-secret' }
+    for (const negativeControlBody of [undefined, { invalid: true }]) {
+      const result = await probeReasoningEfforts({ url: origin + '/responses', headers, levels: ['low'], body: () => ({}), negativeControlBody })
+      assert.deepEqual(result.accepted, [])
+      assert.equal(result.inconclusive.length, 1)
+    }
+    assert.deepEqual(received, [])
+  }
+  successful = true
+  const normal = await probePassive({ route: 'test', baseURL: origin })
+  assert.equal(normal.fetched.length, 1)
+  assert.equal(normal.notes.some((note) => note.includes('failed')), false)
+})
 
 function jsonResponse(payload, status = 200) {
   return { ok: status >= 200 && status < 300, status, text: async () => JSON.stringify(payload) }

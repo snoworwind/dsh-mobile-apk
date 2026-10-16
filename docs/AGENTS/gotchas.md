@@ -2148,3 +2148,13 @@ spawnSync("node", ["--version"])               status=0  v24.18.0        ← 走
 **证据**：WSL `node --test scripts/source-build/local-source-workspace.test.mjs` 13/13；接到旧模块的完整负控 7 过、6 失败，含真实 runner 写出副作用，修复后执行步骤前拒绝且外部文件不变。现有 `cb8876a` 独立来源缓存只读调用扫描通过，未启动 workflow、未改缓存，防止误伤实际 pnpm/runtime 链接。证据在 `.deploy-tmp/security-audit-20261016/source-{fixed,negative,cache-readonly}.log`。最终来源套件 89/89、0 跳过，见同目录 `all-source-tests.log`。
 
 **边界**：L1 构建编排修复，未构建 APK、未做设备验证；不是通用恶意进程沙箱，不保证检查后并发置换、硬链接、显式外部工具缓存的隔离。新增宿主写树时须同步本扫描与负控。
+
+340. **模型能力探测默认重定向与诊断报告可泄漏请求凭据**
+
+**现象与真因**：`capability-probe.ts` 的被动 GET、主动探测正/负控均默认跟随 fetch 重定向，Anthropic `x-api-key` 和自定义凭据头可到达跨源跳转目标。Gemini 被动探测还把 apiKey 放 `?key=`，完整 URL 被写入 `ProbeReport.fetched/notes`，经工具或手动填充 API 返回。异常与服务端错误正文原样入 reason，也会暴露其回显的凭据；只有模型 id 的 descriptor 分支还会再次记录 endpoint。原字符串追加 `/models` 在 baseURL 有 query 时会把路径拼入 query。
+
+**修法**：所有主动/被动探测 fetch 设置 `redirect: 'error'`；Gemini 改用官方支持的 `x-goog-api-key` 请求头（https://ai.google.dev/api/）。用 URL.pathname 追加 API 路径，保留真实请求 query，诊断 URL 则删除 userinfo/query/hash。对本次请求的凭据头、Bearer token、URL 凭据及其编码形式，在异常、服务端错误和 descriptor notes 出口统一去敏；`apply()` 内将已解析 provider 的诊断配置交给共享出口，discover、manual/auto catch、writer trace 和 logger 均去敏，封住上层原样记录 baseURL 的旁路。判定 reasoning.effort 的证据仍用内存原文，去敏不改变正/负控结论。畸形 Unicode 编码失败保留 raw 去敏，避免诊断自身抛 URIError。需要跳转的提供商应配置最终 endpoint，本插件不再自动跟随。
+
+**证据**：隔离 WSL `npm test` 编译并运行插件完整套件 170/170、0 跳过；旧实现五个专项负控全部失败。真实双 HTTP 服务证明 same/cross-origin 跳转拒绝，目标无凭据请求；覆盖 Anthropic、Gemini、Bearer+custom、无密钥及主动正/负控，普通 200 仍成功。回显 URL/query/header、特殊编码、畸形 Unicode 与原有 `invalid model` 诊断回归通过。真实 `apply()` → 注册工具 execute → discover 在临时 DSH_HOME 落盘，日志与工具结果均无 raw/encoded 凭据。源码/测试输入与本仓逐字节一致，编译 JS 已同步核对；测试生成的最小 catalog JSON 已移出本仓 lib，防止误热推，正式目录快照仍由来源链 `gen-model-catalog.mjs` 从对应引擎生成。证据在 `.deploy-tmp/security-credentials-20261016/{test,negative-test,negative-build,restored-build}.log`、`final-copy-parity.log` 和 `source-output-sha256.txt`。
+
+**验收边界**：这是凭据出口与 runtime 行为修复，代码层与宿主真实 HTTP 反证已完成；即时 CDP/ADB 用户层因设备不可用而阻塞，不计通过。WSL `adb devices -l` 为空，Windows 16416/16384 端口未开放，原始前提见 `.deploy-tmp/security-audit-20261016/device-preflight.log`。未构建 APK、未热推、未做设备验证，不具备候选验收结论。待设备上线，按 `hot-push.mjs --plugin plugins/dsh-model-capability` 开发验收并补两方向真实自主任务；最终 APK 仍须来源链重建并重验。诊断去敏覆盖本次已知请求凭据，不宣称能发现任意未知秘密。
