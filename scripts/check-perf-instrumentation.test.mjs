@@ -2,7 +2,7 @@
 // check-perf-instrumentation.test.mjs — 真实 CLI 快照产物回归。
 // 用微型 ustar 档案覆盖旧 P1、当前 P1、缺成员、坏档案和 phase 输出签名缺项，
 // 避免每个负向用例都复制/解压完整 snapshot.tar.xz。
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, symlinkSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -22,20 +22,27 @@ const check = (label, ok, detail) => {
 
 // Write the small subset the CLI reads. USTAR is intentionally uncompressed so the test
 // exercises the real `tar -xO -f ... <member>` path without paying full snapshot decompression.
-function writeTar(path, files) {
+function writeTar(path, files, symlinks = {}) {
   const blocks = []
   const octal = (value, width) => value.toString(8).padStart(width - 1, '0') + '\0'
-  for (const [name, value] of Object.entries(files)) {
+  const append = (name, value, type = '0', link = '') => {
     const body = Buffer.from(value)
     const h = Buffer.alloc(512)
-    h.write(name, 0, 100, 'utf8')
+    const slash = name.lastIndexOf('/')
+    const leaf = slash >= 0 ? name.slice(slash + 1) : name
+    const prefix = slash >= 0 ? name.slice(0, slash) : ''
+    if (Buffer.byteLength(leaf) <= 100 && Buffer.byteLength(prefix) <= 155) {
+      h.write(leaf, 0, 100, 'utf8')
+      if (prefix) h.write(prefix, 345, 155, 'utf8')
+    } else h.write(name, 0, 100, 'utf8')
     h.write(octal(0o644, 8), 100, 8, 'ascii')
     h.write(octal(0, 8), 108, 8, 'ascii')
     h.write(octal(0, 8), 116, 8, 'ascii')
     h.write(octal(body.length, 12), 124, 12, 'ascii')
     h.write(octal(0, 12), 136, 12, 'ascii')
     h.fill(0x20, 148, 156)
-    h[156] = 0x30
+    h[156] = type.charCodeAt(0)
+    h.write(link, 157, 100, 'utf8')
     h.write('ustar\0', 257, 6, 'ascii')
     h.write('00', 263, 2, 'ascii')
     const checksum = h.reduce((sum, byte) => sum + byte, 0)
@@ -44,6 +51,8 @@ function writeTar(path, files) {
     const padding = (512 - (body.length % 512)) % 512
     if (padding) blocks.push(Buffer.alloc(padding))
   }
+  for (const [name, value] of Object.entries(files)) append(name, value)
+  for (const [name, link] of Object.entries(symlinks)) append(name, '', '2', link)
   blocks.push(Buffer.alloc(1024))
   writeFileSync(path, Buffer.concat(blocks))
 }
@@ -66,6 +75,18 @@ try {
   const currentTar = join(scratch, 'current-phase.tar')
   writeTar(currentTar, { ...profiles, [target]: currentText })
 
+  const linkedTar = join(scratch, 'linked-current-phase.tar')
+  const stagedRoot = join(scratch, 'stage', 'root')
+  const pnpmMember = 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/.pnpm/@deepseek-ai+dsh-client-modules@fixture/node_modules/@deepseek-ai/dsh-client-modules/lib/index.js'
+  const packageLink = 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-modules'
+  const stagedTarget = join(stagedRoot, ...pnpmMember.split('/'))
+  mkdirSync(dirname(stagedTarget), { recursive: true })
+  writeFileSync(stagedTarget, currentText)
+  const stagedLink = join(stagedRoot, ...packageLink.split('/'))
+  mkdirSync(dirname(stagedLink), { recursive: true })
+  symlinkSync('../.pnpm/@deepseek-ai+dsh-client-modules@fixture/node_modules/@deepseek-ai/dsh-client-modules', stagedLink, 'dir')
+  writeTar(linkedTar, { ...profiles, [pnpmMember]: currentText }, { [packageLink]: '../.pnpm/@deepseek-ai+dsh-client-modules@fixture/node_modules/@deepseek-ai/dsh-client-modules' })
+
   const oldTar = join(scratch, 'old-p1.tar')
   writeTar(oldTar, { ...profiles, [target]: [
     '/* dsh-mobile combo probe (P1) */',
@@ -85,6 +106,11 @@ try {
   const current = run(currentTar)
   check('完整当前 phase tar 经 --require 真 CLI 接受', current.status === 0,
     (current.stdout + current.stderr).trim().split('\n').slice(-3).join(' | '))
+
+  const linked = spawnSync(process.execPath,
+    [checker, '--require', '--snapshot', linkedTar, '--stage-root', stagedRoot, '--abi', 'x86_64'], { encoding: 'utf8' })
+  check('pnpm 包目录软链归档可解析到真实 .pnpm 文件并通过 phase 检查', linked.status === 0,
+    (linked.stdout + linked.stderr).trim().split('\n').slice(-3).join(' | '))
 
   const stale = run(oldTar)
   check('旧 P1/TOTAL tar 被真 CLI 拒绝并点名 phase 签名缺失', stale.status !== 0

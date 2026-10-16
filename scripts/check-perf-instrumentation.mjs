@@ -14,11 +14,11 @@
 //
 // 用法：node scripts/check-perf-instrumentation.mjs [--require] [--snapshot <tar>] [--abi <arm64|x86_64>]
 // 退出码：0 = 通过（SKIP 有计数）；1 = 失败。
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, statSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, statSync, realpathSync } from 'node:fs'
 import { TAR } from './lib/shell.mjs'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, relative, resolve, sep, isAbsolute } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -176,6 +176,23 @@ check('combo-probe-P1 源码包含完整 phase 诊断实现', sourceMissingPhase
 // ── 3. A1 出厂声明值对账（P-AC-01）─────────────────────────────────────────
 const autoTar = join(ROOT, '.deploy-tmp', 'snapshot-013', ABI, 'snapshot.tar.xz')
 const tarPath = argOf('snapshot') || (existsSync(autoTar) ? autoTar : null)
+const stageRootArg = argOf('stage-root')
+const archiveMemberFor = (member) => {
+  // pnpm stores package files under node_modules/.pnpm and exposes scoped packages
+  // through directory symlinks. Resolve that link in the just-built stage, then read
+  // the resolved regular-file member from the archive; extracting only the symlink
+  // path cannot make tar expose its target's file bytes.
+  const stageRoot = stageRootArg
+    ?? (tarPath && resolve(tarPath) === resolve(autoTar) ? join(ROOT, '.deploy-tmp', 'snapshot-013', ABI, 'stage', 'root') : null)
+  if (!stageRoot) return member
+  try {
+    const root = realpathSync(stageRoot)
+    const physical = realpathSync(join(root, ...member.split('/')))
+    const resolvedMember = relative(root, physical)
+    if (!resolvedMember || resolvedMember === '..' || resolvedMember.startsWith('..' + sep) || isAbsolute(resolvedMember)) return member
+    return resolvedMember.split(sep).join('/')
+  } catch { return member }
+}
 // ── P4（0.14.8 门禁优化）：一次解压取全部成员，不再「每成员一次 tar -xO」。──────────────
 //
 // 旧实现逐成员调 `tar -xO -f <tar> <member>`。**xz 不可随机寻址——取一个成员 = 全量解码一遍。**
@@ -195,11 +212,13 @@ const readManyFromTar = (tar, members) => {
   }
   const missing = members.filter((m) => !extractCache.members.has(m))
   if (missing.length > 0) {
+    const archiveMembers = new Map(missing.map((member) => [member, archiveMemberFor(member)]))
+    const uniqueArchiveMembers = [...new Set(archiveMembers.values())]
     try {
-      execFileSync(TAR, ['-xf', tar, '-C', extractCache.dir, '--', ...missing], { stdio: ['ignore', 'ignore', 'ignore'], maxBuffer: 64 * 1024 * 1024 })
+      execFileSync(TAR, ['-xf', tar, '-C', extractCache.dir, '--', ...uniqueArchiveMembers], { stdio: ['ignore', 'ignore', 'ignore'], maxBuffer: 64 * 1024 * 1024 })
     } catch { /* 缺席成员按缺失处理 */ }
     for (const m of missing) {
-      try { extractCache.members.set(m, readFileSync(join(extractCache.dir, ...m.split('/'))).toString('utf8')) }
+      try { extractCache.members.set(m, readFileSync(join(extractCache.dir, ...archiveMembers.get(m).split('/'))).toString('utf8')) }
       catch { extractCache.members.set(m, null) }
     }
   }

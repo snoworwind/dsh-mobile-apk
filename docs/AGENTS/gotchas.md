@@ -2202,3 +2202,11 @@ spawnSync("node", ["--version"])               status=0  v24.18.0        ← 走
 **修法**：除 blob/data/about 预览文档外，子帧导航不再接管 top WebView 或打开外部应用；仅 main-frame 且带真实 gesture 的 GET 可触发会话导出。谓词现在逐段解析 URL，只接受精确引擎 origin 和完整 `/api/session.export` path；下载回调及保存函数再次校验同一白名单，其他 API 不经壳侧 Cookie 代理。
 
 **证据与边界**：Kotlin JVM 用例覆盖查询、fragment、path 前后缀、方法、端口和 userinfo；壳侧单测验证实际纯判据。设备暂不可用，Android WebView 的子 frame 导航回调与真实下载行为仍待 CDP/ADB 核验，不把静态谓词反例当设备利用证明。
+
+345. **快照探针门禁未沿 pnpm 目录软链读取归档成员（2026-10-16）**
+
+**现象与真因**：ARM64 快照暂存树中 `dsh-client-modules/lib/index.js` 存在且带完整 phase 探针，但 `check-perf-instrumentation.mjs` 报目标成员缺席。pnpm 将包目录放在 `.pnpm`，scope 下路径是目录软链；GNU tar 按软链后的文件别名单独 `-xf` 时只提取别名项，不会跟随软链解出 `.pnpm` 中的真实文件，检查器因此读到缺席。另在 Windows 检出后运行 CLI 回归时，上游锚点夹具被 `core.autocrlf` 改成 CRLF，导致同一夹具无法命中补丁锚点。
+
+**修法**：检查器在当前快照暂存根内解析请求路径的真实文件位置，并从归档读取该规范成员；解析目标必须留在暂存根内，读到的仍是归档字节。为保持补丁夹具与上游字节一致，在 `.gitattributes` 中对该生成夹具禁用行尾转换。回归夹具同时包含软链和 `.pnpm` 实文件，另保留旧 P1、缺成员和坏 tar 负控。
+
+**证据与边界**：WSL `node scripts/check-perf-instrumentation.test.mjs` 全部通过；`--self-test` 与 `check-code-map.mjs` 通过。修复版检查器对实际 ARM64 `snapshot.tar.xz` 检查 3/3 成员通过，两个出厂 profile 的 bundles 均为 2、死键为空。该问题是构建门禁误报，不代表应用快照缺包；设备验证尚未执行。
