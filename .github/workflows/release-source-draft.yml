@@ -1,0 +1,82 @@
+name: release-source-draft
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: source-draft-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  branch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require the maintained source branch
+        env:
+          SOURCE_REF: ${{ github.ref }}
+        run: test "$SOURCE_REF" = refs/heads/security/hardening
+
+  build:
+    needs: branch
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build-apk-source.yml
+
+  prepare:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Download only this run's source artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dsh-mobile-apk-arm64-source-${{ github.sha }}
+          path: source-artifact
+      - name: Verify identity and package unchanged source artifacts
+        run: |
+          python3 -m unittest discover -s scripts/source-build -p 'test_prepare_source_release.py' -v
+          python3 scripts/source-build/prepare-source-release.py source-artifact release-assets
+      - uses: actions/upload-artifact@v4
+        with:
+          name: source-draft-assets-${{ github.sha }}
+          path: release-assets/*
+          if-no-files-found: error
+          retention-days: 30
+
+  draft:
+    needs: prepare
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # No checkout or build commands in the job holding the release token.
+      - uses: actions/download-artifact@v4
+        with:
+          name: source-draft-assets-${{ github.sha }}
+          path: release-assets
+      - name: Create an ARM64 prerelease draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SOURCE_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release-assets
+          sha256sum --check SHA256SUMS.txt
+          tag="hardening-source-${SOURCE_SHA:0:12}-${RUN_ID}-${RUN_ATTEMPT}"
+          gh release create "$tag" ./*.apk provenance.zip SHA256SUMS.txt notes.md \
+            --target "$SOURCE_SHA" --draft --prerelease \
+            --title "Hardening source ARM64 ${SOURCE_SHA:0:12}" \
+            --notes-file notes.md

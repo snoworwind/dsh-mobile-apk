@@ -101,7 +101,7 @@ adb install -r -t <apk>    # 同签名覆盖安装
 
 ## 构建
 
-本分支只允许来源链构建，不依赖协调仓，也不读取旧 LFS 底座归档。当前支持 ARM64，不创建 GitHub Release。
+本分支只允许来源链构建，不依赖协调仓，也不读取旧 LFS 底座归档。当前支持 ARM64，可手动选择构建成功后自动创建预发布草稿，见发布政策。
 
 ```bash
 # GitHub Actions：显式选择安全加固分支
@@ -110,7 +110,7 @@ gh workflow run build-apk-source.yml --repo snoworwind/dsh-mobile-apk --ref secu
 node scripts/source-build/run-local-source-chain.mjs
 ```
 
-云端完成后下载同次运行的 APK 与来源证明 artifact。本地环境、产物范围与检查命令见 [构建详档](docs/AGENTS/build-and-env.md#github-actions-来源构建入口2026-10-17)；交付边界见 [发布政策](docs/RELEASE.md#5-发布本分支不出-release2026-10-15-按用户决定)。构建通过不等于设备验收通过。
+云端完成后下载同次运行的 APK 与来源证明 artifact。本地环境、产物范围与检查命令见 [构建详档](docs/AGENTS/build-and-env.md#github-actions-来源构建入口2026-10-17)；交付边界见 [发布政策](docs/RELEASE.md#5-来源链预发布草稿2026-10-17-按用户决定)。构建通过不等于设备验收通过。
 
 ## 桥协议 v1（`window.androidBridge`）
 

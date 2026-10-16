@@ -29,7 +29,7 @@ DeepSeek Harness 的**安卓壳应用**（包名 `com.dsharnessmobile.shell`）�
 ## 2. 怎么建、怎么装、怎么验
 
 ```powershell
-# 在本仓触发云端来源链（当前 ARM64；不出 Release）：
+# 在本仓触发云端来源链（当前 ARM64；草稿发布见 docs/RELEASE.md §5）：
 gh workflow run build-apk-source.yml --repo snoworwind/dsh-mobile-apk --ref security/hardening
 # Linux / WSL 本地同链，仅构建已提交 HEAD，自动隔离检出：
 node scripts/source-build/run-local-source-chain.mjs

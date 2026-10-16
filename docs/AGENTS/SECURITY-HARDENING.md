@@ -14,14 +14,14 @@
 
 | 项 | 允许（来源链） | 禁止（本分支） |
 |---|---|---|
-| 云端入口 | `.github/workflows/build-apk-source.yml`（`build-apk.yml` 复用的就是它） | 任何 Release 发布链：`release.yml` 已按用户决定删除，**不得复活** |
+| 云端入口 | `.github/workflows/build-apk-source.yml`（`build-apk.yml` 复用的就是它） | 旧 LFS Release 链：`release.yml` 已删除，不得复活 |
 | 本地入口 | `node scripts/source-build/run-local-source-chain.mjs` | `pwsh -File scripts/build-apk-013.ps1 ...`、`scripts/build-release.ps1` |
 | 底座输入 | Termux 官方签名仓库 + 固定 bootstrap（逐 deb 哈希） | `base/*.tar.xz` LFS 归档 |
 | 产物要求 | 携带来源链 provenance，且 `sourceRepository` 必须等于**本次构建实际所在仓库** | 无 provenance、或 provenance 指向其他仓库的产物 |
 
-**发布面：按用户决定不建**（2026-10-15）。`release.yml` 与两个手工发布脚本已删除，本分支**不产出 GitHub Release**；需要分发时只能用来源链产物（APK + provenance 证据包 + 哈希）直接交付。恢复发布能力必须先改本条政策，并在来源链上重建发布面（双 ABI + 资产集 + 只读构建/独立写权限提升），见 [known-gaps.md](known-gaps.md)。
+**发布面（2026-10-17 用户更新决定）**：允许手动来源构建成功后自动创建 ARM64 预发布草稿，禁止自动公开；入口、权限隔离与资产要求以 [RELEASE.md §5](../RELEASE.md#5-来源链预发布草稿2026-10-17-按用户决定) 为准。旧 `release.yml` 和手工发布脚本不恢复，公开前须完成候选设备验收。
 
-**「独立」的含义（避免歧义）**：本分支的构建、验证都不需要 kelai141 名下任何仓库——来源链只取 `deepseek-ai/deepseek-harness`、Termux 官方签名仓、npm registry 与 Android SDK；**跨树镜像纪律已整体退役**（2026-10-15）：`check-patch-mirror.mjs` 只保留 registry↔IMPLS 自洽面，`check-release-gates.mjs` 的「两树同版」断言删除，`scripts/patches/**` 与各子仓副本在本分支内即权威，不再有「先合本仓镜像 PR、再合协调仓权威源 PR」这条要求。手工发布脚本（`upload-release.mjs` / `sync-release-notes.mjs`）与 `.github/workflows/release.yml` 均已删除，本分支不出 Release；残留的本地/协调仓链脚本（`build-apk-013.ps1` / `build-release.ps1`）禁止作为构建入口；`build-snapshot-013.mjs` 仍由来源链内部调用，不得独立运行它绕过来源校验。仍然保留、且**不构成依赖**的只有归属与出处类内容：`LICENSE` 的版权声明、`CODEOWNERS`、各 `package.json` 的 `repository` 字段、README 的生态链接，以及 `gotchas.md` / `changelog-archive.md` 的历史条目——这些记录的是事实来源，**不得改写成「我们的」**。
+**「独立」的含义（避免歧义）**：本分支的构建、验证都不需要 kelai141 名下任何仓库——来源链只取 `deepseek-ai/deepseek-harness`、Termux 官方签名仓、npm registry 与 Android SDK；**跨树镜像纪律已整体退役**（2026-10-15）：`check-patch-mirror.mjs` 只保留 registry↔IMPLS 自洽面，`check-release-gates.mjs` 的「两树同版」断言删除，`scripts/patches/**` 与各子仓副本在本分支内即权威，不再有「先合本仓镜像 PR、再合协调仓权威源 PR」这条要求。手工发布脚本（`upload-release.mjs` / `sync-release-notes.mjs`）与 `.github/workflows/release.yml` 均已删除；新草稿入口仅走来源链；残留的本地/协调仓链脚本（`build-apk-013.ps1` / `build-release.ps1`）禁止作为构建入口；`build-snapshot-013.mjs` 仍由来源链内部调用，不得独立运行它绕过来源校验。仍然保留、且**不构成依赖**的只有归属与出处类内容：`LICENSE` 的版权声明、`CODEOWNERS`、各 `package.json` 的 `repository` 字段、README 的生态链接，以及 `gotchas.md` / `changelog-archive.md` 的历史条目——这些记录的是事实来源，**不得改写成「我们的」**。
 
 ## 分支维护方式
 

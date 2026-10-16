@@ -4,16 +4,9 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 const read = name => readFileSync(new URL('../../.github/workflows/' + name, import.meta.url), 'utf8').replaceAll('\r\n', '\n')
 const entry = read('build-apk.yml')
-const expected = `name: build-apk
-on:
-  workflow_dispatch:
-permissions:
-  contents: read
-jobs:
-  source-build:
-    uses: ./.github/workflows/build-apk-source.yml`
+const expected = "name: build-apk\non:\n  workflow_dispatch:\n    inputs:\n      draft_release:\n        description: '源码构建成功后创建 ARM64 预发布草稿（不会公开）'\n        type: boolean\n        default: false\npermissions:\n  contents: read\njobs:\n  source-build:\n    if: ${{ !inputs.draft_release }}\n    uses: ./.github/workflows/build-apk-source.yml\n  source-draft:\n    if: ${{ inputs.draft_release }}\n    permissions:\n      contents: write\n    uses: ./.github/workflows/release-source-draft.yml"
 const check = text => assert.equal(text.split('\n').filter(line => line.trim() && !line.trimStart().startsWith('#')).join('\n').trim(), expected)
-test('cloud entry calls only the same-commit source workflow unconditionally', () => check(entry))
+test('cloud entry routes both modes exclusively through same-commit source workflows', () => check(entry))
 test('negative control: additional legacy job is rejected', () => {
   assert.throws(() => check(entry + '\n  legacy:\n    runs-on: ubuntu-latest\n'), assert.AssertionError)
 })
@@ -29,4 +22,19 @@ test('source workflow uploads explicitly listed hidden provenance with APK', () 
   assert.match(upload, /^            \.deploy-tmp\/source-build\/project-component-provenance.json$/m)
   assert.match(upload, /^            \.deploy-tmp\/source-build\/apk-sha256.txt$/m)
   assert.doesNotMatch(upload, /^            \.deploy-tmp\/\*\*$/m)
+})
+
+test('draft workflow builds read-only and publishes only this run artifacts as a draft', () => {
+  const workflow = read('release-source-draft.yml')
+  assert.match(workflow, /SOURCE_REF: \$\{\{ github.ref \}\}/)
+  assert.match(workflow, /test "\$SOURCE_REF" = refs\/heads\/security\/hardening/)
+  const build = workflow.split('  build:')[1].split('  prepare:')[0]
+  assert.match(build, /contents: read/)
+  assert.match(build, /uses: \.\/\.github\/workflows\/build-apk-source.yml/)
+  const draft = workflow.split('  draft:')[1]
+  assert.match(draft, /needs: prepare/)
+  assert.match(draft, /contents: write/)
+  assert.match(draft, /--target "\$SOURCE_SHA" --draft --prerelease/)
+  assert.doesNotMatch(draft, /actions\/checkout|build-apk\.mjs|npm |gradle /)
+  assert.doesNotMatch(workflow, /run-id:|repository:|workflow_run:|\n  push:/)
 })

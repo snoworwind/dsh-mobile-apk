@@ -2226,3 +2226,11 @@ spawnSync("node", ["--version"])               status=0  v24.18.0        ← 走
 **现象与真因**：Actions run `38935337988` 在来源链预检中 120 项测试通过 119 项；夹具期望 `fixture/fork`，实际拿到 `snoworwind/dsh-mobile-apk`。来源解析按 DSH_SOURCE_REPOSITORY、GitHub 环境、git origin 优先级工作，测试仅配置临时 origin，未隔离 runner 自带的 GITHUB_REPOSITORY；本地没有该变量所以未复现。
 
 **修法与证据**：仅在同步测试夹具生命周期设置并恢复 DSH_SOURCE_REPOSITORY，子 CLI 一并继承夹具身份；生产来源解析和拒绝伪造的判据不变。新增外层覆盖恢复用例；用 GITHUB_REPOSITORY=snoworwind/dsh-mobile-apk 与 GITHUB_SERVER_URL=https://github.com 执行与云端相同的完整 Node 预检，保留伪造输入、错误仓库与缺失 origin 的负控。日志在 `.deploy-tmp/actions-source-ci-env/`。本 L1 测试修复未做设备验证。
+
+348. **来源链 artifact 转为 Release 资产必须保留隐藏证据与同 run 身份（2026-10-17）**
+
+**问题与原因**：草稿发布若只匹配 APK 或跨 run 下载，可能发布与源码提交不对应的包；来源证明位于 `.deploy-tmp`，仅复制可见文件又会丢失复核资料。
+
+**实现**：新增手动来源草稿工作流，仅接收 `security/hardening`，构建继续复用来源链。只读准备阶段按源码工作流上传清单逐项验证证据存在，核对仓库、提交、APK 数量/ARM64 名称及哈希；证据压缩保留相对路径。独立写权限 job 不检出源码，只复核资产哈希并以 `--draft --prerelease --target <同提交>` 创建草稿。run/attempt 参与标签，重跑不覆盖既有资产。公开前设备验收责任见 RELEASE.md §5。
+
+**证据与边界**：WSL Python 8/8 与来源 Node 93/93 通过；生产发布 shell 用 gh 记录替身确认 draft/prerelease/target 参数，篡改 APK 后在调用 gh 前失败。缺证据、错仓库/提交/分支负控均拒绝。actionlint 1.7.12 校验三个来源工作流通过；维护文档与执行地图检查通过。未做设备验证，测试没有创建真实 Release，首次云端草稿仍需以运行结果确认。
