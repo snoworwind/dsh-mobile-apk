@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Validate this run's source artifact and package evidence; never rebuild APKs."""
 import hashlib
+import glob
 import json
 import os
 from pathlib import Path
@@ -29,7 +30,11 @@ def prepare(source, output, env):
     upload = workflow.split('      - name: Upload APK and provenance\n', 1)[1]
     paths = upload.split('          path: |\n', 1)[1].split('          if-no-files-found:', 1)[0]
     for pattern in (line.strip() for line in paths.splitlines() if line.strip()):
-        if not any(p.is_file() for p in source.glob(pattern)):
+        # upload-artifact globs include directory contents recursively. pathlib.glob's
+        # `**` behavior differs when the intermediate wildcard matches directories,
+        # so use glob's explicit recursive mode and require an actual file match.
+        matches = glob.glob(str(source / pattern), recursive=True)
+        if not any(Path(match).is_file() for match in matches):
             raise ValueError('missing evidence: ' + pattern)
     evidence = source / '.deploy-tmp/source-build'
     if (evidence / 'project-source-commit.txt').read_text().strip() != sha:

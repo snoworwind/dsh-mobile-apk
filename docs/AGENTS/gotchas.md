@@ -2234,3 +2234,9 @@ spawnSync("node", ["--version"])               status=0  v24.18.0        ← 走
 **实现**：新增手动来源草稿工作流，仅接收 `security/hardening`，构建继续复用来源链。只读准备阶段按源码工作流上传清单逐项验证证据存在，核对仓库、提交、APK 数量/ARM64 名称及哈希；证据压缩保留相对路径。独立写权限 job 不检出源码，只复核资产哈希并以 `--draft --prerelease --target <同提交>` 创建草稿。run/attempt 参与标签，重跑不覆盖既有资产。公开前设备验收责任见 RELEASE.md §5。
 
 **证据与边界**：WSL Python 8/8 与来源 Node 93/93 通过；生产发布 shell 用 gh 记录替身确认 draft/prerelease/target 参数，篡改 APK 后在调用 gh 前失败。缺证据、错仓库/提交/分支负控均拒绝。actionlint 1.7.12 校验三个来源工作流通过；维护文档与执行地图检查通过。未做设备验证，测试没有创建真实 Release，首次云端草稿仍需以运行结果确认。
+
+349. **预发布来源证据目录通配符在 Linux runner 判缺失（2026-10-17）**
+
+**现象与真因**：草稿流程 build job 在来源链 Python 预检处报 `missing evidence: scripts/patches/tests/fixtures/*-0.2.0-rc.2/**`，来源 APK 尚未开始构建。校验器用 `pathlib.Path.glob` 解释 Actions 上传清单的递归目录模式，但它对中间通配符目录与 `**` 的组合未按 Actions 的目录内容语义匹配。
+
+**修法**：改为 Python `glob.glob(..., recursive=True)`，并仍要求匹配项至少包含一个实际文件；固定文件证据逐项检查不变。WSL Linux 与 Actions 同命令的 Python 8/8、Node 93/93 通过，涵盖缺证据拒绝和成功打包全项隐藏证据。首次 run 38937039856 失败无 APK/Release；修复后的首次重跑仍以 Actions 验证为准。
