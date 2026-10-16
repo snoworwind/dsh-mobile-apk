@@ -21,7 +21,7 @@
 
 **发布面：按用户决定不建**（2026-10-15）。`release.yml` 与两个手工发布脚本已删除，本分支**不产出 GitHub Release**；需要分发时只能用来源链产物（APK + provenance 证据包 + 哈希）直接交付。恢复发布能力必须先改本条政策，并在来源链上重建发布面（双 ABI + 资产集 + 只读构建/独立写权限提升），见 [known-gaps.md](known-gaps.md)。
 
-**「独立」的含义（避免歧义）**：本分支的构建、验证都不需要 kelai141 名下任何仓库——来源链只取 `deepseek-ai/deepseek-harness`、Termux 官方签名仓、npm registry 与 Android SDK；**跨树镜像纪律已整体退役**（2026-10-15）：`check-patch-mirror.mjs` 只保留 registry↔IMPLS 自洽面，`check-release-gates.mjs` 的「两树同版」断言删除，`scripts/patches/**` 与各子仓副本在本分支内即权威，不再有「先合本仓镜像 PR、再合协调仓权威源 PR」这条要求。手工发布脚本（`upload-release.mjs` / `sync-release-notes.mjs`）与 `.github/workflows/release.yml` 均已删除，本分支不出 Release；残留的本地/协调仓链脚本（`build-apk-013.ps1` / `build-release.ps1` / `build-snapshot-013.mjs`）已被铁律 9 禁用，属死字节、不构成依赖。仍然保留、且**不构成依赖**的只有归属与出处类内容：`LICENSE` 的版权声明、`CODEOWNERS`、各 `package.json` 的 `repository` 字段、README 的生态链接，以及 `gotchas.md` / `changelog-archive.md` 的历史条目——这些记录的是事实来源，**不得改写成「我们的」**。
+**「独立」的含义（避免歧义）**：本分支的构建、验证都不需要 kelai141 名下任何仓库——来源链只取 `deepseek-ai/deepseek-harness`、Termux 官方签名仓、npm registry 与 Android SDK；**跨树镜像纪律已整体退役**（2026-10-15）：`check-patch-mirror.mjs` 只保留 registry↔IMPLS 自洽面，`check-release-gates.mjs` 的「两树同版」断言删除，`scripts/patches/**` 与各子仓副本在本分支内即权威，不再有「先合本仓镜像 PR、再合协调仓权威源 PR」这条要求。手工发布脚本（`upload-release.mjs` / `sync-release-notes.mjs`）与 `.github/workflows/release.yml` 均已删除，本分支不出 Release；残留的本地/协调仓链脚本（`build-apk-013.ps1` / `build-release.ps1`）禁止作为构建入口；`build-snapshot-013.mjs` 仍由来源链内部调用，不得独立运行它绕过来源校验。仍然保留、且**不构成依赖**的只有归属与出处类内容：`LICENSE` 的版权声明、`CODEOWNERS`、各 `package.json` 的 `repository` 字段、README 的生态链接，以及 `gotchas.md` / `changelog-archive.md` 的历史条目——这些记录的是事实来源，**不得改写成「我们的」**。
 
 ## 分支维护方式
 
@@ -84,7 +84,7 @@
 
 可重复执行的编译与静态检查入口（命令不包含测试）：
 
-前置：三条 `run build` 需要各目录先装依赖（各目录 `npm ci`；Windows 侧按 [build-and-env.md](build-and-env.md) 用已配 npmmirror 源的 `npm install`）。八条 `node scripts/check-*.mjs` 不读 `node_modules`，本仓单树即可跑（本机实测 exit 0）；`check-release-gates.mjs` 是跨仓接线断言，需要协调仓树在场（本机两树同版时实测 exit 0），只有单树时会以「树定位失败」退出 1。
+前置：三条 `run build` 需要各目录先装依赖（各目录 `npm ci`；Windows 侧按 [build-and-env.md](build-and-env.md) 用已配 npmmirror 源的 `npm install`）。八条 `node scripts/check-*.mjs` 不读 `node_modules`，本仓单树即可跑（本机实测 exit 0）；`check-release-gates.mjs` 的跨树镜像层已退役，当前本仓即可执行静态接线检查；需要运行时产物的门禁仍需对应输入。
 
 ```powershell
 # Windows（PowerShell）
@@ -109,7 +109,7 @@ node scripts/check-tool-name-promises.mjs
 node scripts/check-manifest-hardening.mjs
 node scripts/check-code-map.mjs
 node scripts/check-maintenance-docs.mjs
-node scripts/check-release-gates.mjs         # 聚合入口：静态接线断言（需协调仓树在场）
+node scripts/check-release-gates.mjs         # 聚合入口：静态接线断言（本仓）
 node scripts/check-release-gates.mjs --list  # 现数门禁集合及「仅构建/发布」标注
 ```
 

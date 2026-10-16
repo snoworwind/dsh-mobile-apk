@@ -42,22 +42,20 @@ java -classpath gradle/wrapper/gradle-wrapper.jar org.gradle.wrapper.GradleWrapp
 
 > grep 用法：`grep -n "门禁\|Fast\|abi" docs/AGENTS/build-and-env.md`。
 >
-> **当前 0.14.5 重构真值**：本轮目标、GitHub Issue 与用户反馈台账、构建/设备证据统一见[重构计划](../../../docs/REFACTOR-2026-10-05.md)。项目地图与更新协议见 `AGENTS.md`；本页只维护构建、验证和环境事实。
+> **当前分支入口**：分支政策见 [SECURITY-HARDENING.md](SECURITY-HARDENING.md)，阶段记录见 [changelog-archive.md](changelog-archive.md)。本页只维护构建、验证和环境事实。
 
 ## 2. 构建与验证命令
 
-```powershell
-# 一键双 ABI（协调仓库根；快照→注入→门禁→gradle→out/）：
-pwsh -File scripts\build-apk-013.ps1 -Suffix ""          # 产物 out\v<版本>\dsh-mobile-apk-v<ver>-<abi>.apk
-# dev 快速档（单 ABI 缺省 x86_64 + 注入 preset 1；产物仅 dev 装机，禁发布资产）：
-pwsh -File scripts\build-apk-013.ps1 -Fast
-# 快照（Termux 源 + TARGETS 预装（scripts/snapshot-config/preinstall.json）+ licenses + pnpm 装配 + 瘦身 + 按 `DSH_CPU_THREADS` 上限归档）：
-node scripts\build-snapshot-013.mjs <arm64|x86_64>
-# 插件单测/冒烟：
-node scripts\smoke-bridge.mjs                             # bridge 冒烟（现 22 断言，grep -c assert 现数）
-cd ..\dsh-client-ui-responsive && npm test && npm run build
-cd ..\plugins\dsh-android-<pkg> && npm run build
+```bash
+# 云端源码构建，明确指定分支：
+gh workflow run build-apk-source.yml --repo snoworwind/dsh-mobile-apk --ref security/hardening
+# Linux / WSL 本地同链，当前仅 ARM64，构建已提交 HEAD：
+node scripts/source-build/run-local-source-chain.mjs
+# 插件冒烟（不生成 APK）：
+node scripts/smoke-bridge.mjs
 ```
+
+当前来源链调用快照/打包脚本作为内部步骤；不得绕过来源链直接用这些脚本生成 APK。详细入口与产物说明见文末。
 
 > **多线程/并行优先铁律（2026-09-08 用户定例，改任何构建脚本都适用）**：编译、构建、打包、归档、解压**一律使用多线程脚本**，不得用单线程等价命令替代——目的就是省掉一切可以省掉的构建时间。现行落点：
 > - 快照归档 `tar -c ... | xz -T8 -6`（默认 8 线程，由 `DSH_CPU_THREADS` 覆写）（多线程压缩；裸 `tar -cJf` 单线程 ≈380s vs 多线程 `xz` ≈48s，2c 实测）；
@@ -67,7 +65,7 @@ cd ..\plugins\dsh-android-<pkg> && npm run build
 > - 门禁脚本能用流式并行就用（Python 侧 `tarfile` 单遍流式，勿反复解压同一归档）。
 > 新增构建步骤若只能单线程，必须在脚本注释里写明原因（例：9p 写带宽是瓶颈，并行无收益）。
 
-**门禁（build-apk-013.ps1 内）**：聚合入口 `scripts/check-release-gates.mjs`（`--list` 现数，不维护数量；接进本地链 / 云端 `build-apk.mjs` / 两仓 CI / 发布链 `build-release.ps1`，发布链 `--run --require` 要求 SKIP=0）。内容 = vendor 统一补丁（`scripts/patches/apply-patches.mjs`：活动 vendor 项由 registry.json 驱动，完整清单见 RUNTIME-PATCHES.md §6.1；market-A/C 已退役，undo S1/S2 在活动清单内，勿加 Select-First）→ 快照单 pass 注入（`inject-all.py`，补齐 + 修剪双向对齐）→ 注入产物完整性（`check-inject-completeness.mjs`）→ 挂载集（`check-patch-mounts.mjs`）→ 机密（`check-snapshot-secrets.mjs`）→ 第三方合规（`check-third-party.mjs`）→ 路由鉴权（`check-api-route-auth.mjs`）→ 工具 schema / 控制 op / 状态登记 / 桥对称 / 门禁 SKIP / 性能插桩 / Kotlin 注释 / 构建链中止 / strip no-op → 运行时资产（`check-runtime-assets.mjs`）→ 快照指纹（`check-snapshot-fingerprint.mjs`）→ elf-check → 许可资产拷贝（LICENSES → assets/licenses）→ gradle。
+**门禁（历史本地链说明，当前以来源链实际调用为准）**：聚合入口 `scripts/check-release-gates.mjs`（`--list` 现数，不维护数量；接进本地链 / 云端 `build-apk.mjs` / 两仓 CI / 发布链 `build-release.ps1`，发布链 `--run --require` 要求 SKIP=0）。内容 = vendor 统一补丁（`scripts/patches/apply-patches.mjs`：活动 vendor 项由 registry.json 驱动，完整清单见 RUNTIME-PATCHES.md §6.1；market-A/C 已退役，undo S1/S2 在活动清单内，勿加 Select-First）→ 快照单 pass 注入（`inject-all.py`，补齐 + 修剪双向对齐）→ 注入产物完整性（`check-inject-completeness.mjs`）→ 挂载集（`check-patch-mounts.mjs`）→ 机密（`check-snapshot-secrets.mjs`）→ 第三方合规（`check-third-party.mjs`）→ 路由鉴权（`check-api-route-auth.mjs`）→ 工具 schema / 控制 op / 状态登记 / 桥对称 / 门禁 SKIP / 性能插桩 / Kotlin 注释 / 构建链中止 / strip no-op → 运行时资产（`check-runtime-assets.mjs`）→ 快照指纹（`check-snapshot-fingerprint.mjs`）→ elf-check → 许可资产拷贝（LICENSES → assets/licenses）→ gradle。
 
 **内嵌快照可解压门禁（0.14.7 / task-9）**：`scripts/check-snapshot-decode.mjs`——用**与设备同一套** streaming 解码器（`org.tukaani:xz` + `commons-compress`，版本对账 `app/build.gradle.kts` 的声明值，不一致即判红）把 `assets/snapshot.tar.xz` 完整解压一遍，判据 = 无异常 + 条目数 > 0 + 实读字节数 == 条目声明 size 之和。**为什么需要它**：`check-snapshot-fingerprint.mjs` 断言的是 `sha256(tar) == snapshot.sha256`，而声明值由同一条构建步骤自己写（自证）；`check-snapshot-asset.ps1` 只比对 APK 内嵌与传入的 xz —— 两条都**不解压**，于是「摘要自洽但字节流解不开」的资产能一路打包进 APK，直到用户真机上以 `CorruptedInputException` 爆出（见坑 285）。**执行点**：本地链 `build-apk-013.ps1` 在 `assemble` 之后 per-ABI 段，云端 `build-apk.mjs` 在组装后均对本次实际资产严格解码；PR CI 无生产快照，运行 `--self-test-runtime` 生成合成小归档，并用同一 Java streaming probe 验证有效输入通过、截断/字节翻转被拒，另独立自测 SHA-256 指纹门禁正反例。这些合成输入只证明门禁判别力，**不代表最终 APK 的快照已通过解码**。正式构建链仍须对实际资产运行 `--require`，无 Java、jar 或快照时拒绝继续。普通 `--self-test` 保留为不依赖 Java/Gradle 缓存的纯判据自测。**证据边界**：既往真实资产实测曾报告 `entries=49521 bytes=710586232`，这不是本次 PR CI 或最终候选包的验证结果；新版本的运行时合成自测由 CI 独立报告。
 
@@ -75,11 +73,11 @@ cd ..\plugins\dsh-android-<pkg> && npm run build
 
 **Release 快照契约（该链已退役，2026-10-15）**：原 `.github/workflows/release.yml` 始终先构建本次运行的 arm64/x86_64 快照，release job 依赖 snapshot job 成功，再下载同一 run 的快照与 lock provenance（曾移除无快照来源的 `skip_snapshot_rebuild` 调试输入；失败后可用重跑失败 job 复用同一 run 的 artifact；不得用另一 commit 的快照填充发布输入）。**该 workflow 已按用户决定整体删除**：本分支不出 Release，只允许来源链构建，见 [RELEASE.md](../RELEASE.md) §5、[AGENTS.md](../../AGENTS.md) §4 铁律 9 与 [known-gaps.md](known-gaps.md)。此段只作历史契约留档——若将来要恢复发布能力，必须在来源链上重建，**不得复活这条本地/协调仓链**。
 
-**CI 插件复用**：APK `pr-gate.yml` 从 `scripts/plugin-dirs.json` 选择 termux 与 Android 插件，按顺序只准备一次已解析 lock、`npm ci` 和构建产物；协议、插件测试、output schema 和 wire 预算共用这些产物。`@deepseek-ai/dsh-tools` 是 manage 的固定 devDependency，不再额外解析安装。常规 `build-apk.yml` 与来源链也从清单按顺序选择带 build script 的包，各准备并构建一次；来源审计和常规 build 互斥，`abi` 输入决定常规矩阵。Release job 只准备依赖，`build-apk-013.ps1` 统一构建，后续 `npm pack` 复用同一批 `lib/`，不再次安装或构建。
+**CI 插件复用**：`pr-gate.yml` 按 `scripts/plugin-dirs.json` 准备依赖和构建产物；来源链按同一清单构建带 build script 的包。`build-apk.yml` 仅无条件调用 `build-apk-source.yml`，不存在常规/审计分流或 ABI 输入矩阵。
 
-**模型目录跨 job 交接**：快照 job 的生成 `lib/catalog-snapshot.json` 未跟随归档 artifact 上传，后续干净 checkout 不能依赖它。Release job 从实际输入 arm64 快照提取 pi-ai package metadata 与 `dist/providers/data`，运行 `gen-model-catalog.mjs` 后再注入。目录的 `engineRootHint` 使用快照内相对路径，避免将 runner 的本地绝对路径写进发布内容；本地正式构建仍由快照生成器生成同源目录。
+**历史 Release 模型目录跨 job 交接（该链已退役）**：快照 job 的生成 `lib/catalog-snapshot.json` 未跟随归档 artifact 上传，后续干净 checkout 不能依赖它。Release job 从实际输入 arm64 快照提取 pi-ai package metadata 与 `dist/providers/data`，运行 `gen-model-catalog.mjs` 后再注入。目录的 `engineRootHint` 使用快照内相对路径，避免将 runner 的本地绝对路径写进发布内容；本地正式构建仍由快照生成器生成同源目录。
 
-**最终签名与资产身份**：上传前同一 `check-apk-signatures.mjs --keystore keystore/debug.keystore` 同时检查 v1/v2/v3 与固定证书身份；Windows 通过 SDK 的 `apksigner.jar` 传独立参数，避免 shell 解释 APK 路径。来源链保留构建前证书预检，最终 gate 再验证实际 APK；publish 下载并核对 MANIFEST 后提升原字节。真实 CI runner 验收状态以重构台账为准。
+**最终签名与资产身份**：上传前同一 `check-apk-signatures.mjs --keystore keystore/debug.keystore` 同时检查 v1/v2/v3 与固定证书身份；Windows 通过 SDK 的 `apksigner.jar` 传独立参数，避免 shell 解释 APK 路径。来源链保留构建前证书预检，最终 gate 再验证实际 APK；本分支无 publish job，最终产物由同次运行上传，实际状态以对应 Actions run 为准。
 
 **冷启动预算读数**：`scripts/check-boot-budget.mjs --self-test` 是门禁自身的廉价回归；设备门禁 `--require-real` 必须消费安装包启动后采集的日志。C1 比较的是壳侧首次成功 HTTP 探测观测时刻与 TCP LISTEN 探测观测时刻，两者来自不同轮询（HTTP 启动轮询约 1s；TCP 探测每 500ms），差值包含探针采样量化和调度延迟；C1 超限不能单独归因于同步 compose，需与 C2 和 P1 phase 对读，4000ms 门槛仍按原值判定。event-loop 可能先输出 `loopP99Ms=-1 loopSamples=0`，再在 debounce 收口后输出最终采样；C4 必须从最后一条完整 `[perf] TOTAL` 成对读取两字段，不能把早期哨兵当最终结果。末条哨兵判 FAIL，末条有效样本则按样本数和预算判定。若补丁源改变，先从当前源码重建对应 ABI 快照，再构建/安装并重新采集日志；旧设备日志只能描述产生它的旧安装包，不能证明新快照行为。详见坑 251。
 
@@ -99,11 +97,11 @@ available for offline mode`，22s 即 break），且该行把 gradle 输出重�
 ④ 它**绕过**共享终端组装引擎 `build-apk-engine.mjs`，直接调 Gradle `:app:assembleDebug`。
 ⇒ 属 §14「测试和 Release 使用不同构建逻辑」「重复而没有新增信息的过度防御」。当时的结论是「快照构建只有两条活链：`build-apk.yml`（自包含，源重建）与 `release.yml`（发布，Build Once → 同 artifact 提升）」；**2026-10-15 后 `release.yml` 也已退役**，活链只剩 `build-apk.yml` / 它复用的 `build-apk-source.yml`（来源链，当前 arm64）与本地来源链 `scripts/source-build/run-local-source-chain.mjs`。
 **本分支只允许来源链构建（AGENTS §4 铁律 9）；将来若需要快照专用产物，走来源链，不要再新建第三条发布链。**
-**LFS 底座按需拉取**：`build-apk.yml` 的快照 job 使用 `lfs: false`，缓存未命中时只拉当前 ABI 的 `base-usr` 和共用 `base-dsh`；缓存键取当前 pointer 文件哈希。（原先 `release.yml` 的 APK job 消费上游 job 的 snapshot artifact、不拉底座，该链已退役。）`require-lfs-materialized.mjs` 拒绝用 pointer 文本冒充归档。
+**底座来源**：当前来源链 checkout 使用 `lfs: false`，不拉取 `base/*.tar.xz`；Termux 基座由固定 bootstrap 与官方验签仓库包组装。旧 LFS 缓存/按 ABI 拉取路径已从云端入口删除。
 旧版文档把 `lfs: true` 说成 `git lfs fetch --all` 并据历史对象估算下载量，此结论已于 2026-10-07 撤回：checkout v4 实际执行 `git lfs fetch origin <ref>`，普通 Git 的 `fetch-depth: 0` 不证明历史 LFS 全量下载。依据：[官方 command manager](https://github.com/actions/checkout/blob/v4/src/git-command-manager.ts#L352-L357)、[官方调用点](https://github.com/actions/checkout/blob/v4/src/git-source-provider.ts#L186-L193)。当前优化减少无用 ABI 与重复 job 的下载；实际流量收益应以 runner 日志核实。
-**云端构建（0.13.0 起，宿主=本仓库，自包含）**：`.github/workflows/build-apk.yml`（`workflow_dispatch` 手动，matrix arm64/x86_64）托管整套构建链并只操作本仓库——快照从源重建（`base/` 底座归档为输入，Git LFS）、按统一清单准备并构建插件、注入/门禁/gradle 全部云端完成，仅 `upload-artifact` 供本地下载 debug，不出 Release；**不依赖协调库**（私库，GITHUB_TOKEN 无法签出）。`build-apk.mjs` 以 `DSH_APK_DIR=$GITHUB_WORKSPACE` 指向本仓库（gradle 在此）。本地仍在协调库根跑 `pwsh scripts\build-apk-013.ps1`（`scripts/` 前缀）。
+**云端构建**：两个手动入口共享来源链，具体命令和能力范围统一见文末「GitHub Actions 来源构建入口」。`DSH_APK_DIR=$GITHUB_WORKSPACE` 指向本仓库，不依赖协调仓。
 
-`build-apk.yml` 的 ABI 与 suffix 先经环境变量传递，不直接插入 shell 源码；校验步骤仅接受 `arm64|x86_64` 与总长不超过 32 字符的 `-[A-Za-z0-9][A-Za-z0-9._+-]{0,30}` suffix。构建命令与 artifact 名统一使用已校验值，防止 `workflow_dispatch` 自由文本改变 runner shell 命令或 artifact 路径。
+`build-apk.yml` 不再接收 `abi`、`suffix` 或 `source_audit` 输入，避免旧构建选项误导；来源链的目标和后缀由工作流固定。
 
 **CI 权限与正式发布**：构建/PR workflow 的 `GITHUB_TOKEN` 明确只读，checkout 禁止持久化凭据。原 `release.yml` 的快照构建、APK 构建、测试和签名核验均在只读 job 完成、上传 `release-v<version>` artifact，再由独立 `publish` job 只下载同一 artifact 创建 draft Release / 上传资产，写权限仅授予该 job、发布阶段不重新构建或重签资产——**该链已按用户决定整体退役（本分支不出 Release）**；这条权限纪律仍然适用：任何将来在来源链上重建的发布面，都必须沿用「只读构建 + 独立写权限提升 job + 不重构建不重签」。PR 与来源构建 workflow 的源码 Node 测试使用 `node --test scripts/source-build/*.test.mjs`，新增测试自动进入该测试集。
 
@@ -115,7 +113,7 @@ available for offline mode`，22s 即 break），且该行把 gradle 输出重�
 
 **同工作区复跑**：两处源码 clone 可复用，但固定 commit 的 fetch/detach/assert 仍执行；bootstrap 与 NDK 只在固定哈希命中时复用，损坏/半包重下，解包前校验不省略。Harness 阶段从本次 `GITHUB_SHA` 恢复权威 overlay，先复位专用源码 checkout（保留 ignored 依赖），deploy 只清理验证过的专用目标。`source-chain-rerun.test.mjs` 使用本 workflow 的实际守卫和本地假输入覆盖 cache-hit/miss、下载中断、坏字节拒绝解包、依赖保留与清理边界；CI 与本地预检均调用。来源链两次完整运行的证据不得由局部守卫测试代替。
 
-**派发前必须本地预检**：`node scripts/source-build/preflight-source-chain.mjs`。远程 `build-apk-source` 一次 60-90 分钟，而近期判红的几类问题（市场补丁锚点失配、期望补丁集过期、与上游脱钩）**都能在本地提前复现**。预检覆盖五面：① 是否落后 `upstream/main`（合并会换掉链的输入，坑 204/204 都出在合并之后）② 登记表补丁对仓库镜像自洽（`apply-patches --check`）③ 市场插件链按 workflow 里钉的 URL+sha256 取发布产物、解包、打补丁，再与 `vendor/dshmarketplace-plugin/` 逐字节比对 ④ 来源链单测 ⑤ `check-code-map`。版本与哈希都从 workflow 读，不在脚本里重复钉。`--no-network` 可跳过取件与 `git fetch`（此时发布产物必须已在 `.deploy-tmp/component-sources/` 缓存里）。
+**旧综合预检（不作为本分支必经入口）**：`node scripts/source-build/preflight-source-chain.mjs` 仍要求 fetch 并追平 `upstream/main`，与本分支独立维护口径不符，不应为通过它强制合并上游。当前应执行来源工作流的输入测试、锁根检查及相关静态门禁。以下为旧脚本行为说明：远程 `build-apk-source` 一次 60-90 分钟，而近期判红的几类问题（市场补丁锚点失配、期望补丁集过期、与上游脱钩）**都能在本地提前复现**。预检覆盖五面：① 是否落后 `upstream/main`（合并会换掉链的输入，坑 204/204 都出在合并之后）② 登记表补丁对仓库镜像自洽（`apply-patches --check`）③ 市场插件链按 workflow 里钉的 URL+sha256 取发布产物、解包、打补丁，再与 `vendor/dshmarketplace-plugin/` 逐字节比对 ④ 来源链单测 ⑤ `check-code-map`。版本与哈希都从 workflow 读，不在脚本里重复钉。`--no-network` 可跳过取件与 `git fetch`（此时发布产物必须已在 `.deploy-tmp/component-sources/` 缓存里）。
 
 来源流程的 marketplace 用**固定 npm 发布产物**：`curl` 拉 `dshmarketplace-plugin-0.1.7.tgz` → `sha256sum --check` 对照钉在 workflow 里的哈希 → 解包进 `vendor/dshmarketplace-plugin`（**不再从其 `src/` 重建**，也不参与插件源码构建循环）。理由：仓库镜像与全部 market-* 补丁都按发布字节定义（`vendor/dshmarketplace-plugin/PATCHES.md`），重建会用不同工具链产出不同字节并把补丁锚空（0.1.5 时代就是这样，见坑 205；此前靠适配器里一段源码构建专用改写兜着，已随 0.1.7 退役）。随后运行 `node scripts/source-build/apply-source-marketplace-patches.mjs vendor --apply`：这一步**不修改共享补丁器**，适配器只把生成副本的 `HERE` 指回 `scripts/patches`，然后按原参数执行；共享 runner、生成 runner、registry、适配器自身及补丁后产物的哈希写入 `marketplace-patch-adapter.json`。锚点整体失配不需要适配器兜底——共享执行器对「check 为假且 apply 零改动」本就判红并拒报 ALL OK。已登记的移动端补丁（包括 `/api/dshmarketplace/*` 鉴权）先施加到解包产物，随后 API 路由门禁才能检查最终注入文件。artifact 的 `marketplace-source-provenance.json` 记录发布 tarball URL 与哈希、包版本、补丁 registry/实现哈希及补丁后 lib 哈希。
 
@@ -224,9 +222,11 @@ Harness按固定0.2.0-rc.2源码完成全仓构建；prepare-harness-vendor-over
 本分支的 `build-apk` 与 `build-apk-source` 都运行同一条 ARM64 来源链，不再提供旧 LFS 底座构建选项。手动运行时必须选 `security/hardening`，默认分支 `main` 上的旧工作流不代表本分支。CLI：
 
 ```bash
-gh workflow run build-apk.yml --repo snoworwind/dsh-mobile-apk --ref security/hardening
+gh workflow run build-apk-source.yml --repo snoworwind/dsh-mobile-apk --ref security/hardening
 ```
 
 成功后从该次 Actions 的 Artifacts 下载 `dsh-mobile-apk-arm64-source-<commit>`，内含 APK、SHA-256 和列举的来源证明文件；上传显式包含隐藏目录内的证据，且不上传整个临时目录。当前仅 ARM64、版本后缀固定 `-source`，不支持 x86_64 或双 ABI，不创建 Release。云端任务上限 180 分钟，沿用来源链全部测试与产物门禁。入口回归为 `node --test scripts/source-build/cloud-workflow.test.mjs`，含旧链与条件分流的受控负控。该 L1 入口改动未做设备验证，云端成功也不等于设备验收通过。
 
 来源链预检的 provenance 夹具必须隔离 CI 仓库环境，复验时带 `GITHUB_REPOSITORY` 与 `GITHUB_SERVER_URL` 跑工作流同一组 Node 测试；否则本地通过不足以覆盖云端身份优先级。根因及修复见 gotchas.md 坑 347。
+
+**2026-10-17 云端核验快照**：Actions 已由用户重新启用。`81dc50c` 的 [源码构建 38935633493](https://github.com/snoworwind/dsh-mobile-apk/actions/runs/38935633493) 已通过原失败的输入预检、签名工具预检与固定来源检出，记录时正在编译 Harness；尚未取得最终 APK/上传成功结论。后续状态以该运行页面为准。旧禁用与夹具故障分别见坑 346、347。

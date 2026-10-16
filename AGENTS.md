@@ -29,13 +29,11 @@ DeepSeek Harness 的**安卓壳应用**（包名 `com.dsharnessmobile.shell`）�
 ## 2. 怎么建、怎么装、怎么验
 
 ```powershell
-# 在【协调仓根】执行（壳侧不单独构建）
-# 【本分支例外】security/hardening 禁止用下面两条本地/协调仓链产出任何 APK，只允许来源链构建（见 §4 铁律 9）。
-pwsh -File scripts\build-apk-013.ps1 -Suffix ""   # 双 ABI 全链，门禁失败即拒打包
-pwsh -File scripts\build-apk-013.ps1 -Fast         # dev 档：单 ABI x86_64 + preset 1（禁发布）
-# 发布包不经本地，也没有 Release 入口：本分支不出 Release（release.yml 已按用户决定删除），
-# 只允许来源链构建（build-apk-source.yml / run-local-source-chain.mjs），产物加 provenance 直接交付。
-# 详见 §4 铁律 9 与 docs/RELEASE.md §5。
+# 在本仓触发云端来源链（当前 ARM64；不出 Release）：
+gh workflow run build-apk-source.yml --repo snoworwind/dsh-mobile-apk --ref security/hardening
+# Linux / WSL 本地同链，仅构建已提交 HEAD，自动隔离检出：
+node scripts/source-build/run-local-source-chain.mjs
+# 产物与环境详见 docs/AGENTS/build-and-env.md；禁止旧本地/协调仓链出 APK。
 
 # 装机（<serial> 用 adb devices 查；arm64 真机必须用 arm64 产物）
 adb -s <serial> install -r -t out\v<版本>\dsh-mobile-apk-v<版本>-arm64.apk
@@ -63,10 +61,10 @@ adb -s <serial> install -r -t out\v<版本>\dsh-mobile-apk-v<版本>-arm64.apk
 
 - **适用**：改动**完全落在快照内 runtime**（`@dsh-android` 插件的 `lib/**`、`client.js`、引擎树 JS）。这类改动的生效链是
   「本地 `npm run build` → 推进设备快照树 → 引擎重读」，与 APK 打包无关；三层结果只覆盖热推后的设备树。最终 APK 须核对同一源码/构建产物并重新装机验收。
-- **不适用（必须走 `build-apk-013.ps1` 全链）**：壳侧 Kotlin（`.kt` 要编译进 dex）、签名/权限/清单、assets 与 `snapshot.tar.xz` 本身，
+- **不适用（必须走来源链出 APK）**：壳侧 Kotlin（`.kt` 要编译进 dex）、签名/权限/清单、assets 与 `snapshot.tar.xz` 本身，
   以及任何**面向发布的最终产物**。改了这些还热推 = 验的是旧壳，属假绿。
 - **仍须三层验收**：热推只省掉「打包 + 装机 + 快照重解压」这段等待，**不省任何一层判据**（§2.1）。代码层、CDP 层、ADB 用户层一个不能少。
-- **发布前必须回全链**：热推产物**不进 APK**。任何要随版本发出去的东西，最后都必须由 `build-apk-013.ps1` 重出一遍并重验。
+- **发布前必须回全链**：热推产物**不进 APK**。任何要随版本发出去的东西，最后都必须由来源链重出一遍并重验。
 - **实修（0.14.2 rc.2）**：此前脚本每个落点恒失败（`cp: …/lib/.: Permission denied`）——`adb push` 在 `/data/local/tmp` 建的目录是
   `0771`（others 可穿越、**不可列目录**），而 `cp -r <stage>/lib/.` 必须列目录；已修为推送后 `chmod -R 755`。
   根因与复现见 `docs/AGENTS/gotchas.md`，遇到 Permission denied 先查那里，不要手工 `cp` 绕。

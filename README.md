@@ -101,24 +101,16 @@ adb install -r -t <apk>    # 同签名覆盖安装
 
 ## 构建
 
-快照构建与打包在**协调仓库**（[dsh-mobile](https://github.com/kelai141/dsh-mobile)）完成，
-本仓库是壳子仓库。要求：JDK 17+、Android SDK（compileSdk 36）；Gradle 8.11.1 由 wrapper 提供。
+本分支只允许来源链构建，不依赖协调仓，也不读取旧 LFS 底座归档。当前支持 ARM64，不创建 GitHub Release。
 
-```powershell
-# 快照构建（Termux 源 + 依赖闭包 + pnpm + cordis 权威覆盖 + 瘦身）：
-node scripts\build-snapshot-013.mjs <arm64|x86_64>
-
-# 一键打包（快照 → 注入 → 门禁 → gradle，双 ABI）：
-pwsh scripts\build-apk-013.ps1 -Suffix ""
-
-# dev 档：单 ABI x86_64 + preset 1（产物体积增大，禁发布）
-pwsh scripts\build-apk-013.ps1 -Fast
+```bash
+# GitHub Actions：显式选择安全加固分支
+gh workflow run build-apk-source.yml --repo snoworwind/dsh-mobile-apk --ref security/hardening
+# Linux / WSL：在本仓执行，仅构建已提交 HEAD，自动创建隔离检出
+node scripts/source-build/run-local-source-chain.mjs
 ```
 
-产物：`out\v<版本>\dsh-mobile-apk-v<版本>-<abi>.apk`。
-
-门禁由 `scripts/check-release-gates.mjs` 聚合（`--list` 现数）。任一不过即拒打包，
-严格发布档 `--run --require` 要求 SKIP=0。
+云端完成后下载同次运行的 APK 与来源证明 artifact。本地环境、产物范围与检查命令见 [构建详档](docs/AGENTS/build-and-env.md#github-actions-来源构建入口2026-10-17)；交付边界见 [发布政策](docs/RELEASE.md#5-发布本分支不出-release2026-10-15-按用户决定)。构建通过不等于设备验收通过。
 
 ## 桥协议 v1（`window.androidBridge`）
 

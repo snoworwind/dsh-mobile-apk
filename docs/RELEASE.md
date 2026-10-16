@@ -1,11 +1,10 @@
-# Release 发布流程（源码仓库 ↔ 构建产物分离，v0.10.2 起）
+# 交付政策与历史发布约定
 
-> 2026-08-14 v2 ｜ 原则：**源码仓库只维护源码**；产物统一进主仓库 release/ 目录（分门别类 + 版本管理），经 GitHub Releases 发布（单一入口）。
-> **本文档为 v0.10.x 时期流程存档**：现行 runbook 与 0.14 实测前置见协调仓 `release/README.md`，构建/门禁命令见 `AGENTS.md` §2。当前最新发布 = v0.14.0-preview（vc38，9 资产，2026-09-13）。
+> 当前 `security/hardening` 只允许来源链构建，不创建 GitHub Release；现行政策见 §5，构建入口见 [构建详档](AGENTS/build-and-env.md)。§1、§3、§4 为旧协调仓流程存档，禁止作为本分支操作指南。
 
 ---
 
-## 1. 仓库职责划分
+## 1. 历史仓库职责划分（已退役）
 
 | 仓库 | 维护内容 | 产物 |
 |---|---|---|
@@ -19,12 +18,12 @@
 
 | 项 | 规则 |
 |---|---|
-| 主版本 | APK versionName（build.gradle.kts），v0.10.x；versionCode 随版本递增 |
-| release tag | 与主版本同号（v0.10.2），仅 dsh-mobile-apk 仓库 |
-| 插件版本 | package.json 各自 0.1.x 独立演进（tgz 文件名带插件版本） |
+| 主版本 | 以 app/build.gradle.kts 的 versionName / versionCode 为准 |
+| release tag | 历史约定；本分支不创建 Release |
+| 插件版本 | 以各 package.json 为准，独立演进（tgz 文件名带插件版本） |
 | 归档 | 已发布版本移入 release/archive/ |
 
-## 3. release/ 目录规范
+## 3. 历史 release/ 目录规范（已退役）
 
     release/
     ├── v<版本>/apk/dsh-mobile-apk-v<版本>-<abi>.apk   # abi = arm64 | x86_64（双 ABI 必须同时产出；见 §6 改名窗口）
@@ -34,7 +33,7 @@
     ├── v<版本>/notes.md                               # 发布说明 + 各 ABI 验证记录
     └── archive/                                       # 历史版本
 
-## 4. 一键构建（门禁自动执行）
+## 4. 历史一键构建（本分支禁止）
 
     powershell -File scripts/build-release.ps1 -Version 0.10.2
 
@@ -50,25 +49,11 @@
 - **需要分发时**：用来源链产物直接交付——APK 加同一次运行的 provenance 证据包（`project-component-provenance.json`、`component-source-provenance.json`、`project-source-commit.txt`、各项 sha256 清单），并附来源提交与构建命令。不要用「另一次构建的哈希」或另一 commit 的产物拼装。
 - 交付前闭环（沿用旧清单）：下载/复制产物 → sha256 对照清单 → 对应平台安装冒烟（x86_64 → MuMu；arm64 → 真机）→ 记录进 `release/v<版本>/notes.md`。
 - 插件仓库不打 release（避免 tag 与包版本错位混乱）；需单独分发时用 plugins/ tgz。
-- 本文件其余各节描述的是构建与资产命名约定，仍适用于来源链产物；其中凡提到 `release.yml` / `build-release.ps1` 的段落均以本节为准（那些链在本分支已禁用或不复存在）。
+- 历史双 ABI、在线更新快照和协调仓目录约定不代表当前来源链能力；当前范围见构建详档。
 
-## 6. 资产命名约定
+## 6. 来源链产物命名
 
-- APK：dsh-mobile-apk-v<主版本>-<abi>.apk，**abi 逐字取构建 ABI 名**（arm64 / x86_64）。
-
-  事实源（2026-10-11 核对）：线上发布唯一入口是 `.github/workflows/release.yml:262` 调
-  `scripts/build-apk-013.ps1`，其 `--artifact-name`（:465）= `dsh-mobile-apk-v$ver-$abi.apk`，
-  `$abi ∈ {arm64, x86_64}` ⇒ **arm64 资产名不带 `-v8a` 后缀**。
-  旁路脚本 `scripts/build-release.ps1:208` 用 `arm64-v8a`，但它**不在**发布工作流里。
-
-  **历史窗口（必须兼容，客户端已同时接受两代命名）**：实测 `gh release view <tag> --json assets`，
-  `-arm64-v8a` = v0.14.1 / v0.14.1-preview / v0.14.2 / v0.14.2-fx-1 / v0.14.2-fx-2；
-  `-arm64` = v0.14.0 / v0.14.2-fx-3 / v0.14.3 / v0.14.4 / v0.14.5 / v0.14.5-fx-1 / v0.14.5-fx-2。
-  x86_64 两代同名。客户端 `UpdateChecker.assetNameCandidates` 与
-  `UpdateCheckerTest.assetCandidatesAreBoundToReleaseChainProductName` 绑定本约定：**发布链改名即单测判红**。
-- 快照：snapshot-<abi>.tar.xz
-- 插件：dsh-android-<pkg>-<插件版本>.tgz（npm pack 原名）
-- MANIFEST.txt：sha256 + 相对路径 + 字节数（排序稳定，跨平台可校验）
+APK 由 `scripts/build-apk.mjs` 按 `dsh-mobile-apk-v<versionName><suffix>-<abi>.apk` 命名。当前来源工作流固定 `--abi arm64 --suffix -source`；下载入口与证据清单见 [构建详档](AGENTS/build-and-env.md)。旧在线更新器及其资产候选测试已删除，不再承担命名兼容检查。
 
 ## 7. 第三方许可合规声明（2026-08-23 起，GPL 义务）
 
@@ -76,6 +61,6 @@
 
 - **许可证全文随包分发**：每个包 `usr/share/doc/<pkg>/copyright`（或 COPYING*），标准文本统一位于 `usr/share/LICENSES/*.txt`（Termux `licenses` 包，构建链已显式锁定——实测 x86_64 缺省闭包曾漏带，`build-snapshot-013.mjs` TARGETS 已固化 `licenses`）；
 - **源码要约（GPL §3）**：各 copyleft 组件对应源码与构建脚本见 [termux/termux-packages](https://github.com/termux/termux-packages)（版本标签对应，详见 THIRD_PARTY_NOTICES.md 的组件/版本/许可表）；要约自本发行发布起三年内有效；
-- **对二进制的再加工**（A4，全部随本仓库开源）：前缀/编译期路径重写 `scripts/fix-shebang.py`、`scripts/inject-snapshot.py`、`termux-elf-cleaner` 调用与 `scripts/build-snapshot-013.mjs`（shebang/RUNPATH/elf 处理）、快照注入与打包 `scripts/build-apk-013.ps1`、`scripts/patch-marketplace.mjs`、`scripts/patch-undo-mobile.mjs`；
-- **门禁**：`scripts/check-third-party.mjs`（矩阵覆盖 + copyleft 全文在场）已在 `build-apk-013.ps1` 接入，缺失即拒绝打包；
+- **对二进制的再加工**（A4，全部随本仓库开源）：前缀/编译期路径重写 `scripts/fix-shebang.py`、`scripts/inject-snapshot.py`、`termux-elf-cleaner` 调用与 `scripts/build-snapshot-013.mjs`（shebang/RUNPATH/elf 处理）、快照注入与打包 `scripts/inject-all.py`、`scripts/build-apk.mjs` 及 `scripts/patches/`；
+- **门禁**：`scripts/check-third-party.mjs`（矩阵覆盖 + copyleft 全文在场）由来源链的 APK 打包门禁执行，缺失即拒绝打包；
 - **无额外限制**：上述二进制保持其上游许可，未施加任何附加条款；本工程 dsh 引擎/壳/插件（MIT 系）与 GPL 二进制为进程级聚合，非链接派生，不受传染（详 THIRD_PARTY_NOTICES.md 说明）。
