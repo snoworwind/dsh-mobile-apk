@@ -2022,3 +2022,91 @@ EngineBootContinuationTest用latch驱动真实观察函数：winner持CAS但无�
 **修法**：mock 补 `status: 200` 与 `url: String(url)`（并加注释说明缺 `url` 会重演静默降级）；离线档断言改为 `{}` 并写明「空哈希是正确结果、页面会提示自行核对」。**不放宽实现**——信任种子哈希会削弱「校验值只来自官方 MANIFEST」这条安全属性。
 
 **复验证据**：修前 `webpages/tests/*` 39 例中 1 例失败（在 HEAD 工作树上另跑一次确认与本轮改动无关），修后 39/39 通过；同一 mock 下手工构建日志由「GitHub 官方 MANIFEST 不可用：Invalid URL」变为「sha256 仅取自 GitHub 官方 MANIFEST，命中 2/2」。
+---
+
+## 吸收自上游 `main` 的坑位（2026-10-16，上游尖端 `5fca94f`）
+
+> 下列五条原属上游 `kelai141/dsh-mobile-apk` 的 `main`（提交 `1f60bf3` / `db03c5f` / `438538c` / `659ea9c` / `5fca94f`）。
+> 本分支的坑位编号已用到 309–328，且**同名编号的含义与上游不同**（例：本分支 313 = 路径脚本隐藏屏幕操作，上游 313 = 陈旧工作树回退）。
+> 按 §5.1「编号递增、不得重编号」的规则在此续编为 329–333，括号内保留**上游原编号**，便于与上游文档逐条对照。
+
+329. **已合入源仓的剪贴板修复必须同步 APK 镜像（上游编号 309，2026-10-15）**：host-web-compat #18 已修复 WebView 异步剪贴板拒绝后静默退出的问题，但 APK 镜像仍是 0.1.13，云端会继续注入旧实现。独立同步 0392ef0 的五个文件及 0.1.14 版本，保留原生 writeText → Android 桥 → execCommand 的回落链；三条均失败时给回执。新增 smoke 同时覆盖旧行为负控、精确文本、无桥回落和全部失败。主题归属变更另外交付，避免混入本镜像 PR。
+
+330. **宽表格只在 hover 后启用横向滚动，会让手机首触点被侧栏接管（上游编号 311，2026-10-15）**：
+
+现象：四列以上 Markdown 表格的说明被挤成高行，横滑时误开右栏。上游 `.md-table-wide` 静止态为 `overflow-x:hidden`，侧栏仲裁只识别 `auto/scroll`，触屏没有鼠标 hover；同时单元格 `30vw` 上限过窄。移动端适配以稳定 hook 常驻 `overflow-x:auto`，表格及其后代预设 `touch-action:auto`，按内容分配列宽，保留 100px 最小内容宽和不超过 240px 的内容上限，不缩字号。普通小表格与桌面宽屏鼠标模式保留上游行为。
+
+验证：`tests/sidebar-gestures.spec.ts` 覆盖旧样式负控、流式插入后首触点不抢手势、表格外侧栏仍能展开。jsdom 不证明原生滚动与布局，必须另附 WebView/CDP、ADB 两方向证据。开发期热推不能代替发版 APK 的最终验收。
+331. **0.14.8 安全模式重启「点了没反应、过几分钟又能跑」= 刷新窗口内的启动请求被静默丢弃（上游编号 312，本轮实修，L2）**：
+
+定位报告 §2.3/§2.5 确证缺陷**不在**安全模式本身（SafeMode 零碰指纹），而在刷新窗口内启动请求的**零回执**。三条真因缺一条都解释不全：
+
+① `EngineStartFlow.start()` 抢世代所有权失败时直接 `val token = flowOwnership.begin() ?: return` —— 而工厂刷新在**同一个世代里同步跑**、`finish(token)` 只在启动线程 finally 执行 ⇒ 刷新期间 `begin()` 恒返回 null ⇒ 任何再次进入的启动请求不 spawn、不改相位、不落盘。且 `begin()` 返回 null 的**两种原因**（destroyed / running）被并成同一个 return，「被并发让行」与「生命周期终结」分不清，`destroyed` 时还会白等。
+
+② `refreshSnapshotInternal` 把「另一条事务在飞」记成**自己的失败**（`lastRefreshFailure = IllegalStateException(...)` + 失败账本），而同一堵墙上另两处早已是对的：`startEngine` 返回 true 让行、`invalidateSnapshotFreshness` 返回 false 让行。全仓只此一处口径不一致。后果不止日志难看：纯并发争用会喂出「同一份快照连续失败达阈」，让 `shouldDegradeRefresh` 此后**永久跳过刷新**。
+
+③ 成功面只写 `LogCollector.log`，而采集器受 `DevLogPrefs` 门控、默认关闭 ⇒ 用户诊断包里 0 条安全模式痕迹的直接原因。
+
+修法：`start()`/`restart()` 拿到 null 时按 `destroyed`（不启动、不留痕）/ `running`（`writeBootFail` **进 boot-fail.log** + 有界等待后自动续跑）**分开**处置；`performSafeModeRestart` 在**停旧引擎之前**先判事务——先停会让用户白等 8-12 分钟没有引擎，那正是社区现象本身；事务在场则如实相位 + 等收口（`snapshot-transaction-wait`），收口后再先停后启。成功面补 `stage=safe-mode-restart-started`，与既有四个失败 stage 组成两面对照。`refreshSnapshotInternal` 新增 `lastRefreshDeferred` 与失败语义分开，被让行不进账本。
+
+**判据选择（关键）**：跨进程真源用**事务 journal 文件**（`SnapshotTransaction.readMarker(filesDir) != null`）而不是本 Activity 实例的内存态——MainActivity 未声明 `launchMode`，新实例会绕过 `flowOwnership.running`。
+
+**两处易漏的推论**：① 续跑必须**同时**等「事务收口」与「世代所有权空出来」——只等事务会在所有权还没释放时续跑一次，又撞回同一行，等于把静默丢弃换成忙等；② 等待必须有界，否则刷新卡死时把用户无限挂在中间态。
+
+文案：新增 `snapshotTransactionWaitText` 纯函数，**刻意不属于** `safeModeRestartHint` 取值域（后者是 `SafeModeRestartDecision` 四值枚举的穷尽 when，扩枚举等于把修并发缺陷与改既有判定契约混进一个改动）；放行面旧文案「旧引擎已停」改为不预设（事务在场时旧引擎确实还没停）。D3 判据点名的「已就绪/启动完成」类词一个都不出现。
+
+332. **subagent/循环里做「3 路合并」前，先确认工作树的分叉基线：过期工作树会把已合入的上游改动整体回退（上游编号 313，本轮实修踩到）**：
+
+现象：`git diff 5fdcf62 -- <仅两个源文件>` 显示的工作树内容比 `origin/main` **旧**——工作树缺 PR #373 的自适应探针、#387 的剪贴板镜像。若直接 `git add` 这两个文件提交，PR 会静默**删掉** main 上已经落地的 195 行改动（`git diff --stat origin/main` 显示 `EngineManager.kt | 112 +++----`，其中 80 行是删除），而本地门禁此时还会**假红**（`check-code-map` 报 `react-dom.d.ts` 未被覆盖——该文件在 main 上已被覆盖，只是陈旧工作树里的执行地图还没有对应查点）。
+
+判断与修法：
+- 先跑 `git diff --stat <怀疑的基线> origin/main -- <你要改的文件>`：非空即说明工作树落后，**不要**基于它提交。
+- 正确姿势是**新开一个 `origin/main` 的 worktree**（`git worktree add <dir> -b <branch> origin/main`），把本次改动作为补丁**3 路合并**过去：`git diff <陈旧基线> -- <我的文件> > my.patch` 然后 `git apply -3 my.patch`。3 路合并会以上游为底、只叠加我的 hunk，冲突时显式停下而不是静默回退。
+- 合并后必须自查两条：`git diff <baseline> origin/main` 里的上游特征串仍在场（本次是 `nextListenProbeDelayMs`）；`git diff origin/main -U0` 的删除行**只应**是你有意改的（本次恰好 8 行，逐行可读）。
+- 同理：陈旧工作树上的门禁红/绿都不可信，必须在 `origin/main` 的 worktree 上重跑才能作为证据。
+- **同一坑的第二次显形（文档侧）**：表格类文档按「第 N 行的位置」插入新行时，锚点若取自陈旧工作树，行会插到目标基线里完全不同的位置。本轮把症状索引的新条目插到了 `3.` 与 `4.` 之间却写着编号 `7.`（序列变成 `1,2,3,7,4,5,6`）。**规则：按位置插入的锚点必须取自目标基线**（用 `git show origin/main:<path>` 或干净 worktree 的读取结果），插入后自查该组序号连续无重号 —— `check-code-map.mjs` 不校验这种编号，门禁绿替代不了自查。
+
+333. **WebView 算法深色会把手动浅色再次压黑（上游编号 310），偏好按钮却仍正确**：
+
+系统深色下选择浅色，CDP 显示 `color-scheme: light`、body 无 `data-ds-dark-theme`、computed background 为白色，但设备截图仍是黑底。原因是 baseline 对引擎 UI 开启了 `algorithmicDarkeningAllowed=true`（旧 provider 为 `FORCE_DARK_AUTO`），与上游主题服务形成二次配色。不能把截图发黑直接归因于设置持久化回滚。引擎页声明 `appOwnsTheme=true`，新旧 provider 都关闭算法改色；系统深浅仍由 ThemeBridge 交给上游主题服务。隔离浏览器保留既有策略。验收要同时比对选中偏好、DOM 状态与真实截图。
+
+同轮还发现 early bridge 在 UI 挂载后继续写 html 的 color-scheme，系统切换会让手动偏好与 UA scheme 分裂。桥现在只在空 root 启动期写底色，挂载后只报告 MQL，由 presenter 独占配色；删除守卫的双模式反证必须判红。
+
+334. **本机跑 Kotlin 单测必红一条：Termux JDK 17 在此文件系统上 `creationTime()` 跟随 mtime（2026-10-16 吸收上游时的环境误红）**
+
+**现象**：吸收上游 `main` 后在本机跑 `dsh-gradle :app:testDebugUnitTest`，1232 例里 1 例判红——`EngineAuthPolicyTest > production extractor reads only current log and rejects unknown generation`，断言消息 `stale current-log content with refreshed mtime is rejected expected null, but was:<current_token_123456789012345678901234567890>`。
+
+**真因**：该用例的前提是「把 mtime 改到未来后，`BasicFileAttributes.creationTime()` 仍返回文件真实创建时刻」。本机 JVM（`~/.dsh/opt/jdk17` 的 OpenJDK 17）在这块文件系统上取不到真实 birthtime，`creationTime()` 直接跟随 mtime。实测探针（单文件源码直跑，`-Djava.io.tmpdir=$HOME/tmp/jprobe`）：
+
+```
+created(1st)= 1792117211476   mtime(1st)= 1792117211476
+created(2nd)= 1792117271477   mtime(2nd)= 1792117271477   ← 把 mtime 推到 +60s 后创建时刻跟着走
+created follows mtime? true
+```
+
+于是 `EngineAuth.tokenFromCurrentLog` 的 created 判据在这台机器上与「本代起点」同代，陈旧日志被接受。
+
+**为什么既不是本合并的回归、也不能读成生产结论**：① 相关两个文件与本分支合并前 HEAD **逐字节相同**（`git diff backup/security-hardening-pre-upstream-f5ca94f -- EngineAuth.kt EngineAuthPolicyTest.kt` 为空），且本次吸收的 7 个上游提交没有一个碰 `auth`；② 同一用例在 WSL/ext4（有真实 birthtime）上随 1218 例全绿，见 changelog 的 2026-10-15 条目；③ 本结论只覆盖**本机 Termux JDK 的 JVM 单测环境**——生产运行时走 Android libcore 的 birthtime 路径，本轮**未**取得其行为证据，不得据此推断设备侧判据失效。
+
+**处置**：不修改该用例、不放宽 `EngineAuth` 的判据（那会削弱「刷新 mtime 不能让陈旧内容复活」这条安全断言）；本机按**环境阻塞**如实记账，全量结论写成「1231/1232 通过，1 例为本机文件系统 birthtime 不可得导致的误红」。要在本机拿到全绿，只能换到有真实 birthtime 的文件系统（WSL/ext4）上跑，或改用不依赖 creationTime 的判据设计——后者是独立的安全设计改动，不在本轮吸收范围内。
+
+335. **本机 `spawnSync(process.execPath, …)` 必失败：`process.execPath` 是 `linker64`（裁决所有「派生子 node 进程」的门禁）**
+
+**现象**：`node scripts/check-release-gates.mjs` 报「构建/门禁脚本全部可解析（node --check，171 个）」——**171 个脚本逐个**都「解析失败」，而手工 `node --check scripts/check-code-map.mjs` 却 exit 0。同族现象还有两个：`node --test <file>` 报 `error: expected absolute path: "--test-concurrency=0"`（连一个平凡测试文件都红），vitest 默认 `forks` 池报 `write EPIPE`。
+
+**真因**：本机 node 是 Termux 快照里的 **ELF 共享对象**（`PT_INTERP` 指向 Android 的 `linker64`），于是 Node 自己算出的 `process.execPath` 是 **`/apex/com.android.runtime/bin/linker64`**，不是 node 二进制。任何用 `process.execPath` 派生子 node 进程的代码，实际是拿 linker64 当解释器启动，linker64 把**第一个参数**（`--version` / `-e` / `--check`）当成「要加载的程序」，立刻打印 `error: expected absolute path: "<第一个参数>"`。实测矩阵（同一父 node 进程内）：
+
+```
+process.execPath = /apex/com.android.runtime/bin/linker64
+spawnSync(execPath, ["--version"])            status=1  error: expected absolute path: "--version"
+spawnSync(execPath, ["-e", "console.log(2)"]) status=1  error: expected absolute path: "-e"
+spawnSync(execPath, ["--check", <abs>])        status=1  error: expected absolute path: "--check"
+spawnSync(execPath, [<abs script>])            status=1  error: "/storage/.../check-code-map.mjs"
+spawnSync("node", ["--version"])               status=0  v24.18.0        ← 走 PATH 解析就正常
+```
+
+⇒ 与被扫文件的内容、行尾、编码**全都无关**，是解释器路径问题。
+
+**修法（本机绕行，不改仓库）**：需要 node 子进程的套件用 `--pool=threads`（vitest 的 worker_threads 不经 execPath）；`node --test` 改成逐文件直跑（`for f in scripts/*.test.mjs; do node "$f"; done`）；依赖 `spawnSync(process.execPath, …)` 的门禁（`check-release-gates.mjs` 的 node --check 全量扫描即其一）在本机**不可判**——按环境阻塞记账，**不得据此判仓库红**，要拿真结论请在 WSL/Windows 开发机上跑。
+
+**判据**：`node -e 'console.log(process.execPath)'` 打 `linker64` 即命中本坑；打 `.../files/usr/bin/node` 则本坑不适用。

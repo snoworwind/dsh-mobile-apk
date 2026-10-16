@@ -139,6 +139,39 @@ node scripts/check-release-gates.mjs --list  # 现数门禁集合及「仅构建
 
 复核面、命令与产物身份见 [build-and-env.md](build-and-env.md) 的来源审计小节；逐条改动状态见 [changelog-archive.md](changelog-archive.md)。
 
+## 复核轮次：2026-10-16（吸收上游 `main`，上游尖端 `5fca94f`）
+
+按用户要求把上游 `kelai141/dsh-mobile-apk` 的 `main`（`d19ab1b` → `5fca94f`，7 个提交）并入本分支。宗旨的「分支维护方式」写着**引入上游改动时须重新审查其对本分支安全约束和证据的影响**，本轮逐项审查如下。
+
+| 吸收项 | 内容 | 本分支的安全/证据审查 |
+|---|---|---|
+| 剪贴板回退镜像（上游 `1f60bf3`） | `dsh-host-web-compat` 0.1.13 → 0.1.14：包住 `navigator.clipboard.writeText`，回落链「原生 API → 壳侧桥 `androidBridge.copyText` → `execCommand('copy')`」，三条全失败给人话回执 | 只写不读剪贴板；桥方法 `copyText` 是本分支早已存在的既有面，**未新增桥方法、权限、网络或文件面**；注入层仍只作用于引擎页。证据：`scripts/smoke-injections.mjs` 18 项在本机全过，含「未包装的拒绝写入仍然拒绝」（负控）、「桥收到精确文本」、「无桥时回落 execCommand」、「全失败必须留可见回执」 |
+| 主题算法改色（上游 `5fca94f`） | 引擎页 `WebViewShim.applyBaseline(..., appOwnsTheme = true)`，新旧 provider 都关闭算法深色；主题桥只在空 `#root` 启动期写底色 | 面**收窄**而非扩大：只有引擎页关算法改色，**隔离浏览器（BrowserHost）继续走默认策略**（`WebViewShimTest` 有断言）；无新权限/IO/网络。证据：`scripts/boot-watchdog.test.mjs` 本机通过，含「移除守卫即双模式判红」负控 |
+| 手机端宽表格 / 终端卡片（上游 `db03c5f` / `493dae3`） | 新增两份 CSS 注入（`mobile-table.css.ts` / `terminal-block.css.ts`）与配套 spec | 纯样式，不触碰桥、权限、存储；选择器只用稳定属性与结构关系（`data-dsh-frame` / `data-terminal` / `html[data-dsh-mobile-form]`），不用 CSS Modules 哈希类名 |
+| 刷新窗口内的启动请求（上游 `438538c`） | `EngineStartFlow` 按 destroyed/running 分开处置 + 有界等待续跑；`EngineManager.lastRefreshDeferred` 与失败语义分开；新增 `stage=safe-mode-restart-started` 等 boot-fail 记录 | 直接落在本分支的 **L2 敏感面**（快照事务窗口 + 启动流 + 诊断落盘）。逐条审查：① 判据用**跨进程真源** journal 文件而非本 Activity 实例的内存态，与本分支「状态与授权在执行边界核实」同向；② 新增三处 boot-fail 记录的内容只有 phase、账龄与决定，**不含 URL 或凭据**，且仍走坑 319/320 建立的脱敏出口；③ 等待有界（16 分钟预算 + 1s 步进），不引入无限挂起；④ journal 只读，未新增权限、网络与文件写面 |
+| 文档与赞助码（上游 `2100e62` / `659ea9c`） | 上游 README 增加自愿赞助说明与两张收款码；坑位与执行地图文档 | 属于宗旨「独立」口径里**明确保留的归属与出处类内容**（不得改写）；两张 PNG 无代码面影响 |
+
+**冲突解决口径**（本分支与上游**同名编号含义不同**，按 §5.1「编号递增、不得重编号」续编）：
+
+- 坑位：上游 309/311/312/313/310 → 本分支 **329/330/331/332/333**，条目内保留上游原编号便于逐条对照（例：本分支 313 = 路径脚本隐藏屏幕操作，上游 313 = 陈旧工作树回退）；
+- 执行地图：保留上游新增/修改行，锚点按**本分支合并后的实际行号**重取——上游写的 `EngineStartFlow.kt:700`、`EngineManager.kt:207`、`EngineManager.kt:813、1344-1369` 在合并后全部漂移（这正是 known-gaps 里「锚点只验行号存在性、不验语义」那条已知缺口的现实样本）；
+- Kotlin 单测基线：本分支 1218（含 `featureRetirements`）+ 上游 `DeferredEngineStartTest` 13 例 + 上游未记账的 `WebViewShimTest` 1 例 = **1232**；
+- 上游的 `UpdateManager` 执行地图行**不复活**：该实现已按用户要求整体退役（坑 317），复活一行只会制造 phantom 锚点并让门禁判红。
+
+**本机验证证据（2026-10-16；Android 真机 + Termux 运行时；Node 24.18.0 / OpenJDK 17 / Gradle 8.11.1 + API 36）**：
+
+- 代码层（壳侧）：`dsh-gradle :app:testDebugUnitTest --no-daemon --parallel` —— 主源码与测试源码**编译通过**（合并后的 `EngineStartFlow.kt` / `EngineManager.kt` / `MainActivity.kt` / `WebViewShim.kt` 与新增的 `DeferredEngineStartTest`）；**1232 例中 1231 通过**，唯一一例 `EngineAuthPolicyTest` 是本机文件系统 birthtime 不可得导致的**环境误红**（探针实测、为什么不是本合并引入、为什么不改用例，见坑 334）。
+- 代码层（注入/插件面）：`dsh-host-web-compat` 三个 `node:test` 文件与 `smoke-injections.mjs` 18 项全过；`dsh-client-ui-responsive` 的 vitest 套件在**与合并树逐字节相同**的副本上跑（`src`/`tests` 目录哈希一致）：两份被吸收的 spec 76 例全过（`terminal-block-css` 6 / `sidebar-gestures` 70），全量结果见下。
+- 静态门禁：`check-code-map`、`check-kotlin-comments`、`check-bridge-symmetry`、`check-maintenance-docs`、`check-control-ops`、`check-op-registry-parity`、`check-tool-name-promises`、`check-manifest-hardening`、`check-patch-mirror`、`check-gate-skips`、`check-api-route-auth`、`check-dead-tokens`、`check-bounded-io`、`check-state-registry`、`check-patch-fixtures`、`check-patch-test-manifest`、`check-combo-cache`、`check-build-chain-abort`、`check-build-parallel-cap`、`check-snapshot-builder-output`、`check-tool-output-schema`、`check-mcp-client-deps` 全部 exit 0。
+- 本机运行环境的两个**非仓库缺陷**（后续在本机跑套件的人会再遇到，根因见坑 334/335）：① 凡是用 `process.execPath` 派生子 node 进程的东西都必失败——本机 `process.execPath` 是 `/apex/com.android.runtime/bin/linker64`（node 是经 linker 启动的 ELF 共享对象），于是 `node --test` 报 `expected absolute path: "--test-concurrency=0"`、vitest 默认 `forks` 池报 `EPIPE`、`check-release-gates.mjs` 的「171 个脚本全部可解析」整项判红（而手工 `node --check <单个文件>` exit 0）；绕行 = 逐文件直跑 + `--pool=threads`，真结论回 WSL/Windows 跑。② `pnpm install` 在 sdcard（FUSE）上因 symlink/rename 失败（`ERR_PNPM_ENOSYS` / `ERR_PNPM_ENOENT`），需装到应用私有目录（`$HOME`）或改用 `--node-linker=hoisted --package-import-method=copy`。
+
+**未取得结论的（不记通过）**：
+
+- **设备验收未做**：L2（快照事务窗口 / 启动流）与 L3（主题、宽表格、终端卡片）按铁律 2 都要求补三层验收，本轮**一层都没做**（既无 CDP 层也无 ADB 用户层）。客观原因：本分支禁止用本地/协调仓链产出 APK（铁律 9），本机没有可安装的来源链产物。补验条件 = 来源链出包 + 模拟器竖横两向 + arm64 真机补充。
+- 需要 `node_modules` 或已构建 `lib/` 的门禁在本机不可判：`check-tool-surface-budget`、`check-protocol-v2`、`check-contract`（原样返回「先构建」提示）；需要 `snapshot.tar.xz` 的门禁（`check-snapshot-*`、`check-strip-noop`、`check-engine-overlay`、`check-third-party`、`check-inject-completeness`、`check-patch-mounts`）在净检出上走用法/SKIP 面。二者都是**环境阻塞，不计通过也不计失败**。
+- 聚合入口 `check-release-gates.mjs` 本机判红，唯一缺口项是坑 335 的 `process.execPath` 问题（「171 个脚本全部可解析」整项），其余接线项 PASS；该项按环境阻塞记账，不在本机下仓库结论。
+- `check-kotlin-test-count` 在本机判红，唯一原因是坑 334 那条环境误红；数量面本身通过（111 个源测试类 = 111 个结果类，1232 ≥ 基线 1232）。
+
 ## 维护入口
 
 接手顺序：本文件（宗旨与边界）→ [changelog-archive.md](changelog-archive.md) 最新一行（做到哪了）→ [known-gaps.md](known-gaps.md)（还缺什么）→ 上方检查入口（先干跑一遍）。

@@ -23,6 +23,16 @@
 | **跨树镜像纪律退役（永久分叉，已记账）** | 按用户决定移除跨树镜像层：`check-patch-mirror.mjs` 只保留 registry↔IMPLS 自洽（`--peer` / `--require-peer` / `DSH_MIRROR_PEER` 显式拒绝，exit 2），`check-release-gates.mjs` 的「两树同版」断言删除，AGENTS §4.6 改为「树内副本即权威」。受影响文件：`scripts/check-patch-mirror.mjs`、`scripts/check-release-gates.mjs`、`scripts/build-apk.mjs`（注释） | 这些文件自此与协调仓永久分叉，将来若引入上游改动必冲突；**代价不是依赖而是合并成本**。原跨树防线（防「云端快照静默缺引擎补丁」）在本分支不再适用：不存在第二棵树，交付只由本仓自洽面 + 补丁回归 + fixtures 代对齐保障 |
 | **本分支不出 Release（发布面刻意不建）** | 按用户决定：`.github/workflows/release.yml` 与两个手工发布脚本均已删除，本分支不产出 GitHub Release。分发（若确需）只能用来源链产物（APK + provenance 证据包 + 哈希）直接交付 | 这是政策而非缺口：恢复发布必须先改政策（`AGENTS.md` §4 铁律 9 与 [SECURITY-HARDENING.md](SECURITY-HARDENING.md)），再按来源链重建发布面并跑三层验收 |
 
+## 吸收上游 `main`（2026-10-16，上游尖端 `5fca94f`）
+
+| 项 | 当前事实 | 结论 / 后续 |
+|---|---|---|
+| 吸收范围与冲突口径 | 上游 `main` 的 7 个提交（剪贴板回退镜像 0.1.14 / WebView 算法改色 / 手机端宽表格 / 终端卡片 / 刷新窗口启动请求 P1 / 文档与赞助码）已并入本分支。冲突按本分支口径解决：坑位续编 329–333（上游 309/311/312/313/310）、执行地图锚点按合并后行号重取、Kotlin 单测基线 1232、上游 `UpdateManager` 行不复活 | 逐项安全审查与结论见 [SECURITY-HARDENING.md](SECURITY-HARDENING.md) 的 2026-10-16 复核轮次；**未做设备验证** |
+| 代码层证据（本机） | Kotlin `:app:testDebugUnitTest` 编译通过、1232 例中 1231 通过；`dsh-host-web-compat` 三份 `node:test` + `smoke-injections` 18 项通过；`dsh-client-ui-responsive` 全量 vitest 48 文件 709 通过 / 1 跳过（0 失败），且运行副本的 `src`/`tests` 与合并树逐字节相同 | 编译与单测证据**不覆盖运行时行为**；唯一红例是本机文件系统 birthtime 不可得造成的环境误红，见坑 334（不改用例、不放宽 `EngineAuth` 判据） |
+| **设备验收（缺）** | 本轮吸收含 **L2 面**（快照事务窗口内的启动/等待、boot-fail 新 stage）与 **L3 面**（主题算法改色、宽表格、终端卡片）：CDP 层与 ADB 用户层**一层都没做**。本分支禁止本地链出 APK（铁律 9），本机没有可安装的来源链产物 | 按铁律 2 的「不可省的两条」，这些改动的设备结论为空，**进入发版候选前必须补验**；补验条件 = 来源链出包 + 模拟器竖横两向 + arm64 真机补充 |
+| 本机跑套件的环境坑 | `process.execPath` 在本机是 `/apex/com.android.runtime/bin/linker64`（node 是经 linker 启动的 ELF 共享对象），凡是用它派生子 node 进程的东西必失败：`node --test` 报 `expected absolute path: "--test-concurrency=0"`、vitest 默认 `forks` 池报 `EPIPE`、`check-release-gates.mjs` 的「171 个脚本全部可解析」整项判红（手工 `node --check <单文件>` 却 exit 0）；另 `pnpm install` 在 sdcard（FUSE）上因 symlink/rename 失败（`ERR_PNPM_ENOSYS` / `ERR_PNPM_ENOENT`） | 绕行：逐文件直跑、`--pool=threads`、装到 `$HOME` 或 `--node-linker=hoisted --package-import-method=copy`。属环境限制而非仓库缺陷，**不得据此判仓库红**；根因、实测矩阵与判据见坑 335，pnpm 见 [SECURITY-HARDENING.md](SECURITY-HARDENING.md) 该轮证据段 |
+| 上游锚点漂移（已知缺口的现实样本） | 上游写进执行地图的 `EngineStartFlow.kt:700`、`EngineManager.kt:207`、`EngineManager.kt:813、1344-1369` 在本分支合并后全部指错位置，而 `check-code-map.mjs` 仍 `exit 0`（它只验「行号 ∈ [1, 文件行数]」） | 本轮按实际行号手工重取；再次印证下方「锚点只验行号存在性、不验语义」那条缺口——门禁绿不等于锚点对，改代码后必须自查锚点语义 |
+
 ## 本轮仍需收口
 
 | 项 | 当前事实 | 必须取得的结论 |
