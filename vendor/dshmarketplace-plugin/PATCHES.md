@@ -1,5 +1,7 @@
 # dshmarketplace-plugin（vendored，已固化修复）
 
+2026-10-17 第二轮：新增 `market-install-approval-R2`，模型每次安装均需用户确认，目录查询失败、无身份或未知条目拒绝。远端 riskFlags 不再是授权判据。权威修法 `scripts/patches/data/market-install-approval.mjs`，registry 与 IMPLS 同步，行为及受控负控 `scripts/source-build/security-r2.test.mjs`；设备验收未执行。
+
 本目录是第三方插件 **dshmarketplace-plugin@0.1.7** 的 vendored 副本（上游：
 <https://github.com/DshMarketPlace/dsh-plugins-store>，npm 包名 `dshmarketplace-plugin`，
 MIT）。来源为 npm 发布的 `dshmarketplace-plugin-0.1.7.tgz`（解包后除下表补丁外与上游逐字节一致）。

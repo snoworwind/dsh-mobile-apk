@@ -2,6 +2,13 @@
   "$comment": "vendor 固化插件补丁登记表（apply-patches.mjs 消费；id 必须与 IMPLS 一一对应，启动时交叉校验）。marker 语义见 README。",
   "patches": [
     {
+      "id": "market-install-approval-R2",
+      "target": "dshmarketplace-plugin/lib/index.js",
+      "summary": "Every model plugin installation requires approval; catalogue errors deny installation",
+      "provenance": "Security audit 2026-10-17 R2 finding 380",
+      "marker": "dsh-mobile every plugin install requires approval (R2)"
+    },
+    {
       "id": "sidebar-bubble-reorder-B1",
       "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-sidebar-right/lib/client.js",
       "scope": "engine",
