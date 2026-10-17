@@ -36,7 +36,7 @@
 - host-web-compat Linux 59 项与真实注入 smoke 通过：`security-r2-host-linux.log`，含真实路径链接外逃负控；Windows 同链接用例明确 skip，不据 Windows 代替 POSIX 证据。
 - UI 自包含副本已重建；用户提示翻译回归 17 项通过：`security-r2-ui-build.log`、`security-r2-ui-copy.log`，新原生认证拒绝码不再落入未登记原因兜底。
 - 来源链、主帧桥及真实 Unix socket 宿主回归 113 项通过：`security-r2-source-full.log`，含同体积毒化 deb/npm、篡改 JS/入口、空 riskFlags/目录失败、public status 不排队、恶意 nonce 等负控。
-- Kotlin 全量 1309 项通过；设备负控源码编译通过，未执行 instrumentation。日志 `security-r2-gradle-final.log`，计数 `security-r2-kotlin-summary.json`。
+- Kotlin 全量在最终提交重跑通过：120 类 / 1309 项，失败、错误、跳过均为 0（`:app:testDebugUnitTest`，3m14s，WSL Java 17 + SDK 36）；设备负控源码编译通过，未执行 instrumentation。日志 `security-r2-gradle-rerun.log`，计数 `security-r2-kotlin-rerun-summary.json`；同轮更早的 `security-r2-gradle-final.log` / `security-r2-kotlin-summary.json` 保留为第二次证据。
 - 桥对称、API 路由鉴权、Manifest、Kotlin 注释、补丁 id 自洽、vendor 补丁在场、执行地图、维护文档、Linux vendor 摘要检查通过；执行地图及 Linux vendor 的自检/负控通过。各日志按上述本机前缀保存。
 - 新字节门禁实际检查旧来源快照：319 个源码包及 pnpm 物理载荷对账通过，随后既有 narb-android-N1 副本门禁拒绝旧产物，完整命令 exit 1。见 `security-r2-existing-snapshot.log`；这不是新候选来源链通过，旧产物不得用于本轮交付。
 - 不可变 pin 加固：两个独立来源目录按固定 CSS 路径策略重建，319 包载荷摘要一致；上游 CSS/纯度测试 43 项通过。新增负控覆盖缓存与快照一起篡改、缺 pin、工作树伪造与 Git 对象内容损坏，见 `security-r2-source-pins.log`、`security-r2-upstream-css-tests.log`、`security-r2-immutable-pin-tests.log`。pin 同时绑定编译适配器摘要，不能静默更换路径策略；适配器与 pin 文件本身加 `-text`（`.gitattributes`），行尾转换不得改变信任输入。再生成入口为 `scripts/source-build/generate-engine-source-payload-pins.mjs`（读 Git 中的适配器字节、要求两棵独立构建树逐包一致，否则拒绝写出），用法见 build-and-env.md 的来源包载荷 pin 小节。
