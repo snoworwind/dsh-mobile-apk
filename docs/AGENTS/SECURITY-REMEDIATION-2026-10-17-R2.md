@@ -42,7 +42,7 @@
 - 不可变 pin 加固：两个独立来源目录按固定 CSS 路径策略重建，319 包载荷摘要一致；上游 CSS/纯度测试 43 项通过。新增负控覆盖缓存与快照一起篡改、缺 pin、工作树伪造与 Git 对象内容损坏，见 `security-r2-source-pins.log`、`security-r2-upstream-css-tests.log`、`security-r2-immutable-pin-tests.log`。pin 同时绑定编译适配器摘要，不能静默更换路径策略；适配器与 pin 文件本身加 `-text`（`.gitattributes`），行尾转换不得改变信任输入。再生成入口为 `scripts/source-build/generate-engine-source-payload-pins.mjs`（读 Git 中的适配器字节、要求两棵独立构建树逐包一致，否则拒绝写出），用法见 build-and-env.md 的来源包载荷 pin 小节。
 - **未做设备验证**：本机 adb 可执行，设备列表为空；16416、16384 两个模拟器连接拒绝。没有 CDP、ADB 自主真实任务、双方向截图或真机证据。L2/L3 验收仍阻塞，不能作为发布候选。
 - 未生成本轮 APK；后续仅允许最终已提交源码的来源链。旧 APK、热推与宿主单测不能代替。
-- 已实际启动本地完整来源链；先后暴露本地缺 GitHub runner 环境变量、隔离检出无 origin 两个环境前提。补齐值均来自本轮任务目录和原工作树实际仓库坐标，不改校验规则；续跑记录 `security-r2-source-chain.log`。
+- 已实际启动本地完整来源链（来源输入 `0f917ed`，隔离目录 `/tmp/dsh-source-chain-tbcbnf`）；先后暴露本地缺 GitHub runner 环境变量、隔离检出无 origin 两个环境前提，补齐值均来自本轮任务目录和原工作树实际仓库坐标，不改校验规则。执行到第 12/19 步（node-pty/NDK 交叉编译的 704 MB 下载）因会话中断停止，未进入快照与 APK 步骤。**该提交早于 `5472ce9` 的源码包 pin 加固，因此新 pin 门禁没有在完整来源链中跑过**；本轮关于 pin 的证据只有生成期两棵独立构建树的一致摘要、既有快照上的 319 包对账，以及单元/负控与静态门禁。续跑必须从 `5472ce9` 之后的最终源码重建隔离目录（旧目录 HEAD 不同，不能复用）。见 `security-r2-source-chain.log`。
 - 本轮解压参考树在 finally 清理。工作区清理脚本在本仓及已知相邻入口均不存在，未臆造全树删除命令；旧缓存未删除，仅保留本轮日志、编译产物和测试依赖。
 
 主要复跑命令：
