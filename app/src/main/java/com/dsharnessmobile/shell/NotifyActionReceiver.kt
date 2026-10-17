@@ -16,10 +16,8 @@ import org.json.JSONObject
  *     需要用户看详情时由用户点「打开会话」那条 contentIntent（点击通知拉起 Activity 是允许的）。
  *  2. **onReceive 预算 10s**（超时 ANR，goAsync 不延长）→ 只做「先落盘入队 + 快速尝试一次投递」，
  *     重活交给 NotifyDecisionQueue 的退避重试。
- *  3. **manifest 声明 exported=false + 显式 Intent**（component 指向本包 receiver）：
- *     外部应用无法构造有效动作（显式 Intent 只能由本包 PendingIntent 发出）。
- *  4. 回复文本经 RemoteInput 的 ClipData 注入 → 动作 PendingIntent 必须 FLAG_MUTABLE
- *     （只有回复动作开 mutable；见 NotifyCenter.actionPending）。
+ *  3. manifest exported=false；通知监听者持有 PendingIntent 仍能触发它，所以不能只靠此声明。
+ *  4. 非重试动作必须消费原生系统凭据确认后的内存一次性许可；回复来自原生输入框。
  */
 class NotifyActionReceiver : BroadcastReceiver() {
 
@@ -83,6 +81,7 @@ class NotifyActionReceiver : BroadcastReceiver() {
     val app = context.applicationContext
     if (intent == null) return
     val action = intent.getStringExtra(EXTRA_ACTION) ?: return
+    if (action != ACTION_RETRY && !NotifyConfirmActivity.consume(intent)) return
     val eventId = intent.getStringExtra(EXTRA_EVENT_ID).orEmpty()
     val kind = intent.getStringExtra(EXTRA_KIND).orEmpty().ifBlank { "question" }
     if (eventId.isEmpty()) {
@@ -93,7 +92,7 @@ class NotifyActionReceiver : BroadcastReceiver() {
       val outcome = outcomeFor(
         action,
         intent.getStringExtra(EXTRA_OPTION),
-        replyText(intent),
+        intent.getStringExtra("dsh.nativeReply"),
         intent.getStringExtra(EXTRA_QUESTION_ID),
       )
       if (outcome == null) {

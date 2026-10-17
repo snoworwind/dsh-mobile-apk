@@ -9,7 +9,6 @@ import android.content.Intent
 import android.content.SharedPreferences
 import android.os.Build
 import androidx.core.app.NotificationCompat
-import androidx.core.app.RemoteInput
 import org.json.JSONObject
 
 /**
@@ -20,7 +19,7 @@ import org.json.JSONObject
  *     un-deleted，设置原样回来）。所以弹窗语义的渠道第一次就必须用 HIGH 建；静默语义用
  *     LOW 建。静默将来要变弹窗只能换新渠道 ID（Face.candidates 的候选序列）。
  *  2. 不使用 full-screen intent（§6.1.3 R3 / §6.6 反例 4）：打断性强、授权不确定；
- *     通知点击一律 getActivity 拉起 Activity，动作一律 getBroadcast（规避 trampoline 禁令）。
+ *     应答动作由 getActivity 打开原生确认；认证后才在应用内广播，不用 receiver 拉起 Activity。
  *  3. 权限未授予 / 渠道被降级时降级不静默：权限拒绝要回调界面（D9），渠道被用户降级
  *     要在自检面显示「系统已降级，应用无法调回」+ 深链（NT-03）。
  *
@@ -85,8 +84,8 @@ object NotifyCenter {
    */
   const val QUESTION_TIMEOUT_MS = 0L
 
-  /** 审批动作是否要求解锁（NT-18，B4 批）。B3 保持 false：真机 keyguard 行为未确证，先不阻塞开发循环。 */
-  const val APPROVAL_REQUIRE_UNLOCK = false
+  /** 通知提示要求解锁；实际提交还必须经 NotifyConfirmActivity 的系统凭据认证。 */
+  const val APPROVAL_REQUIRE_UNLOCK = true
 
   /**
    * 五类信道定案（§6.1.1 表）。信道名 = kind。候选 ID 序列的第一个是首选；后续是
@@ -1146,6 +1145,7 @@ object NotifyCenter {
       this.action = NotifyActionReceiver.ACTION_NOTIFY_ACTION
       putExtra(NotifyActionReceiver.EXTRA_ACTION, action)
       putExtra(NotifyActionReceiver.EXTRA_EVENT_ID, entry.eventId)
+      putExtra("dsh.confirmSubject", (entry.toolName + "\n" + entry.reason + "\n" + entry.text).take(4096))
       putExtra(NotifyActionReceiver.EXTRA_KIND, entry.kind)
       option?.let { putExtra(NotifyActionReceiver.EXTRA_OPTION, it) }
       questionId?.let { putExtra(NotifyActionReceiver.EXTRA_QUESTION_ID, it) }
@@ -1156,13 +1156,13 @@ object NotifyCenter {
     app: Context,
     entry: NotifyEntry,
     action: String,
-    mutable: Boolean,
     option: String? = null,
     questionId: String? = null,
   ): PendingIntent {
-    val flags = (if (mutable) PendingIntent.FLAG_MUTABLE else PendingIntent.FLAG_IMMUTABLE) or PendingIntent.FLAG_UPDATE_CURRENT
+    val flags = PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
     val key = "dsh.action:" + entry.eventId + ":" + action + (option?.let { ":" + it } ?: "")
-    return PendingIntent.getBroadcast(app, stableId(key), actionIntent(app, entry, action, option, questionId), flags)
+    val intent = actionIntent(app, entry, action, option, questionId).setClass(app, NotifyConfirmActivity::class.java)
+    return PendingIntent.getActivity(app, stableId(key), intent, flags)
   }
 
   /**
@@ -1186,18 +1186,13 @@ object NotifyCenter {
     entry.questions.any { it.options.size > 2 }
 
   private fun addQuestionActions(app: Context, b: NotificationCompat.Builder, entry: NotifyEntry) {
-    // 动作 1：直接回复（RemoteInput）。只有回复动作开 mutable——结果经 ClipData 注入，
-    // FLAG_IMMUTABLE 会让回复静默失败（§6.3.1 / NT-16）。
-    val remote = RemoteInput.Builder(NotifyActionReceiver.REPLY_KEY)
-      .setLabel("回复")
-      .build()
+    // Reply text is entered after opening native UI; notifications never delegate a mutable action.
     val firstQuestionId = entry.questions.firstOrNull()?.id
     val reply = NotificationCompat.Action.Builder(
       android.R.drawable.ic_menu_send,
-      "回复",
-      actionPending(app, entry, NotifyActionReceiver.ACTION_REPLY, mutable = true, questionId = firstQuestionId),
+      "打开并回复",
+      actionPending(app, entry, NotifyActionReceiver.ACTION_REPLY, questionId = firstQuestionId),
     )
-      .addRemoteInput(remote)
       .setAllowGeneratedReplies(false)
       .build()
     b.addAction(reply)
@@ -1209,7 +1204,7 @@ object NotifyCenter {
             NotificationCompat.Action.Builder(
               android.R.drawable.ic_menu_agenda,
               opt,
-              actionPending(app, entry, NotifyActionReceiver.ACTION_OPTION, mutable = false, option = opt, questionId = q.id),
+              actionPending(app, entry, NotifyActionReceiver.ACTION_OPTION, option = opt, questionId = q.id),
             ).build(),
           )
         }
@@ -1233,12 +1228,12 @@ object NotifyCenter {
     val approve = NotificationCompat.Action.Builder(
       android.R.drawable.ic_menu_edit,
       "批准一次",
-      actionPending(app, entry, NotifyActionReceiver.ACTION_APPROVE, mutable = false),
+      actionPending(app, entry, NotifyActionReceiver.ACTION_APPROVE),
     )
     val reject = NotificationCompat.Action.Builder(
       android.R.drawable.ic_menu_close_clear_cancel,
       "拒绝",
-      actionPending(app, entry, NotifyActionReceiver.ACTION_REJECT, mutable = false),
+      actionPending(app, entry, NotifyActionReceiver.ACTION_REJECT),
     )
     if (APPROVAL_REQUIRE_UNLOCK) {
       approve.setAuthenticationRequired(true)

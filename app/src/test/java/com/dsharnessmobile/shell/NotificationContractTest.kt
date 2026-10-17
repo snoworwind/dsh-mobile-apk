@@ -416,13 +416,13 @@ class NotificationContractTest {
   }
 
   @Test
-  fun RemoteInput_回复动作才开mutable且显式关闭生成回复() {
+  fun notificationActionsRequireFreshNativeConfirmation() {
     val code = codeOnly(shellSource("NotifyCenter.kt"))
-    assertTrue("回复动作必须用 RemoteInput", code.contains("RemoteInput.Builder(NotifyActionReceiver.REPLY_KEY)"))
-    assertTrue("必须 FLAG_MUTABLE（结果经 ClipData 注入）", code.contains("FLAG_MUTABLE"))
-    assertTrue("只有回复动作开 mutable", code.contains("ACTION_REPLY, mutable = true"))
-    assertTrue("必须关闭生成式回复", code.contains("setAllowGeneratedReplies(false)"))
-    assertTrue("动作 Intent 必须是显式（component = 本包 receiver）", code.contains("Intent(app, NotifyActionReceiver::class.java)"))
+    assertFalse("通知不得委托可变应答能力", code.contains("FLAG_MUTABLE"))
+    assertTrue("通知只可请求原生确认界面", code.contains("NotifyConfirmActivity::class.java"))
+    assertTrue("动作必须不可变", code.contains("PendingIntent.FLAG_IMMUTABLE"))
+    val receiver = codeOnly(shellSource("NotifyActionReceiver.kt"))
+    assertTrue("旧 PendingIntent 也不得绕过原生确认", receiver.contains("NotifyConfirmActivity.consume(intent)"))
   }
 
   @Test
