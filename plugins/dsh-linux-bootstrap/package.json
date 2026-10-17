@@ -37,7 +37,8 @@
       "src/asset-bundle.js locally hardened: always authenticate and independently extract archive bytes; never reuse size-only slots or host unpacked trees"
     ],
     "localPatches": {
-      "src/asset-bundle.js": "7e32ce0f57ee0a7f75dfd2d2af6ff61357d63b6c34e4f0dbf7aa23cf4300e416"
+      "src/asset-bundle.js": "7e32ce0f57ee0a7f75dfd2d2af6ff61357d63b6c34e4f0dbf7aa23cf4300e416",
+      "src/github.js": "7b6369b5910ecb3e8b49f75a4dae3ca60ceac2d4164bf7f05f71c81803aa110c"
     }
   }
 }

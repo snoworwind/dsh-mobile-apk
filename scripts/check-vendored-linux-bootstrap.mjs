@@ -53,10 +53,11 @@ const MANIFEST = {
 // Explicit local security fork; MANIFEST above retains the original upstream hashes.
 const LOCAL_PATCHES = {
   'src/asset-bundle.js': '7e32ce0f57ee0a7f75dfd2d2af6ff61357d63b6c34e4f0dbf7aa23cf4300e416',
+  'src/github.js': '7b6369b5910ecb3e8b49f75a4dae3ca60ceac2d4164bf7f05f71c81803aa110c',
 }
 
-/** Files this repo adds. Neither may be an upstream artifact. */
-const ADDED = ['build.mjs', 'package.json']
+/** Files this repo adds, including local security regression tests. */
+const ADDED = ['build.mjs', 'package.json', 'test/github-limits.test.mjs', 'test/github-limits-negative-control.mjs']
 
 /** `lib/` is a build product (gitignored, rebuilt by `npm run build`); `node_modules` is never vendored. */
 const IGNORED_DIRS = new Set(['node_modules', 'lib', '.git'])

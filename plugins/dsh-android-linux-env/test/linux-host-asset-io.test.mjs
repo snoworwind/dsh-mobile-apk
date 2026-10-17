@@ -82,16 +82,13 @@ function makeFetch(manifest) {
   const fetchImpl = async (url) => {
     fetched.push(url)
     if (url === `https://api.github.com/repos/kelai141/dsh-bionilux/releases/latest`) {
-      return {
-        ok: true, status: 200, url,
-        json: async () => ({
+      return new Response(JSON.stringify({
           tag_name: TAG,
           assets: [{ name: MANIFEST_NAME, browser_download_url: `${REPO}/releases/download/${TAG}/${MANIFEST_NAME}` }],
-        }),
-      }
+      }))
     }
     if (url.endsWith(`/${MANIFEST_NAME}`)) {
-      return { ok: true, status: 200, url, arrayBuffer: async () => Buffer.from(JSON.stringify(manifest)) }
+      return new Response(JSON.stringify(manifest))
     }
     throw new Error(`测试里不该有人去取字节：${url}`)
   }
