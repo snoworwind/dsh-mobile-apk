@@ -45,7 +45,8 @@ function adbKeyboardAuthArg(): string {
   if (!base) return ''
   try {
     const nonce = readFileSync(join(base, 'adb-keyboard-nonce'), 'utf8').trim()
-    return nonce ? ` --es auth '${nonce}'` : ''
+    if (!/^[a-f0-9]{1,64}$/i.test(nonce)) throw new Error('Invalid keyboard authorization nonce')
+    return ` --es auth '${nonce}'`
   } catch {
     return ''
   }
