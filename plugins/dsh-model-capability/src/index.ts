@@ -1,3 +1,5 @@
+import { boundedResponseText } from './bounded-response.js'
+
 /**
  * dsh-model-capability — host-side capability discovery for user-declared provider
  * routes (issues #122 / #125: a custom provider has no selectable reasoning effort).
@@ -740,12 +742,12 @@ export function apply(ctx: Context, config: PluginConfig = {}) {
     const fetchImpl = globalThis.fetch as unknown as FetchLike | undefined
     if (typeof fetchImpl !== 'function') return modelsDevSnapshot
     try {
-      const response = await fetchImpl(MODELS_DEV_URL, { headers: { accept: 'application/json' }, method: 'GET' })
+      const response = await fetchImpl(MODELS_DEV_URL, { headers: { accept: 'application/json' }, method: 'GET', signal: AbortSignal.timeout(30_000), redirect: 'error' })
       if (!response.ok) {
         diag(`models.dev fetch -> HTTP ${String(response.status)}；沿用旧缓存（${modelsDevSnapshot ? '有' : '无'}）`)
         return modelsDevSnapshot
       }
-      const entries = parseModelsDev(JSON.parse(await response.text()))
+      const entries = parseModelsDev(JSON.parse(await boundedResponseText(response)))
       const next = buildModelsDevSnapshot(entries)
       const bytes = writeModelsDevSnapshot(modelsDevPath, next)
       if (bytes === undefined) {

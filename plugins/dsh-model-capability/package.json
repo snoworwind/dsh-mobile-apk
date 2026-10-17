@@ -17,7 +17,8 @@
   "scripts": {
     "build": "tsc -p .",
     "e2e": "node scripts/e2e-real-model-fill.mjs",
-    "test": "npm run build && node --test test/capability-probe.test.mjs test/active-probe-gate.test.mjs test/catalog-lookup.test.mjs test/catalog-resolution.test.mjs test/input-modalities.test.mjs test/save-triggered-fill.test.mjs test/settings-writer.test.mjs test/dialect-gate.test.mjs test/mimo-blocker.test.mjs test/mimo-toggle-profile.test.mjs test/signature-stamp.test.mjs test/t1-poll-cost.test.mjs test/models-dev.test.mjs test/write-cas-retry.test.mjs"
+    "test:security": "npm run build && node --test test/bounded-response.test.mjs",
+    "test": "npm run build && node --test test/bounded-response.test.mjs test/capability-probe.test.mjs test/active-probe-gate.test.mjs test/catalog-lookup.test.mjs test/catalog-resolution.test.mjs test/input-modalities.test.mjs test/save-triggered-fill.test.mjs test/settings-writer.test.mjs test/dialect-gate.test.mjs test/mimo-blocker.test.mjs test/mimo-toggle-profile.test.mjs test/signature-stamp.test.mjs test/t1-poll-cost.test.mjs test/models-dev.test.mjs test/write-cas-retry.test.mjs"
   },
   "dependencies": {
     "@dsh-android/dsh-android-bridge": "file:../dsh-android-bridge"

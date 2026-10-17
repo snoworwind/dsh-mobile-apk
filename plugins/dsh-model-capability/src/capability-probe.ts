@@ -136,7 +136,11 @@ export interface ProbeReport {
   notes: string[]
 }
 
+import { boundedResponseText } from './bounded-response.js'
+
 export interface FetchResponseLike {
+  body?: ReadableStream<Uint8Array> | null
+  headers?: { get(name: string): string | null }
   ok: boolean
   status: number
   text(): Promise<string>
@@ -406,7 +410,7 @@ async function getJson(
       report.notes.push(`${init.method} ${safeUrl} -> HTTP ${response.status}`)
       return undefined
     }
-    const text = await response.text()
+    const text = await boundedResponseText(response)
     try {
       return JSON.parse(text)
     } catch {
@@ -544,7 +548,7 @@ export async function probeReasoningEfforts(request: ActiveProbeRequest): Promis
         body: JSON.stringify(request.negativeControlBody),
         signal: controller.signal,
       })
-      const rawBody = await response.text().catch(() => '')
+      const rawBody = await boundedResponseText(response, 1024 * 1024).catch(() => '')
       const body = diagnostic(rawBody)
       const rejected = !response.ok && (response.status === 400 || response.status === 422)
         && isReasoningEffortValidationError(rawBody)
@@ -582,7 +586,7 @@ export async function probeReasoningEfforts(request: ActiveProbeRequest): Promis
         body: JSON.stringify(request.body(level)),
         signal: controller.signal,
       })
-      const rawBody = await response.text().catch(() => '')
+      const rawBody = await boundedResponseText(response, 1024 * 1024).catch(() => '')
       const body = diagnostic(rawBody)
       if (response.ok) {
         result.accepted.push(level)
