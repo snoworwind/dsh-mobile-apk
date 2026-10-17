@@ -108,7 +108,7 @@ class LinuxAssetPrepareTest {
     assertEquals(false, answer.getBoolean("ok"))
     assertEquals(LinuxAssetIO.CODE_NOT_ENABLED, answer.getString("code"))
     assertFalse("环境不在场不得启动任何工作", started)
-    assertEquals(LinuxAssetPrepare.PHASE_FAILED, status().getString("phase"))
+    assertEquals(LinuxAssetPrepare.PHASE_IDLE, status().getString("phase"))
   }
 
   @Test
@@ -319,4 +319,54 @@ class LinuxAssetPrepareTest {
     assertFalse(stagedDir(bytes).exists())
     assertNotNull("失败必须留下可落盘的原因", state.getString("detail"))
   }
+  @Test fun rejectedRequestCannotReleaseAnotherTasksBusyState() {
+    val queued = mutableListOf<() -> Unit>()
+    LinuxAssetPrepare.runner = { queued.add(it) }
+    val bytes = goodArchive()
+    assertTrue(JSONObject(LinuxAssetPrepare.start(root, specJson(bytes))).getBoolean("ok"))
+    val before = status().toString()
+    val invalid = JSONObject(LinuxAssetPrepare.start(root, specJson(bytes, sha = "invalid")))
+    assertFalse(invalid.getBoolean("ok"))
+    assertEquals(before, status().toString())
+    val next = JSONObject(LinuxAssetPrepare.start(root, specJson(bytes)))
+    assertEquals("linux-asset-busy", next.getString("code"))
+    assertEquals(1, queued.size)
+    LinuxAssetPrepare.opener = installOpener(bytes)
+    queued.single()()
+    assertEquals(LinuxAssetPrepare.PHASE_OK, status().getString("phase"))
+  }
+
+  @Test fun unexpectedWorkerFailureReleasesBusyState() {
+    val bytes = goodArchive()
+    LinuxAssetPrepare.runner = { it() }
+    LinuxAssetPrepare.opener = LinuxAssetIO.Opener { _, _, _ -> throw IllegalStateException("controlled IO failure") }
+    LinuxAssetPrepare.start(root, specJson(bytes))
+    assertEquals(LinuxAssetPrepare.PHASE_FAILED, status().getString("phase"))
+    LinuxAssetPrepare.opener = installOpener(bytes)
+    LinuxAssetPrepare.start(root, specJson(bytes))
+    assertEquals(LinuxAssetPrepare.PHASE_OK, status().getString("phase"))
+  }
+
+  @Test fun runnerRejectionReleasesBusyState() {
+    LinuxAssetPrepare.runner = { throw IllegalStateException("controlled executor failure") }
+    assertFalse(JSONObject(LinuxAssetPrepare.start(root, specJson(goodArchive()))).getBoolean("ok"))
+    assertEquals(LinuxAssetPrepare.PHASE_FAILED, status().getString("phase"))
+  }
+
+  @Test fun oldCompletionCannotOverwriteNewGeneration() {
+    val queued = mutableListOf<() -> Unit>()
+    LinuxAssetPrepare.runner = { queued.add(it) }
+    val bytes = goodArchive()
+    LinuxAssetPrepare.start(root, specJson(bytes))
+    LinuxAssetPrepare.reset()
+    LinuxAssetPrepare.start(root, specJson(bytes))
+    val before = status().toString()
+    LinuxAssetPrepare.opener = LinuxAssetIO.Opener { _, _, _ -> throw IllegalStateException("old generation") }
+    queued[0]()
+    assertEquals(before, status().toString())
+    LinuxAssetPrepare.opener = installOpener(bytes)
+    queued[1]()
+    assertEquals(LinuxAssetPrepare.PHASE_OK, status().getString("phase"))
+  }
+
 }

@@ -41,6 +41,7 @@ internal object LinuxAssetPrepare {
 
   private val lock = Any()
   private var snapshot = Snapshot()
+  private var generation = 0L
 
   /**
    * 执行体注入点：生产起后台线程（下载可能是多兆字节，绝不能阻塞 WebView 的 JS 线程），
@@ -52,7 +53,7 @@ internal object LinuxAssetPrepare {
   var opener: LinuxAssetIO.Opener = LinuxAssetIO.HttpOpener
 
   /** 测试复位。 */
-  fun reset() = synchronized(lock) { snapshot = Snapshot() }
+  fun reset() = synchronized(lock) { generation += 1; snapshot = Snapshot() }
 
   /**
    * 开始一次准备。立即返回 `{ok,phase}`；进度/结果由 [status] 读取。
@@ -76,46 +77,40 @@ internal object LinuxAssetPrepare {
         .toString()
     }
 
-    // 第一道：清单字面量。摘要是**路径段的来源**，必须先于任何文件系统使用判定 ——
-    // 否则 `sha256 = "../../../app_state"` 会让下面的递归删除删掉环境根之外的目录。
-    LinuxAssetIO.specVerdict(spec)?.let { detail ->
-      return finish(LinuxAssetIO.CODE_SPEC_INVALID, detail, spec).toString()
-    }
-
-    synchronized(lock) {
-      if (snapshot.phase == PHASE_RUNNING) {
-        return JSONObject().put("ok", false).put("code", "linux-asset-busy")
-          .put("detail", "已有一次准备在进行中").toString()
-      }
+    // Rejected calls have no ownership of the active task and cannot release its busy state.
+    LinuxAssetIO.specVerdict(spec)?.let { return rejection(LinuxAssetIO.CODE_SPEC_INVALID, it) }
+    LinuxAssetIO.environmentVerdict(filesDir)?.let { return rejection(LinuxAssetIO.CODE_NOT_ENABLED, it) }
+    LinuxAssetIO.urlVerdict(spec.url)?.let { return rejection(LinuxAssetIO.CODE_URL_REJECTED, it) }
+    val task = synchronized(lock) {
+      if (snapshot.phase == PHASE_RUNNING) return rejection("linux-asset-busy", "已有一次准备在进行中")
+      generation += 1
       snapshot = Snapshot(phase = PHASE_RUNNING, sha256 = spec.sha256)
+      generation
     }
-
-    // 门口就把「环境不在场」和「来源不合规」判掉：这两条不需要起线程，也不该留下任何状态。
-    LinuxAssetIO.environmentVerdict(filesDir)?.let { detail ->
-      return finish(LinuxAssetIO.CODE_NOT_ENABLED, detail, spec).toString()
-    }
-    LinuxAssetIO.urlVerdict(spec.url)?.let { detail ->
-      return finish(LinuxAssetIO.CODE_URL_REJECTED, detail, spec).toString()
-    }
-
     val root = File(filesDir!!, LinuxAssetIO.ENV_DIR)
-    runner {
-      val failure = prepareInto(root, spec)
-      if (failure == null) {
-        synchronized(lock) {
-          snapshot = snapshot.copy(
-            phase = PHASE_OK,
-            code = null,
-            detail = null,
-            bytes = spec.size,
-            stagedPath = stagedDir(root, spec.sha256)?.absolutePath,
-          )
-        }
-      } else {
-        synchronized(lock) {
-          snapshot = snapshot.copy(phase = PHASE_FAILED, code = failure.code, detail = failure.detail)
-        }
+    fun complete(failure: LinuxAssetIO.Failure?) = synchronized(lock) {
+      if (generation == task) {
+        snapshot = Snapshot(
+          phase = if (failure == null) PHASE_OK else PHASE_FAILED,
+          code = failure?.code,
+          detail = failure?.detail,
+          sha256 = spec.sha256,
+          bytes = if (failure == null) spec.size else 0L,
+          stagedPath = if (failure == null) stagedDir(root, spec.sha256)?.absolutePath else null,
+        )
       }
+    }
+    try {
+      runner {
+        val failure = try { prepareInto(root, spec) } catch (error: Exception) {
+          LinuxAssetIO.Failure(LinuxAssetIO.CODE_DOWNLOAD_FAILED, error.message ?: error.javaClass.simpleName)
+        }
+        complete(failure)
+      }
+    } catch (error: Exception) {
+      val failure = LinuxAssetIO.Failure(LinuxAssetIO.CODE_DOWNLOAD_FAILED, error.message ?: error.javaClass.simpleName)
+      complete(failure)
+      return rejection(failure.code, failure.detail)
     }
     return JSONObject().put("ok", true).put("phase", PHASE_RUNNING).put("sha256", spec.sha256).toString()
   }
@@ -189,10 +184,6 @@ internal object LinuxAssetPrepare {
     return null
   }
 
-  private fun finish(code: String, detail: String, spec: LinuxAssetIO.Spec): JSONObject {
-    synchronized(lock) {
-      snapshot = Snapshot(phase = PHASE_FAILED, code = code, detail = detail, sha256 = spec.sha256)
-    }
-    return JSONObject().put("ok", false).put("code", code).put("detail", detail).put("phase", PHASE_FAILED)
-  }
+  private fun rejection(code: String, detail: String): String =
+    JSONObject().put("ok", false).put("code", code).put("detail", detail).toString()
 }

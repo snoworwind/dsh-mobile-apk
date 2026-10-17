@@ -87,7 +87,7 @@
 
 已落地并有反证：`LinuxAssetIO`（来源面/落点面/摘要+体量/解包面判据，复用 `SnapshotExtractor` 与 `SnapshotBundledAsset`）与 `LinuxAssetPrepare`（客户端触发入口，`@JavascriptInterface` `linuxAssetPrepare`/`linuxAssetPrepareStatus`）。五条负控（穿越、符号链接逃逸、炸弹、摘要不符、字节数不符）在 Kotlin 侧各有真实用例，且失败一律不发布产物。
 
-**仍未打通的三段（均不记通过）**：① ~~引擎侧 bootstrap 的 `linuxAssetIO` 透传/占位接线**未做**~~ —— **0.15.0 已接**：`plugins/dsh-android-linux-env/src/linux-host-asset-io.ts` 造出透传 + 失败关闭的 `downloadAsset`/`extractArchive`，负控见 `test/linux-host-asset-io.test.mjs`（无暂存 → 拒；摘要不符 → 拒；包名不符 → 拒；`unpackedSize` 不符 → 拒；恶意摘要 → 拒且环境根外哨兵不动；另有 1 正控证明真实暂存包可激活）。**配套的上游复用分支缺口亦已闭合**：bootstrap 在 `dsh-bionilux@3f86a85` 起，激活前会复验宿主暂存的包（自算归档 SHA-256 与体量、重算 `unpackedSize`、校验包名与入口），命中自己写下的标记也不再免检——被篡改的槽位**不会被复用**，而是从已复验的宿主暂存**重建**；需要重建而重建源又不可信时**失败关闭**。两条都有内容级用例钉住（`re-verifies on reuse: a tampered published slot is rebuilt, not trusted`、`refuses when a rebuild is needed and the retained archive no longer matches the manifest`），且已用**撤掉上游修复**的变异验证证明它们确实会变红。② **页面侧没有调用者**：`linuxAssetPrepare` 在 `android-bridge.ts` 里只是声明位，实际调用点应由 Linux 设置页（vendored bootstrap 客户端，上游所有）在用户点安装前发起，属于上游改动；③ bootstrap 包**仍未进注入集**，不随应用分发；④ 因此**没有任何端到端安装验收**，也没跑过真实 Release 产物。
+**接入与验收边界**：引擎 IO 与三项安全问题的源码修复及反证见 gotchas.md 坑 366；此前上游大小复用能防止等长篡改的结论已撤回。页面侧仍没有 linuxAssetPrepare 调用者；bootstrap 仍未进入注入集，不随 APK 注入运行时。因此没有端到端安装或真实 Release 产物验收，本轮源码修复不能记为已打通。
 
 ## 历史事项不自动关闭
 
@@ -103,3 +103,6 @@
 ## 2026-10-17 上游同步验收边界
 
 上游 `e3e728b` 已同步到安全分支工作树；本轮 **未做设备验证**，模拟器两端口拒绝连接且无在线真机。管理中心、气泡导航、Shizuku 及新增 Linux 桥的 CDP/ADB 层均未关闭；本轮没有来源链新 APK，不得沿用上游设备截图作为本分支验收。源码检查和本机测试证据见 SECURITY-HARDENING.md 同日复核。
+
+
+2026-10-17 Linux 安全修复仍 **未做设备验证**：源码反证与 Kotlin 编译/单测通过不能替代来源链 APK、CDP 和 ADB 自主任务；bootstrap 未进入注入集、页面尚无准备桥调用者的集成缺口不变，详见上述 Linux 待接入边界。

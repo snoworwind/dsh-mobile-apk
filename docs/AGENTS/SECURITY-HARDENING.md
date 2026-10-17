@@ -236,3 +236,7 @@ node --test scripts/patches/tests/sidebar-bubble-reorder.test.mjs scripts/patche
 ```
 
 上述 NODE_OPTIONS 赋值为 POSIX 写法，Windows PowerShell 用 `$env:NODE_OPTIONS='--no-experimental-webstorage'`。本机 UI 首跑因 Node 26 的 webstorage 与 jsdom 冲突失败，禁用宿主该实验功能后全通过；未改测试断言或产品源码。Windows/Linux 失败原日志保留，不覆盖成通过。
+
+## 复核轮次：2026-10-17（Linux 审查三项修复）
+
+本轮修复等长代码篡改、确认参数断链和资产准备互斥失效；根因、生产正反证、原始日志及三层未覆盖范围统一见 [gotchas.md 坑 366](gotchas.md)。保留默认不启用与来源构建约束；未做设备验证，不构成发布候选通过。

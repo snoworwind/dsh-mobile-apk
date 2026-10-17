@@ -33,7 +33,11 @@
       "exports/main point at ./lib: the snapshot injector carries lib/** plus package.json; this tree is built by build.mjs, not published as-is",
       "build script added (copies src/ to lib/); no build artifact is committed",
       "test script dropped: upstream test/ is intentionally not vendored (see excludedFromVendor)",
-      "private: true so the vendored copy can never be published"
-    ]
+      "private: true so the vendored copy can never be published",
+      "src/asset-bundle.js locally hardened: always authenticate and independently extract archive bytes; never reuse size-only slots or host unpacked trees"
+    ],
+    "localPatches": {
+      "src/asset-bundle.js": "7e32ce0f57ee0a7f75dfd2d2af6ff61357d63b6c34e4f0dbf7aa23cf4300e416"
+    }
   }
 }

@@ -1,27 +1,14 @@
 /**
- * 宿主侧 `linuxAssetIO` 适配器 —— (iii) 形态的**引擎侧一半**（0.15.0）。
- *
- * 为什么需要它：引擎侧既解不了 `.tar.xz`（Node 的 zlib 不含 xz），也调不动壳侧（壳侧是 HTTP
- * 客户端，长轮询引擎，没有反向通道）。所以「取字节 + 安全解包」归宿主
- * （Kotlin `LinuxAssetIO` / `LinuxAssetPrepare`），引擎侧 bootstrap 只保留它本来就该拥有的
- * 权威：版本、状态、**复验**与激活。
- *
- * 本模块交出的 `downloadAsset` / `extractArchive` 语义是**透传 + 失败关闭**，不是下载器：
- *  - `downloadAsset` 只把**宿主已暂存的归档**路径交回 bootstrap，自己一个字节都不取；
- *  - `extractArchive` 只把宿主**已解包**的树复制进 bootstrap 的目标目录（复制而非移动：宿主那份
- *    必须原样留着，供引擎侧复验）；
- *  - 任何一步「宿主没准备好」都抛错，**绝不**回退成自行下载。
- *
- * 复验权威在 bootstrap，不在宿主：它拿到归档后会自算 SHA-256 与体量并要求与 manifest 逐字一致，
- * 之后才解包、重算 `unpackedSize`、校验包名与入口。因此 `reused` 是**复验结果**，不是宿主的说法；
- * 宿主写下的任何标记都不构成激活依据。
- *
- * 路径由 **manifest 的摘要**推导，调用方不能指定落点（与 Kotlin 侧同一个判据口径）：
- * `<filesDir>/linux-environment/staging/<sha256>/`。
+ * Host archive adapter. Downloading remains a shell responsibility. Bootstrap copies and
+ * hashes the retained archive; this adapter independently decodes that copy in process.
+ * Mutable host unpacked trees and cache markers are never used as executable payload.
  */
-import { createHash } from 'node:crypto'
-import { createReadStream } from 'node:fs'
-import { cp, lstat, mkdir, readdir } from 'node:fs/promises'
+import { createReadStream, createWriteStream } from 'node:fs'
+import { lstat, mkdir } from 'node:fs/promises'
+import { Readable, Transform } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
+import xz from 'xz-decompress'
+import tar from 'tar-stream'
 import { isAbsolute, join, resolve, sep } from 'node:path'
 
 /** 与 Kotlin `LinuxAssetIO.ENV_DIR` 同口径（`check-linux-host-staging-invariant` 守）。 */
@@ -93,54 +80,48 @@ export function unpackedTreeFor(filesDir: string, sha256: unknown): string | nul
   return staged === null ? null : join(staged, UNPACKED_DIR)
 }
 
-async function sha256OfFile(file: string): Promise<string> {
-  const hash = createHash('sha256')
-  for await (const chunk of createReadStream(file)) hash.update(chunk as Buffer)
-  return hash.digest('hex')
+/** Decode verified archive bytes, never the independently mutable host tree. */
+async function extractVerifiedArchive(archivePath: string, destination: string): Promise<void> {
+  const root = resolve(destination)
+  const seen = new Set<string>()
+  let entries = 0, declared = 0, decoded = 0
+  const extract = tar.extract()
+  extract.on('entry', (header, stream, next) => {
+    void (async () => {
+      if (++entries > 20_000 || !Number.isSafeInteger(header.size) || (header.size ?? 0) < 0) throw new Error('Archive entry limit exceeded')
+      if (header.type !== 'file' && header.type !== 'directory') throw new Error('Archive links and special entries are forbidden')
+      const name = header.name.replace(/^\.\//, '').replace(/\/$/, '')
+      const target = resolveInside(root, name)
+      if (target === null || target === root || seen.has(target)) throw new Error('Unsafe or duplicate archive path')
+      seen.add(target)
+      const size = header.size ?? 0
+      declared += size
+      if (size > 128 * 1024 * 1024 || declared > 512 * 1024 * 1024) throw new Error('Archive payload limit exceeded')
+      // Destination is a new bootstrap staging directory; no caller-owned tree is merged.
+      if (header.type === 'directory') {
+        if (size !== 0) throw new Error('Directory entry has payload')
+        await mkdir(target, { recursive: true })
+        stream.resume()
+      } else {
+        await mkdir(resolve(target, '..'), { recursive: true })
+        await pipeline(stream, createWriteStream(target, { flags: 'wx', mode: (header.mode ?? 0o600) & 0o777 }))
+      }
+      next()
+    })().catch(error => extract.destroy(error))
+  })
+  const limit = new Transform({ transform(chunk, _encoding, callback) {
+    decoded += chunk.length
+    callback(decoded > 544 * 1024 * 1024 ? new Error('Decoded archive limit exceeded') : null, chunk)
+  } })
+  const decodedStream = new xz.XzReadableStream(Readable.toWeb(createReadStream(archivePath)) as ReadableStream<Uint8Array>)
+  await pipeline(Readable.fromWeb(decodedStream as never), limit, extract)
 }
 
-async function assertPlainDirectory(directory: string, code: string, what: string): Promise<void> {
-  let info
-  try {
-    info = await lstat(directory)
-  } catch {
-    throw new LinuxHostAssetError(code, `${what}不在场：${directory}`)
-  }
-  if (!info.isDirectory() || info.isSymbolicLink()) {
-    throw new LinuxHostAssetError(code, `${what}必须是普通目录（不得是符号链接）：${directory}`)
-  }
-}
-
-/**
- * 复制目录树，拒绝符号链接。
- *
- * 宿主侧的树来自 Kotlin 的硬化解包（`SnapshotExtractor` 已拒穿越/符号链接逃逸），这里是
- * **第二道**：跨语言边界时不信上游结论，踏到的每个条目的实时类型才是判据。
- */
-async function copyTreeNoSymlinks(source: string, destination: string): Promise<void> {
-  for (const entry of await readdir(source, { withFileTypes: true })) {
-    const from = join(source, entry.name)
-    const to = join(destination, entry.name)
-    const info = await lstat(from)
-    if (info.isSymbolicLink()) {
-      throw new LinuxHostAssetError(CODE_HOST_TREE_UNSAFE, `宿主解包树含符号链接：${entry.name}`)
-    }
-    if (info.isDirectory()) {
-      await mkdir(to, { recursive: true })
-      await copyTreeNoSymlinks(from, to)
-    } else if (info.isFile()) {
-      await cp(from, to)
-    } else {
-      throw new LinuxHostAssetError(CODE_HOST_TREE_UNSAFE, `宿主解包树含不支持的条目类型：${entry.name}`)
-    }
-  }
-}
-
-/** bootstrap 需要的适配器面：只有这两个，且都是透传。 */
+/** Bootstrap 的两个 IO 适配器：宿主归档读取与独立解码。 */
 export interface HostAssetIO {
   /** 交回宿主已暂存的归档路径；宿主没准备好就抛错（**不下载**）。 */
   downloadAsset(asset: { sha256?: unknown }, options?: { destination?: string }): Promise<string>
-  /** 把宿主已解包的树复制进 `destination`；宿主没准备好就抛错（**不解压**）。 */
+  /** 从 bootstrap 已验证的归档副本解码到新 staging；不使用宿主解包树。 */
   extractArchive(archivePath: string, destination: string): Promise<void>
 }
 
@@ -176,23 +157,8 @@ export function createHostAssetIO(options: { filesDir: string }): HostAssetIO {
     },
 
     async extractArchive(archivePath: string, destination: string): Promise<void> {
-      // 按**归档自身的摘要**定位宿主已解包的树：这样解包结果与 bootstrap 刚验过的字节绑定，
-      // 而不是靠调用顺序或调用方给的任何路径。
-      const digest = await sha256OfFile(archivePath)
-      const tree = unpackedTreeFor(filesDir, digest)
-      if (tree === null) {
-        throw new LinuxHostAssetError(CODE_ASSET_SPEC_INVALID, `归档摘要推导被拒：${digest}`)
-      }
-      await assertPlainDirectory(tree, CODE_ASSET_NOT_PREPARED, '宿主解包树')
-      const retained = retainedArchiveFor(filesDir, digest)
-      if (retained !== null) {
-        const info = await lstat(retained).catch(() => null)
-        if (info === null || !info.isFile()) {
-          throw new LinuxHostAssetError(CODE_ASSET_NOT_PREPARED, `宿主保留的归档不在场：${retained}`)
-        }
-      }
       await mkdir(destination, { recursive: true })
-      await copyTreeNoSymlinks(tree, destination)
+      await extractVerifiedArchive(archivePath, destination)
     },
   }
 }

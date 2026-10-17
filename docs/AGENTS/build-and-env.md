@@ -234,3 +234,6 @@ gh workflow run build-apk-source.yml --repo snoworwind/dsh-mobile-apk --ref secu
 **2026-10-17 云端核验快照**：Actions 已由用户重新启用。`81dc50c` 的 [源码构建 38935633493](https://github.com/snoworwind/dsh-mobile-apk/actions/runs/38935633493) 已通过原失败的输入预检、签名工具预检与固定来源检出，记录时正在编译 Harness；尚未取得最终 APK/上传成功结论。后续状态以该运行页面为准。旧禁用与夹具故障分别见坑 346、347。
 
 **云端 npm 缓存隔离**：来源工作流在依赖预检前覆盖 npm 缓存到 `$RUNNER_TEMP/dsh-npm-cache`，否则 `dsh-shell-termux/.npmrc` 的 Windows 绝对路径会被 Linux npm 落入组件树，并在 provenance 输出复核时报未跟踪输入。根因及反证见 gotchas.md 坑 350。
+
+
+Linux bootstrap 本地安全分叉（2026-10-17）：`check-vendored-linux-bootstrap.mjs` 保留 MANIFEST 的原上游哈希，用 LOCAL_PATCHES 单列 asset-bundle.js 的本地安全哈希，并要求与 package.json.dshVendor.localPatches 一致；不能把本地修改改记为上游原样。运行 `node scripts/check-vendored-linux-bootstrap.mjs --self-test` 验证漂移拒绝；归档解码新增依赖见 DEPENDENCIES.md。

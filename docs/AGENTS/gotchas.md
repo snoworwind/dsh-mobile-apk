@@ -2423,3 +2423,13 @@ JVM 边界测试在 `EngineBootInstrumentationTest`（取值与 clamp 边界、�
 
 
 365. **自动合并不会发现新文件对本分支退役功能的引用（2026-10-17 上游同步）**：管理中心新文件直接引用 `updateButton`、`apkUpdate`、`GuidePhase.Updating`，Git 自动合并没有代码冲突，但 Kotlin 编译实际失败。根因是上游保留应用内更新，本分支已整体退役。删除新文件中的更新入口和状态引用，保留插件、存储及控制台功能；不能用复活控制器的方式凑编译。编译与测试日志在 `.deploy-tmp/upstream-20261017/kotlin-final.log`，设备未验，范围见 SECURITY-HARDENING.md 本轮复核。
+
+366. **Linux 插件总字节数不能证明代码完整性，错误回执不能释放他人的任务（2026-10-17）**
+
+**现象与真因**：上游 3f86a85 的 bootstrap 复用只比较 unpackedSize、包名和入口；宿主直取路径虽验证归档摘要，实际执行的却是另一棵可写解包树。把 `() => {}` 等长改成 `() => 42`，重新安装仍会激活篡改内容。另外 HTTP 层消费 confirmed 后未传递真实 bootstrap 所需 confirmed/activate，三个操作均 500；Kotlin 在 busy 检查前让无效清单调用 finish，A 有效、B 无效、C 有效时能排入两个 worker，争抢同一暂存目录。
+
+**修法**：每次复制宿主归档、验 SHA-256 与长度、进程内独立 XZ/tar 解码到新 staging，再校验包结构与展开体量后交换；不使用宿主解包树，不复用大小标记。拒绝穿越、重复路径、链接及特殊文件，保留正常文件权限并清除特殊权限位。HTTP 向真实执行端传确认参数。Kotlin 无效请求只返回自身错误，任务代次在锁内领取，成功/异常/调度拒绝只提交自己的结果。vendored 原始来源身份保留，本地安全偏差单列哈希登记，不冒充上游原样。
+
+**代码层证据**（`.deploy-tmp/linux-security-fix/`）：Linux-env 61 项全过，包含真实 USTAR/XZ、等长篡改缓存、篡改宿主树、真实 bootstrap 的 HTTP 安装/重装/卸载、未确认拒绝及不安全归档；旧完整性实现使两条等长反证判红，撤掉确认参数使真实路由用例判红（negative-summary.log、negative-integrity.log、negative-confirmation.log）。WSL Java 17 全量 Kotlin 119 类/1305 项，失败/错误/跳过均为 0；LinuxAssetPrepareTest 从 10 提升到 14，新增无效请求不释放 busy、调度/工作异常收敛及陈旧完成拒绝。日志 kotlin-tests.log。
+
+**边界**：未做设备验证；ADB 无设备，两模拟器均 connection refused（adb.log）。本轮未构建 APK、未执行 CDP/ADB 自主任务，不宣称完成 L2/L3 三层关闭。bootstrap 的注入和页面调用者缺口不因源码修复而关闭；来源链候选还须核对新增依赖及许可资产。此修复不提供对任意同 UID 恶意进程并发替换 staging 的通用沙箱保证。

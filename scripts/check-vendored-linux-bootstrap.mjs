@@ -50,6 +50,11 @@ const MANIFEST = {
   'src/version.js': 'd0131f71b60ff38183070ddd3ef7142a98ae8a2cb54e2a57b725fa2e0d6b3636',
 }
 
+// Explicit local security fork; MANIFEST above retains the original upstream hashes.
+const LOCAL_PATCHES = {
+  'src/asset-bundle.js': '7e32ce0f57ee0a7f75dfd2d2af6ff61357d63b6c34e4f0dbf7aa23cf4300e416',
+}
+
 /** Files this repo adds. Neither may be an upstream artifact. */
 const ADDED = ['build.mjs', 'package.json']
 
@@ -126,15 +131,16 @@ function run({ quiet = false } = {}) {
     const full = join(PACKAGE_DIR, rel)
     if (!existsSync(full)) continue // already reported as missing above
     if (expectedDigest === '__DIGEST__') { unrecorded.push(rel); continue }
-    if (digestOf(full) !== expectedDigest) drifted.push(rel)
+    if (digestOf(full) !== (LOCAL_PATCHES[rel] ?? expectedDigest)) drifted.push(rel)
   }
   if (unrecorded.length > 0) fail(`digest table not populated (${unrecorded.join(', ')}): run --print`)
-  else if (drifted.length === 0) ok(`${Object.keys(MANIFEST).length} upstream-faithful files match their recorded digests`)
+  else if (drifted.length === 0) ok(`${Object.keys(MANIFEST).length} pinned files match their upstream or explicit local-security digests`)
   else fail(`vendored source drifted from the recorded upstream content: ${drifted.join(', ')}`
     + ' — re-vendor from the pinned commit and update the table with --print, or revert the edit')
 
   // 3. the deviations that make this copy chain-ready, and the provenance pin itself.
   const pkg = JSON.parse(readFileSync(join(PACKAGE_DIR, 'package.json'), 'utf8'))
+  if (JSON.stringify(pkg.dshVendor?.localPatches) !== JSON.stringify(LOCAL_PATCHES)) fail('local security deviations must match package.json.dshVendor.localPatches')
   const main = pkg.exports?.['.'] ?? pkg.main
   if (main === './lib/index.js') ok('package.json entry points at ./lib (the snapshot injector carries lib/**)')
   else fail(`package.json entry must be ./lib/index.js so the injector carries code (found ${JSON.stringify(main)})`)
@@ -169,6 +175,15 @@ function selfTest() {
   }
 
   const controls = [
+    {
+      label: 'negative control: local security patch drift is rejected',
+      expect: /drifted from the recorded upstream content/,
+      run: () => {
+        const saved = LOCAL_PATCHES['src/asset-bundle.js']
+        LOCAL_PATCHES['src/asset-bundle.js'] = '0'.repeat(64)
+        try { return run({ quiet: true }) } finally { LOCAL_PATCHES['src/asset-bundle.js'] = saved }
+      },
+    },
     {
       label: 'negative control: a digest mismatch is reported',
       expect: /drifted from the recorded upstream content/,

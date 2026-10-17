@@ -231,7 +231,7 @@ bootstrap 调用 `linuxPluginHost.install({directory,entry='lib/index.js',config
 
 壳侧判据（实现见 `app/src/main/java/com/dsharnessmobile/shell/LinuxAssetIO.kt` 与 `LinuxAssetPrepare.kt`）：只接受 https + 主机白名单（`github.com` / GitHub 资产 CDN）且路径必须是**本仓** Releases 的 `<tag>/<asset>`；重定向**逐跳**复核（不用 `instanceFollowRedirects` 的自动跟随）；`SHA-256` 与**字节数**都要与清单一致；解包复用既有 `SnapshotExtractor`（绝对路径/`..`/符号链接逃逸/解压炸弹上限都在那里）；解包目标与下载目标都由壳侧强制落在 `DSH_FILES_DIR/linux-environment` 内。**除非 Linux 环境在场**（根目录 + bootstrap 状态文件 `linux-bootstrap-state.json`）一律拒绝，故它不是通用下载器。只有全部通过才原子发布成 `staging/<sha256>/`，并把**归档字节留在原地**供引擎侧复验。
 
-**职责边界（0.15.0 的所有权变化，必须如实读）**：bootstrap **不再取字节** —— `linuxAssetIO.downloadAsset` / `extractArchive` 从「bootstrap 自己下载并解包」变成宿主侧准备之后的**透传/占位**，因为引擎侧既解不了 xz 也调不动宿主。bootstrap 仍然拥有版本、状态、**最终落位**与激活的权威；`reused: true` 必须来自它自己的复验结果（保留归档的摘要，或解包树上的 `unpackedSize` + 入口 + 包名），**不得**只信宿主写下的标记。引擎侧在「什么都没准备」时必须**失败关闭**，不得半装。
+**职责边界（2026-10-17 安全修复）**：Kotlin 负责下载与宿主暂存；bootstrap 每次复制归档并复核 SHA-256/字节数，引擎适配器用固定版本 `xz-decompress` 与 `tar-stream` 在进程内重新解码到全新 staging，再核对 unpackedSize、包名与入口。宿主 `unpacked/` 和缓存标记不作为代码来源，不再按总字节数复用槽位；无已准备归档时失败关闭、不自行下载。预检失败只返回本次错误，不修改活动准备任务的状态；活动任务独占 busy，结果绑定代次，执行器或工作体异常也收敛到 failed。HTTP 层在收到明确确认后向真实 bootstrap 传 confirmed（安装/重装另带 activate），不绕过其执行边界确认。
 
 **端到端仍未打通（不记通过）**：客户端调用 `linuxAssetPrepare` 的那一步、以及引擎侧 bootstrap 的透传接线都**尚未落地**；且 bootstrap 包本身还没进注入集，因此**不会随应用分发**。本轮交付的是宿主侧「可准备」的能力与其反证，不是可安装的系统。
 

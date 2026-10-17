@@ -6,6 +6,9 @@
  * 不是替身——否则「bootstrap 会复验」就只是我们的声明而非被测事实。
  */
 import { test } from 'node:test'
+import { archives } from './archive-fixtures.mjs'
+import { registerLinuxEnvironmentRoutes } from '../lib/linux-environment.js'
+import { Readable } from 'node:stream'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
@@ -47,7 +50,7 @@ async function tempFilesDir() {
  * `<filesDir>/linux-environment/staging/<sha256>/{asset.tar.xz, unpacked/package/...}`。
  */
 async function stageBundle(filesDir, { archiveBytes, declaredDigest, packageName = RUNTIME_PACKAGE_NAME, entryBody = GENUINE_ENTRY } = {}) {
-  const bytes = archiveBytes ?? Buffer.from('host staged runtime archive bytes')
+  const bytes = archiveBytes ?? Buffer.from(archives[packageName === RUNTIME_PACKAGE_NAME ? 'genuine' : 'wrongPackage'], 'base64')
   // `declaredDigest` 允许把内容放在**另一个**摘要名下：这正是「暂存内容与 manifest 摘要不符」的造法。
   const digest = declaredDigest ?? sha256(bytes)
   const staged = stagedDirectoryFor(filesDir, digest)
@@ -285,7 +288,7 @@ test('re-verifies on reuse: a tampered published slot is rebuilt, not trusted', 
 /**
  * 重建源一旦与 manifest 不符必须**拒绝**。
  *
- * 注意判据的边界（实测得出，别写成"改归档就必拒"）：槽位完好时上游直接**复用**（按 manifest 的
+ * 注意判据的边界（实测得出，别写成"改归档就必拒"）：旧实现槽位完好时直接**复用**（按 manifest 的
  * `unpackedSize` 重新丈量树即可，根本不需要读归档），所以只改归档不会失败。归档是**重建源** ——
  * 只有「需要重建」（槽位被篡改）+「重建源不可信」同时成立，才必须失败关闭。
  *
@@ -312,7 +315,7 @@ test('refuses when a rebuild is needed and the retained archive no longer matche
 
     await assert.rejects(
       service.reinstall({ confirmed: true, activate: true }),
-      /release manifest \(SHA-256 or size\)/,
+      /SHA-256 or size verification failed/,
     )
     assert.equal(pluginHost.activations.length, 1, '重建源复验不过就不许再激活')
   } finally {
@@ -365,4 +368,66 @@ test('the config neither enables nor installs anything on its own', async () => 
   } finally {
     await rm(filesDir, { recursive: true, force: true })
   }
+})
+
+
+test('same-size modified cache entry is rebuilt from authenticated archive bytes', async () => {
+ const filesDir=await tempFilesDir()
+ try {
+  const asset=await stageBundle(filesDir)
+  const {service}=makeBootstrap({filesDir,manifest:makeManifest({asset})})
+  await service.ready;await installConfirmed(service)
+  const slot=join(String(createLinuxBootstrapConfig({filesDir,appVersion:'0.15.0'}).stagingDirectory),asset.sha256,'lib','index.js')
+  const modified=GENUINE_ENTRY.replace('() => {}','() => 42')
+  assert.equal(Buffer.byteLength(modified),Buffer.byteLength(GENUINE_ENTRY))
+  await writeFile(slot,modified)
+  await service.reinstall({confirmed:true,activate:true})
+  assert.equal(await readFile(slot,'utf8'),GENUINE_ENTRY)
+ }finally{await rm(filesDir,{recursive:true,force:true})}
+})
+
+test('tampered host unpacked tree is ignored even when byte length is unchanged',async()=>{
+ const filesDir=await tempFilesDir()
+ try {
+  const asset=await stageBundle(filesDir)
+  await writeFile(join(unpackedTreeFor(filesDir,asset.sha256),'package','lib','index.js'),GENUINE_ENTRY.replace('() => {}','() => 42'))
+  const {service}=makeBootstrap({filesDir,manifest:makeManifest({asset})})
+  await service.ready;await installConfirmed(service)
+  const slot=join(String(createLinuxBootstrapConfig({filesDir,appVersion:'0.15.0'}).stagingDirectory),asset.sha256,'lib','index.js')
+  assert.equal(await readFile(slot,'utf8'),GENUINE_ENTRY)
+ }finally{await rm(filesDir,{recursive:true,force:true})}
+})
+
+test('independent extractor rejects traversal, links, duplicates and invalid XZ',async()=>{
+ const filesDir=await tempFilesDir()
+ try {
+  const io=createHostAssetIO({filesDir})
+  for(const kind of ['traversal','symlink','duplicate','invalid']){
+   const archive=join(filesDir,kind+'.xz'), dest=join(filesDir,kind)
+   await writeFile(archive,kind==='invalid'?Buffer.from('invalid XZ'):Buffer.from(archives[kind],'base64'))
+   await assert.rejects(io.extractArchive(archive,dest),undefined,kind)
+  }
+  assert.equal(existsSync(join(filesDir,'escape')),false)
+ }finally{await rm(filesDir,{recursive:true,force:true})}
+})
+
+test('confirmed HTTP mutations satisfy the real bootstrap contract',async()=>{
+ const filesDir=await tempFilesDir()
+ try{
+  const asset=await stageBundle(filesDir)
+  const {service,pluginHost}=makeBootstrap({filesDir,manifest:makeManifest({asset})});await service.ready
+  const routes=new Map()
+  registerLinuxEnvironmentRoutes({webServer:{register:r=>{routes.set(r.path,r);return()=>{}}},effect:f=>f(),auth:()=>({token:()=> 'a'.repeat(32)}),bootstrap:()=>service})
+  async function call(action,confirmed){
+   const req=Readable.from([Buffer.from(JSON.stringify({confirmed}))]);req.method='POST';req.headers={host:'127.0.0.1:3080','x-dsh-control-token':'a'.repeat(32)}
+   const res={writeHead(code){this.code=code},end(body){this.body=body}}
+   await routes.get('/api/android/linux-environment/'+action).handler(req,res)
+   return res
+  }
+  for(const action of ['install','reinstall','uninstall'])assert.equal((await call(action,false)).code,400)
+  assert.equal(pluginHost.activations.length,0)
+  for(const action of ['install','reinstall','uninstall'])assert.equal((await call(action,true)).code,200,action)
+  assert.equal((await service.status()).installed,false)
+  assert.equal(pluginHost.activations.length,2)
+ }finally{await rm(filesDir,{recursive:true,force:true})}
 })

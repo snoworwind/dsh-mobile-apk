@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { createReadStream } from 'node:fs'
-import { cp, mkdir, lstat, readFile, readdir, rename, rm, stat, writeFile, copyFile } from 'node:fs/promises'
+import { mkdir, lstat, readFile, readdir, rename, rm, stat, writeFile, copyFile } from 'node:fs/promises'
 import path from 'node:path'
 import { parseGithubUrl } from './manifest.js'
 
@@ -35,7 +35,8 @@ async function unpackedBytes(directory) {
 
 function assertAsset(asset) {
   if (!asset || typeof asset.url !== 'string' || !/^[a-f0-9]{64}$/.test(asset.sha256 ?? '') ||
-      !Number.isSafeInteger(asset.size) || asset.size < 0 || !Number.isSafeInteger(asset.unpackedSize) || asset.unpackedSize < 0) {
+      !Number.isSafeInteger(asset.size) || asset.size < 0 || asset.size > 512 * 1024 * 1024 ||
+      !Number.isSafeInteger(asset.unpackedSize) || asset.unpackedSize < 0 || asset.unpackedSize > 512 * 1024 * 1024) {
     throw new TypeError('Asset requires url, SHA-256, size, and unpackedSize')
   }
   const url = parseGithubUrl(asset.url)
@@ -62,46 +63,23 @@ export async function installVerifiedPluginBundle({
   const root = path.resolve(destinationRoot)
   await mkdir(root, { recursive: true })
   const finalDirectory = path.join(root, asset.sha256)
-  const markerPath = path.join(finalDirectory, '.dsh-asset-integrity.json')
-  try {
-    const marker = JSON.parse(await readFile(markerPath, 'utf8'))
-    const rootInfo = await lstat(finalDirectory)
-    if (rootInfo.isDirectory() && !rootInfo.isSymbolicLink() && marker.sha256 === asset.sha256 && marker.size === asset.size && marker.unpackedSize === asset.unpackedSize) {
-      // Our own marker is bookkeeping, not evidence. Re-measure the tree (which
-      // also refuses symbolic links) and re-validate the package before calling
-      // this reusable, so an altered or truncated slot is rebuilt rather than
-      // activated. `reused: true` is a verification outcome, never an assumption.
-      const measured = await unpackedBytes(finalDirectory)
-      if (measured === asset.unpackedSize) {
-        if (packageName) await validatePackage(finalDirectory, packageName, entry)
-        return { path: finalDirectory, sha256: asset.sha256, size: asset.size, unpackedSize: asset.unpackedSize, reused: true }
-      }
-    }
-  } catch { /* Rebuild missing or untrusted cached staging content. */ }
-
-  // The host may already have fetched and safely unpacked the bundle (see
-  // docs/DECISIONS.md D-015). Its staging is never trusted as such: the archive
-  // is re-hashed against this manifest and the unpacked tree is re-measured
-  // here, and only then is it published into our own content-addressed root.
-  // A staged bundle that is present but wrong is an error, not a cache miss —
-  // silently falling back to a download would hide tampering or corruption.
-  if (hostStagingRoot) {
-    const staged = await publishHostStagedBundle({
-      hostStagingRoot, asset, root, finalDirectory, packageName, entry,
-    })
-    if (staged) return staged
-    if (requireStagedBundle) {
-      throw new Error('No host-staged bundle is available: the host must prepare this asset before it can be installed')
-    }
-  }
-
+  // Mutable unpacked trees and size-only markers are not content evidence.
+  // Always copy and hash the archive, then independently decode it into a fresh slot.
   const token = randomUUID()
   const archivePath = path.join(root, `.asset-${token}`)
   const staging = path.join(root, `.stage-${token}`)
   const resultDirectory = path.join(staging, 'package')
   await mkdir(staging, { recursive: true })
   try {
-    const downloaded = await downloadAsset({ ...asset, url }, { destination: archivePath, fetchImpl })
+    let downloaded
+    if (hostStagingRoot) {
+      const retained = path.join(path.resolve(hostStagingRoot), asset.sha256, 'asset.tar.xz')
+      const info = await lstat(retained).catch(error => { if (error.code === 'ENOENT') return null; throw error })
+      if (info && (!info.isFile() || info.isSymbolicLink())) throw new Error('Host-staged archive must be a regular file')
+      if (info) downloaded = retained
+      else if (requireStagedBundle) throw new Error('No host-staged bundle is available')
+    }
+    downloaded ??= await downloadAsset({ ...asset, url }, { destination: archivePath, fetchImpl })
     if (bytesValue(downloaded)) await writeFile(archivePath, downloaded)
     else if (typeof downloaded === 'string' && path.resolve(downloaded) !== archivePath) await copyFile(downloaded, archivePath)
     else if (bytesValue(downloaded?.data)) await writeFile(archivePath, downloaded.data)
@@ -159,57 +137,6 @@ async function publishBundle({ root, finalDirectory, packageDirectory, asset, un
     if (hadPrevious) await rename(backupDirectory, finalDirectory).catch(() => {})
     throw error
   }
-}
-
-/**
- * Re-verify a bundle the host staged at `<hostStagingRoot>/<sha256>/` and
- * publish it locally.
- *
- * Returns `null` when nothing is staged at all, so the caller can decide whether
- * that is a fallback or a failure. Anything staged but wrong throws: the host's
- * own marker is never a usability credential, and a mismatch is a corruption or
- * tampering signal that must not be papered over by a silent re-download.
- */
-async function publishHostStagedBundle({ hostStagingRoot, asset, root, finalDirectory, packageName, entry }) {
-  const stagedRoot = path.join(path.resolve(hostStagingRoot), asset.sha256)
-  const archivePath = path.join(stagedRoot, 'asset.tar.xz')
-  let archiveInfo
-  try {
-    archiveInfo = await lstat(archivePath)
-  } catch {
-    return null
-  }
-  if (!archiveInfo.isFile() || archiveInfo.isSymbolicLink()) {
-    throw new Error('Host-staged archive must be a regular file')
-  }
-  const digest = await digestFile(archivePath)
-  if (digest.size !== asset.size || digest.sha256 !== asset.sha256) {
-    throw new Error('Host-staged archive does not match the release manifest (SHA-256 or size)')
-  }
-  const unpackedRoot = path.join(stagedRoot, 'unpacked')
-  const unpackedInfo = await lstat(unpackedRoot)
-  if (!unpackedInfo.isDirectory() || unpackedInfo.isSymbolicLink()) {
-    throw new Error('Host-staged bundle is missing its unpacked tree')
-  }
-  const packageDirectory = await pickPackageDirectory(unpackedRoot)
-  const unpackedSize = await unpackedBytes(packageDirectory)
-  if (unpackedSize !== asset.unpackedSize) {
-    throw new Error(`Host-staged bundle unpacked size mismatch: expected ${asset.unpackedSize}, got ${unpackedSize}`)
-  }
-  if (packageName) await validatePackage(packageDirectory, packageName, entry)
-  const token = randomUUID()
-  const staging = path.join(root, `.stage-${token}`)
-  const copied = path.join(staging, 'package')
-  await mkdir(staging, { recursive: true })
-  try {
-    // Copy rather than move: the host's staging area stays intact and
-    // re-verifiable, and our own copy is what gets published and re-used.
-    await cp(packageDirectory, copied, { recursive: true })
-    await publishBundle({ root, finalDirectory, packageDirectory: copied, asset, unpackedSize, token })
-  } finally {
-    await rm(staging, { recursive: true, force: true }).catch(() => {})
-  }
-  return { path: finalDirectory, sha256: asset.sha256, size: asset.size, unpackedSize, reused: false, hostStaged: true }
 }
 
 async function validatePackage(directory, packageName, entry) {

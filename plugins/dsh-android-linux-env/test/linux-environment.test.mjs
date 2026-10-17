@@ -81,7 +81,7 @@ test('mutations require bounded explicit confirmation; manual check never instal
   assert.equal(h.bootstrap.state.autoUpdateEnabled, true)
   assert.equal(h.bootstrap.calls.length, 2, 'enabling auto update must not check or install')
   await h.call('install')
-  assert.deepEqual(h.bootstrap.calls.at(-1), ['install', { runtimeId: 'debian-minimal' }])
+  assert.deepEqual(h.bootstrap.calls.at(-1), ['install', { runtimeId: 'debian-minimal', confirmed: true, activate: true }])
 })
 
 test('missing bootstrap is explicit 503, blocked compatibility is visible, status is read-only', async () => {

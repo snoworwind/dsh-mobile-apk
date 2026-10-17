@@ -78,3 +78,8 @@ raw npm overlay不会自动保留官方pnpm patch。六provider pi-upstream-stre
 版本变更需同步来源pin、lock根声明、同源补丁/资产、双仓副本及许可来源。运行时资产从目标版本原始产物完整重建，不叠旧资产；逐字节一致与全部补丁marker/精确verifier都要成立。webKit升级重点验证profile首次赋值、worker/cookie/storage隔离、不支持provider失败、UA-CH与Activity重建holder；Shizuku重点验证旧AIDL服务、工作资料UID、chunk撤consent与耐久UNKNOWN。快照/SAF/Files/通知/控制台/引擎流式任务按 [外部测试需求](<docs/0.14.3-TEST-REQUIREMENTS.md>) 执行。
 
 当前候选的自检、构建与三层验收状态见对应版本的阶段交接记录；本文件只登记依赖与升级联动，不独立宣称发布批准。0.14.3 外部测试需求属于历史版本证据，不能代替当前候选验收。
+
+
+## Linux 插件归档解码依赖（2026-10-17）
+
+`plugins/dsh-android-linux-env` 新增固定运行时依赖 `xz-decompress@0.2.3`（MIT；内嵌 XZ WASM，含 xz-embedded 公有领域代码及 walloc MIT 代码）与 `tar-stream@3.1.7`（MIT），开发类型依赖 `@types/tar-stream@3.1.4`（MIT）。版本与 npm integrity 随该插件 package-lock.json 固定。用途是在 bootstrap 验证归档副本之后独立流式解码，兼容不同 Android ABI，不依赖 shell tar/xz 或新增宿主二进制；npm 依赖内嵌 WASM 不属于 vendored bootstrap 源码目录。最终 APK 闭包、许可资产及设备 WASM 执行仍需来源链候选验证；本轮未出 APK。

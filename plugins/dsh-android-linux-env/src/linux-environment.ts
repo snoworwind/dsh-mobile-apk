@@ -39,9 +39,9 @@ export interface BootstrapStatus {
 export interface LinuxBootstrap {
   status(): BootstrapStatus | Promise<BootstrapStatus>
   checkForUpdates(options: { source: 'manual' | 'mobile-version-change' }): unknown | Promise<unknown>
-  install(options: { runtimeId: string }): unknown | Promise<unknown>
-  reinstall(): unknown | Promise<unknown>
-  uninstall(): unknown | Promise<unknown>
+  install(options: { runtimeId: string; confirmed: true; activate: true }): unknown | Promise<unknown>
+  reinstall(options: { confirmed: true; activate: true }): unknown | Promise<unknown>
+  uninstall(options: { confirmed: true }): unknown | Promise<unknown>
   setAutoUpdateEnabled(enabled: boolean): unknown | Promise<unknown>
 }
 
@@ -363,9 +363,9 @@ export function registerLinuxEnvironmentRoutes(options: {
           }
           switch (action) {
             case 'check': await bootstrap.checkForUpdates({ source: 'manual' }); break
-            case 'install': await bootstrap.install({ runtimeId: 'debian-minimal' }); break
-            case 'reinstall': await bootstrap.reinstall(); break
-            case 'uninstall': await bootstrap.uninstall(); break
+            case 'install': await bootstrap.install({ runtimeId: 'debian-minimal', confirmed: true, activate: true }); break
+            case 'reinstall': await bootstrap.reinstall({ confirmed: true, activate: true }); break
+            case 'uninstall': await bootstrap.uninstall({ confirmed: true }); break
             case 'auto-update-on': await bootstrap.setAutoUpdateEnabled(true); break
             case 'auto-update-off': await bootstrap.setAutoUpdateEnabled(false); break
           }
