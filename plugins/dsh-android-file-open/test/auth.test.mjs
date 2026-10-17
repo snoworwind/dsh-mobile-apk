@@ -163,6 +163,55 @@ async function call(ctx, path, { method = 'POST', headers = {}, body, url = path
 
 const legit = () => ({ host: HOST, [CONTROL_TOKEN_HEADER]: TOKEN })
 
+for (const replacement of ['directory', 'symlink']) {
+  test('clean preserves user data when an admitted temporary file becomes a ' + replacement, { skip: replacement === 'symlink' && process.platform === 'win32' }, async () => {
+    const ws = freshWorkspace()
+    const owned = join(ws, 'owned.tmp')
+    const ordinary = join(ws, 'ordinary.tmp')
+    const userFile = join(ws, 'user-note.txt')
+    writeFileSync(owned, 'temporary')
+    writeFileSync(ordinary, 'temporary')
+    writeFileSync(userFile, 'USER DATA')
+    const { ctx } = makeCtx()
+    await boot(ctx)
+    for (const path of [owned, ordinary]) {
+      const delivered = await call(ctx, ROUTES.list, { headers: legit(), body: { path } })
+      assert.equal(delivered.code, 200)
+    }
+    rmSync(owned)
+    if (replacement === 'directory') {
+      mkdirSync(owned)
+      writeFileSync(join(owned, 'note.txt'), 'DIRECTORY DATA')
+    } else symlinkSync(userFile, owned)
+    const cleaned = await call(ctx, ROUTES.clean, { headers: legit() })
+    assert.equal(cleaned.code, 200)
+    assert.equal(readFileSync(userFile, 'utf8'), 'USER DATA')
+    if (replacement === 'directory') assert.equal(readFileSync(join(owned, 'note.txt'), 'utf8'), 'DIRECTORY DATA')
+    assert.equal(JSON.parse(cleaned.body).removed, 1)
+    assert.equal(existsSync(ordinary), false)
+    assert.ok(readFileSync(join(ws, '.tool-temp.ndjson'), 'utf8').includes(owned))
+  })
+}
+
+test('clean rejects metadata and nested ownership records while deleting real temporary files', async () => {
+  const ws = freshWorkspace()
+  const { ctx } = makeCtx()
+  await boot(ctx)
+  const paths = ['.meta.ndjson', '.pending-notify.ndjson', '.sessions/protected.json', 'user-directory/note.txt']
+  for (const path of paths) {
+    mkdirSync(join(ws, path, '..'), { recursive: true })
+    writeFileSync(join(ws, path), 'PRESERVE ' + path)
+  }
+  const owned = join(ws, 'owned.tmp')
+  writeFileSync(owned, 'temporary')
+  writeFileSync(join(ws, '.tool-temp.ndjson'), [...paths.map(path => join(ws, path)), owned].join('\n') + '\n')
+  const cleaned = await call(ctx, ROUTES.clean, { headers: legit() })
+  assert.equal(cleaned.code, 200)
+  assert.equal(JSON.parse(cleaned.body).removed, 1)
+  for (const path of paths) assert.equal(readFileSync(join(ws, path), 'utf8'), 'PRESERVE ' + path)
+  assert.equal(existsSync(owned), false)
+})
+
 for (const replaceParent of [false, true]) {
   test('content pins the admitted file when ' + (replaceParent ? 'parent' : 'leaf') + ' is replaced before streaming', { skip: process.platform !== 'linux' }, async () => {
     const ws = freshWorkspace()

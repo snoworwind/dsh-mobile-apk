@@ -2461,3 +2461,13 @@ CI 39011926728（9bf4ed4）在 `check-contract.mjs` 仅报一条失败：`androi
 证据：插件 TypeScript 构建通过。WSL `node --test plugins/dsh-android-file-open/test/auth.test.mjs` 23 项通过，日志 `.deploy-tmp/incoming-security-tests.log`。真实路由的响应头边界分别替换叶文件和父目录，仍只收到已准入的 ADMITTED 字节；在真实 openSync 之前替换父目录时返回 410，不返回 SECRET!!，成功与拒绝均断言 FD 计数不变。将 0904c52 的旧生产源码转译后替换测试模块导入，同两条读取反例 0 通过、2 失败，实际都收到 SECRET!!，见 `.deploy-tmp/incoming-security/negative.log`；临时旧模块在反证后已从插件 lib 删除，避免进入产物。执行地图与 API 鉴权登记门禁通过。
 
 边界：未构建包含此修复的 APK、未做设备验证。当前 PowerShell 无 adb 命令，ANDROID_HOME/ANDROID_SDK_ROOT 未配置，未执行 CDP/ADB 用户任务；Android SELinux 下 FD 路径可见性、普通下载及前端附件交互仍待验收。新竞态用例在非 Linux 主机显式跳过。此修复不阻止同 UID 进程改写同一已打开 inode 的内容，也不提供对硬链接或工作区根被恶意重新定义的通用隔离保证。
+
+370. **临时文件所有权不能跟随叶链接，也不能授权递归清理或元数据删除（2026-10-17）**
+
+现象：来件 `/clean` 对清单路径做 realpath 后直接递归 rm。真实 POST 投递并记账后，把临时文件换成指向工作区内用户笔记的链接，clean 实际删除笔记；换成目录则连其用户内容一起删除。另外只豁免 basename 为 .sessions 的路径，队列内部文件、.meta.ndjson 和 .pending-notify.ndjson 仍可被清单驱动删除。触发需要合法清理请求及工作区写权限，未证明外部应用可无权限触发。
+
+修法：只 canonical 化工作区根与待删项父目录，要求二者相同；宿主 copyIn 仅创建工作区顶层文件，嵌套项不授权删除。叶项经 lstat 必须为普通文件，排除 .sessions、.meta.ndjson、.pending-notify.ndjson、.tool-temp.ndjson；默认 unlink 而非递归 rm，即使类型检查后被换成目录也只能失败，不能下探。拒绝和失败的清单项保留，正常项仍删除；Android canonical/别名前缀兼容回归继续通过。
+
+证据：TypeScript 构建通过；WSL `node --test plugins/dsh-android-file-open/test/auth.test.mjs` 26 项通过，日志 `.deploy-tmp/incoming-clean-tests.log`。新增用例经真实投递和清理 handler 核验目录内容、链接目标及元数据逐字节保留，同时断言正常临时文件确被删除。以 a7782c9 的旧生产源码转译运行相同三条反例，0 通过、3 失败：目录 note.txt 与链接目标 user-note.txt 均 ENOENT，元数据反例旧实现删除 5 项而应仅 1 项，日志 `.deploy-tmp/incoming-clean-security/negative.log`。反证用旧模块已从 lib 删除；生产源码/lib 已重建同步。执行地图与 API 鉴权登记门禁通过。
+
+边界：未构建 APK、未做设备验证，当前无可用 adb 命令，CDP/ADB 用户任务未执行，不计为设备验收关闭。仅对顶层叶项授权收紧；它不证明清单内容可信，也不提供针对同 UID 进程替换工作区根、写入清单或将普通临时文件换成另一普通 inode 的通用隔离。

@@ -12,9 +12,9 @@
  * 后都会补建——已建条目不重复创建（同一会话绝不重复开）。消费（claim）只由前端在
  * 确实把界面路由到新会话后执行。
  */
-import { mkdirSync, writeFileSync, appendFileSync, readFileSync, readdirSync, rmSync, existsSync, realpathSync, statSync, createReadStream, openSync, closeSync, fstatSync, constants } from 'node:fs'
+import { mkdirSync, writeFileSync, appendFileSync, readFileSync, readdirSync, rmSync, existsSync, realpathSync, statSync, createReadStream, openSync, closeSync, fstatSync, constants, lstatSync, unlinkSync } from 'node:fs'
 import { randomBytes } from 'node:crypto'
-import { join, resolve, sep, basename } from 'node:path'
+import { join, resolve, sep, basename, dirname } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 // FX-205.1：三条 exact 路由与 dsh-android-bridge 控制队列共用同一枚壳侧控制令牌
@@ -78,22 +78,29 @@ function canonicalPath(p: string): string {
 }
 
 /**
- * 自有临时项的归属断言（FX-205.5）：**两侧都 canonical 化**后比较。
+ * 自有临时项的归属断言：只解析父目录，绝不把叶链接目标当成所有权。
  *
  * 设备实测（0.14.0-preview-SN-1-13）：清单里记的是 canonical 形态
  * （/data/data/...，由 enqueueSession 的 realpath 落盘），而 tmpWorkspace() 词法是
  * /data/user/0/... —— 只做词法比较会把自有临时项判为越界：/clean 恒返回 removed:0
  * 且清单被清空（所有权静默丢失）。Android 上这两个前缀指向同一目录，必须一律
- * canonical 化后再判定（同 gotcha「前缀混用」）。
+ * 对根与父目录做 canonical 化后再判定（同 gotcha「前缀混用」），叶文件不跟随链接。
  * @param owned - 清单里的路径（任一等价形态）。
  * @returns 可删除的 canonical 路径；越界/豁免/工作区根自身返回 null。
  */
 function ownedInsideWorkspace(owned: string): string | null {
-  const wsReal = canonicalPath(tmpWorkspace())
-  const real = canonicalPath(resolve(owned))
-  if (real === wsReal || !real.startsWith(wsReal + sep)) return null
-  if (basename(real) === '.sessions') return null
-  return real
+  try {
+    const wsReal = realpathSync(tmpWorkspace())
+    const lexical = resolve(owned)
+    // Kotlin copyIn produces direct children; nested paths never authorize cleanup.
+    if (realpathSync(dirname(lexical)) !== wsReal) return null
+    if (['.sessions', '.meta.ndjson', '.pending-notify.ndjson', '.tool-temp.ndjson'].includes(basename(lexical))) return null
+    const target = join(wsReal, basename(lexical))
+    if (!lstatSync(target).isFile()) return null
+    return target
+  } catch {
+    return null
+  }
 }
 
 /** Host session service minimum: a blank session is created without calling prompt or append. */
@@ -858,7 +865,7 @@ export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
           return
         }
         // FX-205.5：只删本工具受理时记账的自有临时项；清单外（用户文件、.sessions、
-        // .meta.ndjson、.pending-notify.ndjson）一律保留。归属判定两侧 canonical 化。
+        // .meta.ndjson、.pending-notify.ndjson）一律保留。根与父目录 canonical 化，叶文件不跟随链接。
         let removed = 0
         const kept: string[] = []
         try {
@@ -869,7 +876,8 @@ export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
               continue
             }
             try {
-              rmSync(target, { recursive: true, force: true })
+              // unlink cannot recurse if a checked leaf is subsequently replaced by a directory.
+              unlinkSync(target)
               removed++
             } catch {
               kept.push(owned) // 删除失败：保留记录可重试（不得静默丢所有权）
