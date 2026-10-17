@@ -40,6 +40,10 @@ node scripts/check-vendored-linux-bootstrap.mjs --self-test
 
 最终收口：WSL Node v22.22.1、OpenJDK 17.0.20.1、既有 SDK 36；Kotlin 全量 **120 类 / 1308 项，失败、错误、跳过均为 0**，`BUILD SUCCESSFUL`。使用 `.deploy-tmp/source-validation.init.gradle` 将构建目录移至用户缓存，原始 XML 按 mtime 复制回门禁预期位置后，`check-kotlin-test-count.mjs` 的逐类基线、新鲜度与无失败检查通过（SKIP=0），日志 `security-team/kotlin-count.log`。最终 CI 新安全回归 15/15、workflow 专项 10/10 均通过；执行地图、维护文档、Kotlin 注释及聚合静态接线通过。聚合静态入口不代表来源构建和设备门禁已全部执行。
 
+补充 transport/顶层桥宿主回归 9/9，无跳过，日志 `.deploy-tmp/security-team/transport-bridge.log`。29 个变更输入的工作树字节摘要及基线/HEAD 记录于 `.deploy-tmp/security-team/input-hashes.json`（CRLF 工作树摘要，跨系统复跑须注明换行差异）。
+
+云端来源链已对已推送 `ed0960e` 启动：[run 39030453876](https://github.com/snoworwind/dsh-mobile-apk/actions/runs/39030453876)。记录时固定引用 actions、来源替换预检及输入检出成功，正在引擎源码构建，**最终 APK/产物门禁尚无结论**；不把既有其他提交的成功 run 算作本轮通过。后续本审计文档的证据补记不改变该 run 的源码身份。
+
 WSL 完整 Kotlin 命令：`ANDROID_HOME=/home/zouhaoyu/.local/share/android-sdk ANDROID_SDK_ROOT=/home/zouhaoyu/.local/share/android-sdk java -classpath gradle/wrapper/gradle-wrapper.jar org.gradle.wrapper.GradleWrapperMain --no-daemon --parallel --console=plain -I .deploy-tmp/source-validation.init.gradle :app:testDebugUnitTest`。复跑时按自己的 SDK 路径设置环境；上述缓存 init 仅移动 buildDirectory，内容为 `allprojects { layout.buildDirectory.set(new File(System.getProperty('user.home'), '.cache/dsh-mobile-apk-build/' + project.path.replace(':', '_'))) }`。
 
 本仓未找到 AGENTS 指向的协调仓 `scripts/clean-deploy-tmp.mjs`，未擅自改用递归清理；本轮只新增小型日志及负控源码，临时旧 UUT 已删除，未保留 APK/快照副本。所有新增证据属于三日保留窗口。
