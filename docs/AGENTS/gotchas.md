@@ -2443,3 +2443,11 @@ JVM 边界测试在 `EngineBootInstrumentationTest`（取值与 clamp 边界、�
 证据：`npm.cmd --prefix plugins/dsh-android-linux-env run build` 通过；WSL `node --test plugins/dsh-android-linux-env/test/*.test.mjs` 63 项通过，日志 `.deploy-tmp/cache-security-wsl-tests.log`。两条新增用例检查目录内容逐字节保留、普通历史日志仍删除；把 HEAD 旧源码经 TypeScript 转译后替换测试导入，运行 `node --test --test-name-pattern="log-looking|execution rechecks" .deploy-tmp/cache-security/negative.test.mjs`，2 项均失败（`.deploy-tmp/cache-security/negative.log`）。执行地图门禁通过。Windows 全套 57 通过、6 项资产安装在目录 rename 报 EPERM，记录于 `.deploy-tmp/cache-security-tests.log`，不能当成全绿；同批在 WSL 全过。
 
 边界：未构建 APK、未做设备验证。当前 PowerShell 找不到 adb，WSL 的 PATH 与常用安装位置也未找到；未执行 CDP/ADB 用户任务。数据删除行为尚未完成设备验收，不能随候选发布。此修复不提供同 UID 恶意进程并发替换缓存树、日志父目录或普通文件内容的通用隔离保证。
+
+368. **本地自定义槽漏登记会在来源构建末段被契约门禁阻断（2026-10-17）**
+
+CI 39011926728（9bf4ed4）在 `check-contract.mjs` 仅报一条失败：`android.dock.conversation` 已注入却未登记。该槽由本地 `conversation-dock.tsx` 的 SlotMap 和父槽 children 声明，为 single/session，不是上游新增槽。只把名称加入 slots 虽能消除该次错误，却不能验证它的声明语义；把它写进 upstreamUniverse 则会伪造上游事实。
+
+修法：登记真实消费名与声明，declarations 可显式指定本地 repo；默认仍检查 upstreamRepo。本地声明文件缺席直接失败，不变成可跳过的上游缺件；增加 scope 漂移、声明文件缺席两条受控负控，上游全集保持不变。
+
+本机验证：旧 `.deploy-tmp/deepseek-harness` 是 0.1.7-rc.2，与固定基线不符，首次全量自检失败，未改该历史树。隔离测试目录复用真实插件源码和构建产物，显式缺席上游树；`node .deploy-tmp/ci-contract-workspace/scripts/check-contract.mjs --self-test` 为 11 例通过、11 例未执行（不计自证），包含本次两条负控和消费面正反例，日志 `.deploy-tmp/ci-contract-isolated-selftest.log`。vdisplay 真实构建及执行地图检查通过。本轮未做设备验证；未改 UI 运行时行为。完整固定上游与来源链结果须以修复提交后的 CI 为准，旧失败日志为 `.deploy-tmp/ci-39011926728-failed.log`。

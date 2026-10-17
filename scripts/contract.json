@@ -166,7 +166,8 @@
       "settings.general.item",
       "conversation.header.leading",
       "sidebar.right.pane.tab.title",
-      "sidebar.right.tab.menu.item"
+      "sidebar.right.tab.menu.item",
+      "android.dock.conversation"
     ],
     "rowId": "ui-layout",
     "enabledRow": "ui-layout",
@@ -220,6 +221,14 @@
         "kind": "list",
         "scope": "session",
         "why": "右栏标签动作菜单座位，承载 Android 原生浏览器控件入口（android-browser.native-controls）。上游实测为 kind=list + scope=session —— 若上游改成 keyed 或收掉，原生控件入口会与既有菜单项互相覆盖或整条消失，本登记即为该事故的判据。"
+      },
+      {
+        "slot": "android.dock.conversation",
+        "repo": "dsh-client-ui-responsive",
+        "file": "src/client/mobile/conversation-dock.tsx",
+        "kind": "single",
+        "scope": "session",
+        "why": "本地会话侧开内容槽，由 conversation-dock 的 SlotMap 与父槽 children 声明，不属于上游槽位全集；SessionProvider 内渲染，必须保留 single/session。"
       }
     ],
     "upstreamUniverse": {

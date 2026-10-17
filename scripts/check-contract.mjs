@@ -333,10 +333,14 @@ if (contract.clientSlots.enabledRow !== undefined) {
 //   · 断言 kind / scope 与 contract.json 记录的实测值一致（kind=keyed/list/single，scope=root/session）。
 // 判红理由分两类且文案分开：槽**消失**（升级删槽）与 kind/scope **漂移**（语义变更）是不同事故。
 if (Array.isArray(contract.clientSlots.declarations) && contract.clientSlots.declarations.length > 0) {
-  console.log('== 4b. 槽位声明面（上游 kind/scope 与实测值一致；防升级静默失效） ==')
+  console.log('== 4b. 槽位声明面（登记来源的 kind/scope 与实测值一致） ==')
   for (const d of contract.clientSlots.declarations) {
-    const declFile = join(root, contract.upstreamRepo, d.file)
+    const declFile = join(root, d.repo ?? contract.upstreamRepo, d.file)
     if (!existsSync(declFile)) {
+      if (d.repo) {
+        fail('本地槽位声明文件不在场: ' + d.repo + '/' + d.file + '（槽 ' + d.slot + '）')
+        continue
+      }
       skip('上游声明文件不在场: ' + d.file + '（只读 checkout；CI/自包含树不含）——槽 ' + d.slot + ' 未执行')
       continue
     }
@@ -874,6 +878,8 @@ function runContractSelfTest() {
   const dropSlot = (c) => { c.clientSlots.upstreamUniverse.entries = c.clientSlots.upstreamUniverse.entries.filter(e => e.slot !== 'shell.overlay') }
   const fakeSlot = (c) => { c.clientSlots.upstreamUniverse.entries.push({ slot: 'zzz.selftest.not.upstream', kind: 'list', scope: 'root', file: 'nowhere' }) }
   const cases = [
+    { label: '本地槽位 scope 漂移必须判红', mutate: c => { c.clientSlots.declarations.find(d => d.slot === 'android.dock.conversation').scope = 'root' }, expect: /android\.dock\.conversation 声明漂移/ },
+    { label: '本地槽位声明缺席必须判红', mutate: c => { c.clientSlots.declarations.find(d => d.slot === 'android.dock.conversation').file = 'src/client/missing-local-slot.ts' }, expect: /本地槽位声明文件不在场/ },
     { label: '对照组：现状登记表必须全绿', expect: null },
     { label: '§0 树身份判红：登记的 commit 不是树上的 commit', mutate: c => { c.upstream.commit = 'aa00000000000000000000000000000000000000' }, expect: /≠ 登记 commit/ },
     { label: '§4b 声明面判红：把某槽登记的 kind 改成单值', mutate: c => { c.clientSlots.declarations[0].kind = 'single' }, expect: /声明漂移/ },

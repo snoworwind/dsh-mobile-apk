@@ -1855,7 +1855,7 @@ flowchart LR
 | check-control-ops.mjs | 控制 op 六处登记集合一致 | CI/链 | 新增 op 漏一处 → a11y 通道静默 deny | 否 |
 | check-runtime-assets.mjs | `assets/patched/*` 与快照逐字节同源 + 行为回归 | 仅链（`--require`） | 快照重出后 `assets/patched` 未重生成 → 设备上补丁被改回 | 需快照 |
 | check-snapshot-secrets.mjs | 归档成员路径级 + `settings.yaml` 内容级无机密 | 仅链/发布（`--require`） | 打进了 credentials/sessions/npmrc/私有源映射 | 需快照 |
-| check-contract.mjs | 上游 bundle 行引用、注入包 lib 产物、客户端槽位、版本钉台账 | 仅链（本地 `--require`） | 版本钉漂移；槽位改名；上游 `dsh/` 缺席（云端只计 SKIP） | 本机需 `dsh/` 上游 checkout |
+| check-contract.mjs | 上游 bundle 行引用、注入包 lib 产物、客户端槽位、版本钉台账；槽位声明的可选 repo 指向本地声明源，缺席直接失败 | 仅链（本地 `--require`） | 版本钉漂移；槽位改名；上游 `dsh/` 缺席（云端只计 SKIP） | 本机需 `dsh/` 上游 checkout |
 | check-state-registry.mjs | 两份 PR 模板四栏齐全 + `state-registry.json` 每条 evidence 机器可核对 | CI/链 | 新增状态未登记；写路径消失致 evidence 失效 | 否 |
 | check-bridge-symmetry.mjs | 壳侧 `@JavascriptInterface` 与页面类型面双向对称（基线只许减少） | CI/链 | 新增桥方法只写不声明；setter 无只读 getter | 否 |
 | check-gate-skips.mjs | 声明集合 ⊆ 实际文件 ⊆ 两条链调用；SKIP 必须计数；发布链 `--run --require` | CI/链 | 新门禁没接线；SKIP 静默；发布链少了 `--require` | 否 |
