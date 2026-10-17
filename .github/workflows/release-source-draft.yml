@@ -74,6 +74,31 @@ jobs:
         run: |
           set -euo pipefail
           cd release-assets
+          # Validate the complete upload set before checking bytes or invoking gh.
+          # sha256sum alone permits omitted files, duplicate rows and external paths.
+          python3 - <<'PY'
+          import pathlib
+          import re
+          root = pathlib.Path('.')
+          files = list(root.iterdir())
+          if any(p.is_symlink() or not p.is_file() for p in files):
+              raise SystemExit('release assets must be regular files')
+          apks = [p.name for p in files if re.fullmatch(r'dsh-mobile-apk-v[\w.+-]+-source-arm64\.apk', p.name)]
+          if len(apks) != 1:
+              raise SystemExit('expected exactly one source ARM64 APK')
+          expected = {apks[0], 'provenance.zip', 'notes.md'}
+          if {p.name for p in files} != expected | {'SHA256SUMS.txt'}:
+              raise SystemExit('unexpected or missing release asset')
+          rows = (root / 'SHA256SUMS.txt').read_text(encoding='utf-8').splitlines()
+          names = []
+          for row in rows:
+              match = re.fullmatch(r'[0-9a-f]{64}  ([^/\\]+)', row)
+              if not match:
+                  raise SystemExit('invalid release checksum row')
+              names.append(match[1])
+          if len(names) != len(expected) or set(names) != expected:
+              raise SystemExit('checksums must cover every uploaded asset exactly once')
+          PY
           sha256sum --check SHA256SUMS.txt
           tag="hardening-source-${SOURCE_SHA:0:12}-${RUN_ID}-${RUN_ATTEMPT}"
           gh release create "$tag" ./*.apk provenance.zip SHA256SUMS.txt notes.md \

@@ -2471,3 +2471,13 @@ CI 39011926728（9bf4ed4）在 `check-contract.mjs` 仅报一条失败：`androi
 证据：TypeScript 构建通过；WSL `node --test plugins/dsh-android-file-open/test/auth.test.mjs` 26 项通过，日志 `.deploy-tmp/incoming-clean-tests.log`。新增用例经真实投递和清理 handler 核验目录内容、链接目标及元数据逐字节保留，同时断言正常临时文件确被删除。以 a7782c9 的旧生产源码转译运行相同三条反例，0 通过、3 失败：目录 note.txt 与链接目标 user-note.txt 均 ENOENT，元数据反例旧实现删除 5 项而应仅 1 项，日志 `.deploy-tmp/incoming-clean-security/negative.log`。反证用旧模块已从 lib 删除；生产源码/lib 已重建同步。执行地图与 API 鉴权登记门禁通过。
 
 边界：未构建 APK、未做设备验证，当前无可用 adb 命令，CDP/ADB 用户任务未执行，不计为设备验收关闭。仅对顶层叶项授权收紧；它不证明清单内容可信，也不提供针对同 UID 进程替换工作区根、写入清单或将普通临时文件换成另一普通 inode 的通用隔离。
+
+371. **草稿发布哈希清单不能遗漏实际上传的资产（2026-10-17）**
+
+现象：写权限任务执行 sha256sum --check SHA256SUMS.txt 后，以 ./*.apk 上传。清单只验证列出的文件；同次下载目录若夹带未列出的额外 APK，校验仍成功，该 APK 仍被上传。类似地，漏掉已有资产的校验行也不会失败。触发需要能影响传入草稿任务的资产集或清单；未证明外部未授权用户能修改同 run artifact，也未实际创建远程草稿。
+
+修法：在哈希检查与 gh 调用前验证整个目录。只允许一个符合来源 ARM64 命名的 APK、provenance.zip、notes.md、SHA256SUMS.txt，拒绝链接和非普通文件；清单限定小写 SHA256 与无目录的文件名，必须覆盖前三个资产各一次。资产集合、清单覆盖与字节校验依次执行，任一失败不调用 gh。它防止独立写权限任务因输入集合异常而上传未校验资产，不保证受控上游同时改写资产与摘要时仍能独立认证来源。
+
+证据：WSL 运行生产 workflow 中原样提取的发布 shell，仅将 gh 换成本地参数记录器。旧 shell 的额外 injected.apk 反例返回 0，拒绝断言失败，见 .deploy-tmp/release-asset-boundary/negative.log。修后 python3 -m unittest discover -s scripts/source-build -p 'test_*.py' -v 为 8 项通过，含正常 draft/prerelease、额外 APK、清单漏项、重复项、外部路径和字节篡改检查；node --test scripts/source-build/cloud-workflow.test.mjs 为 6 项通过，日志分别为同目录 tests.log、workflow.log。
+
+边界：未构建 APK、未做设备验证，未运行云端发布。此次只修改发布资产校验，不修改 Android 或 runtime；不把宿主 shell 证据算作 CDP/ADB 或最终候选验收。起初排查的打包目录自身/祖先链接边界未在此项修复中覆盖，未证明其在全新 CI 工作目录中可被攻击者控制。

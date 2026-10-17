@@ -554,6 +554,7 @@ sequenceDiagram
 | B01 | 发布链 build-release.ps1 | 复用同一门禁集与指纹对账，输入走设备侧 make-snapshot.sh 产出的 snapshot/snapshot-*.tar.xz | scripts/build-release.ps1:56-61,89-114,147 |
 | B01 | CI 与云端构建链 | 云端 build-apk.mjs 与本地链门禁集差集必须为 0。0.14.5：原先并列的 apk 仓独立快照 workflow `build-snapshot.yml`（走 inject-snapshot.py 三包注入、无引擎 overlay/补丁/语法降级）已删除，快照构建入口收敛为单一链 | scripts/check-release-gates.mjs:191-212 |
 | B01 | 来源审计 ARM64 构建 | 官方639ed015/0.2.0-rc.2源码构建CLI/Web/第一方包；Cordis按目标官方源码、不回退旧版本；bootstrap/InRelease/deb认证、native来源审计与overlay pin恢复。PTC与MiMo多文件 exact verifier及全部pnpm同包副本同步；MiMo复用已登记planner并要求before==after，部分补丁和未知verifier仍拒绝；最终snapshot检查复用同一判据，普通post-apply复用runner --check | .github/workflows/build-apk-source.yml:134,scripts/patches/registry.json:211,scripts/patches/apply-patches.mjs:122,scripts/source-build/reconcile-engine-patch-copies.mjs:80,scripts/source-build/check-dsh-source-snapshot.mjs:25 |
+| B01 | 来源草稿资产边界 | 写权限任务先拒绝额外/缺失/链接/非普通资产，要求哈希清单与实际上传集合一一对应，再核验字节，最后调用 gh 创建草稿；真实 shell 负控见坑 371 | .github/workflows/release-source-draft.yml:83,scripts/source-build/test_prepare_source_release.py:74 |
 | B02 | B01 | 门禁集由两条编排器逐项调用；聚合入口断言本地链与云端链门禁集差集为 0，并锁发布链必须走 --run | scripts/check-release-gates.mjs:135 |
 | B02 | B03 | 冷启动预算的真数据只能来自设备产物，--require-real 由设备验收承担，构建机与 CI 只计 SKIP | scripts/check-boot-budget.mjs:671 |
 | B02 | K03 | 快照指纹、剥离后置断言、运行时补丁资产三门禁共同守内嵌 assets/snapshot.tar.xz 与 assets/patched 同源 | scripts/check-runtime-assets.mjs:126 |

@@ -104,6 +104,27 @@ class ReleasePreparationTest(unittest.TestCase):
         self.assertIn('--prerelease', args)
         self.assertEqual(args[args.index('--target') + 1], self.env['GITHUB_SHA'])
         calls.unlink()
+        assets = work / 'release-assets'
+        # An unlisted APK must never reach the privileged gh invocation.
+        extra = assets / 'injected.apk'
+        extra.write_text('unverified APK')
+        result = subprocess.run(['/bin/bash', '-c', script], cwd=work, env=env, capture_output=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(calls.exists())
+        extra.unlink()
+        sums = assets / 'SHA256SUMS.txt'
+        original_sums = sums.read_text()
+        for replacement in [
+            '\n'.join(original_sums.splitlines()[1:]) + '\n',
+            original_sums + original_sums.splitlines()[0] + '\n',
+            original_sums.replace('  notes.md', '  ../notes.md'),
+        ]:
+            with self.subTest(manifest=replacement):
+                sums.write_text(replacement)
+                result = subprocess.run(['/bin/bash', '-c', script], cwd=work, env=env, capture_output=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(calls.exists())
+        sums.write_text(original_sums)
         (work / 'release-assets' / Path(self.apk).name).write_text('changed')
         result = subprocess.run(['/bin/bash', '-c', script], cwd=work, env=env, capture_output=True)
         self.assertNotEqual(result.returncode, 0)
