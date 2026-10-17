@@ -44,6 +44,7 @@ const CALL_REASON: Readonly<Record<string, string>> = {
 
   // ── 壳侧：AI root 权限授权门（RootGrant，issue #262 / 0.14.2-fx-2-root.1）──
   'consent-required': '先勾选「已阅读」并查看《AI root 权限免责声明》，才能开启 AI root 权限（免责声明内容更新后需重新确认）',
+  'user-confirmation-required': '需要在原生窗口确认并验证系统锁屏凭据；取消、超时或未设置锁屏凭据时不会授权',
   'not-root-channel': 'Shizuku 通道不是 root 身份（无法在未 root 的设备上赋予该权限）——请让 Shizuku 以 root 启动后再来开启',
   'missing-asset': '应用内文档缺失（安装包不完整）——请重新安装应用后再试',
   'ui-thread-timeout': '应用界面正忙——请稍后重试；多次失败可复制日志反馈',

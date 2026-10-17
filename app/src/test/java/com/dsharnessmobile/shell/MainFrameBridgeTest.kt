@@ -81,13 +81,16 @@ class MainFrameBridgeTest {
 
   @Test fun productionScreenScopeAndPickerSecretRequireCapability() {
     var scope = "virtual-only"
+    var nativeApproved = false
     val bridge = AndroidBridge({}, {}, { _, _ -> }, pickToken = "private-picker-token",
-      onSetScreenScope = { scope = it; scope }, onGetScreenScope = { scope })
+      onSetScreenScope = { scope = it; scope }, onGetScreenScope = { scope }, onConfirmPrivileged = { nativeApproved })
     val gate = MainFrameBridge("test-secret").also { it.register("androidBridge", bridge) }
     val denied = reply(gate, "fake-secret", "setScreenScope", "[\"all\"]")
     assertFalse(denied.getBoolean("ok"))
     assertEquals("virtual-only", scope)
     assertFalse(reply(gate, "fake-secret", "getPickToken", "[]").toString().contains("private-picker-token"))
+    assertEquals("virtual-only", reply(gate, "test-secret", "setScreenScope", "[\"all\"]").getString("value"))
+    nativeApproved = true
     assertEquals("all", reply(gate, "test-secret", "setScreenScope", "[\"all\"]").getString("value"))
     assertEquals("private-picker-token", reply(gate, "test-secret", "getPickToken", "[]").getString("value"))
   }

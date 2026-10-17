@@ -52,14 +52,11 @@ object RootAccess {
   /** 授权请求的总预算：要留出用户在弹窗上点「允许」的时间（KernelSU 默认弹窗本身约 30s）。 */
   private const val REQUEST_TIMEOUT_MS = 25_000L
 
-  private const val PREFS = "dsh_root_access"
-  private const val KEY_STATE = "state"
-  private const val KEY_UID = "uid"
-
   private val lock = Any()
   @Volatile private var requesting = false
-  /** 内存态；进程重启后由 prefs 回填（见 [cachedState]）。 */
+  /** 仅内存态；进程重启后重新探测，不信任同 uid 可写 prefs。 */
   @Volatile private var memState: String? = null
+  @Volatile private var memUid: Int = -1
 
   /** 状态取值（互斥，全部如实；未知不用默认值冒充）。 */
   const val STATE_UNKNOWN = "unknown"     // 从未请求过（或本机无 su）
@@ -80,17 +77,10 @@ object RootAccess {
     }
   }
 
-  /** 缓存的授权状态（内存优先；无则读 prefs；都没有 = 未检测）。 */
+  /** 本次进程实际探测的授权状态；无则未检测。 */
   private fun cachedState(context: Context): Pair<String, Int> {
-    memState?.let { return it to uidValue(context) }
-    val prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-    val s = prefs.getString(KEY_STATE, STATE_UNKNOWN) ?: STATE_UNKNOWN
-    memState = s
-    return s to prefs.getInt(KEY_UID, -1)
+    return (memState ?: STATE_UNKNOWN) to memUid
   }
-
-  private fun uidValue(context: Context): Int =
-    context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getInt(KEY_UID, -1)
 
   /** 当前是否已授权（供 [RootGrant] 的策略门消费；只认缓存，不触发弹窗）。 */
   fun isGranted(context: Context): Boolean {
@@ -99,11 +89,8 @@ object RootAccess {
   }
 
   private fun writeState(context: Context, state: String, uid: Int) {
+    memUid = uid
     memState = state
-    runCatching {
-      context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-        .putString(KEY_STATE, state).putInt(KEY_UID, uid).apply()
-    }
   }
 
   /**

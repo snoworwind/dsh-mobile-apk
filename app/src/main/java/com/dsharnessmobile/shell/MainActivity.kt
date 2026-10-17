@@ -46,6 +46,63 @@ import kotlin.math.ceil
  * 文件选择/SAF→DirectoryPickerController/MediaPickController、窗口 UI chrome→WebUiChrome。
  */
 class MainActivity : ComponentActivity() {
+  private val privilegedConfirmation = java.util.concurrent.atomic.AtomicBoolean(false)
+  private var privilegedCredentialResult: ((Boolean) -> Unit)? = null
+  private val privilegedCredentialLauncher = registerForActivityResult(
+    androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult(),
+  ) { result ->
+    val callback = privilegedCredentialResult
+    privilegedCredentialResult = null
+    callback?.invoke(result.resultCode == android.app.Activity.RESULT_OK)
+  }
+
+  /** Called on the WebView bridge thread; only an unobscured native click can authorize. */
+  private fun confirmPrivilegedChange(message: String): Boolean {
+    if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) return false
+    if (!privilegedConfirmation.compareAndSet(false, true)) return false
+    val answer = java.util.concurrent.atomic.AtomicBoolean(false)
+    val expired = java.util.concurrent.atomic.AtomicBoolean(false)
+    val done = java.util.concurrent.CountDownLatch(1)
+    val dialogRef = java.util.concurrent.atomic.AtomicReference<android.app.AlertDialog?>()
+    try {
+      runOnUiThread {
+        val keyguard = getSystemService(android.app.KeyguardManager::class.java)
+        if (expired.get() || isFinishing || isDestroyed || !hasWindowFocus() || keyguard.isDeviceLocked || !keyguard.isDeviceSecure) {
+          if (!keyguard.isDeviceSecure) android.widget.Toast.makeText(this, "请先设置系统锁屏凭据，再进行安全授权", android.widget.Toast.LENGTH_LONG).show()
+          done.countDown()
+        } else {
+          val dialog = android.app.AlertDialog.Builder(this)
+            .setTitle("安全授权")
+            .setMessage(message + "\n请确认此操作由你本人发起。应用重启后需重新授权。")
+            .setNegativeButton("取消") { _, _ -> done.countDown() }
+            .setPositiveButton("允许") { _, _ ->
+              val request = keyguard.createConfirmDeviceCredentialIntent("安全授权", message)
+              if (expired.get() || request == null || isFinishing) {
+                done.countDown()
+              } else {
+                privilegedCredentialResult = { accepted ->
+                  if (!expired.get() && accepted) answer.set(true)
+                  done.countDown()
+                }
+                try { privilegedCredentialLauncher.launch(request) }
+                catch (_: Exception) { privilegedCredentialResult = null; done.countDown() }
+              }
+            }
+            .setOnCancelListener { done.countDown() }
+            .create()
+          dialogRef.set(dialog)
+          dialog.show()
+          dialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE).filterTouchesWhenObscured = true
+        }
+      }
+      if (!done.await(45, java.util.concurrent.TimeUnit.SECONDS)) return false
+      return answer.get()
+    } finally {
+      expired.set(true)
+      runOnUiThread { privilegedCredentialResult = null; dialogRef.get()?.dismiss() }
+      privilegedConfirmation.set(false)
+    }
+  }
 
   private var mainFrameBridge: MainFrameBridge? = null
 
@@ -1206,6 +1263,7 @@ class MainActivity : ComponentActivity() {
         // 0.14：开放屏幕范围由用户设置面独占写入；默认 virtual-only，模型工具只读并由壳侧执行面强制。
         onGetScreenScope = { ScreenScopePrefs.current(this).wire },
         onSetScreenScope = { raw -> ScreenScopePrefs.set(this, raw).wire },
+        onConfirmPrivileged = { message -> confirmPrivilegedChange(message) },
         onIncomingWorkspacePath = { FileIncoming.tmpWorkspace(this).absolutePath },
         onBrowserHostStatus = { browserHost.statusJson() },
         onBrowserHostCommand = { payload -> browserHost.command(payload) },

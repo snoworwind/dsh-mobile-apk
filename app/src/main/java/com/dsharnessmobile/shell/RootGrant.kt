@@ -30,10 +30,12 @@ import org.json.JSONObject
  *  - 未勾选/同意落后于当前免责声明版本 → 不许开启（`consent-required`）；
  *  - 通道身份非 root → 不许开启（`not-root-channel`，界面对应置灰+红字）；
  *  - 取消勾选「已阅读」→ 撤销同意并**同时关闭开关**（不留「已授权但未同意」的矛盾态）。
- * 持久化是薄壳：`granted` 与 `consentRevision` 存私有 SharedPreferences；旧键
- * `consentVersionCode`（旧语义 = APK versionCode）只读迁移一次，见 [consentRevision]。
+ * 当前授权只保存在壳进程内存，重启即撤销；不读取或迁移同 uid 可写的 prefs。
+ * 桥面开启要求系统锁屏凭据认证。下方旧迁移纯函数仅保留历史语义回归。
  */
 object RootGrant {
+  @Volatile private var sessionGranted = false
+  @Volatile private var sessionConsent = 0
 
   /** 拒绝码：通道身份不是 root（uid≠0），开关应当置灰。 */
   const val CODE_NOT_ROOT_CHANNEL = "not-root-channel"
@@ -59,18 +61,6 @@ object RootGrant {
    * 1 = 0.14.2 首发内容（0.14.7 起由 versionCode 绑定改为内容版本绑定）。
    */
   const val DISCLAIMER_REVISION = 1
-
-  private const val PREFS = "dsh_root_grant"
-  private const val KEY_GRANTED = "granted"
-
-  /** 当前键：同意所绑定的免责声明内容版本（0 = 从未同意或已撤销）。 */
-  private const val KEY_CONSENT_REV = "consentRevision"
-
-  /**
-   * 旧键（0.14.6 及以前）：值 = 当时的 APK versionCode。**只读**，仅用于一次性迁移。
-   * 撤销时会被一并清零（见 [setConsent]），否则迁移逻辑会把已撤销的旧同意复活。
-   */
-  private const val KEY_CONSENT_VC = "consentVersionCode"
 
   /**
    * 开关决策（纯函数）。
@@ -122,7 +112,7 @@ object RootGrant {
     granted && consentValidFor(consentRevision, requiredRevision)
 
   fun isGranted(context: Context): Boolean = effectiveGrant(
-    prefs(context).getBoolean(KEY_GRANTED, false),
+    sessionGranted,
     consentRevision(context),
     DISCLAIMER_REVISION,
   )
@@ -141,14 +131,14 @@ object RootGrant {
     if (on) {
       // Reconfirming a stale consent must not silently reactivate the persisted old switch.
       val keepGranted = isGranted(app)
-      prefs(app).edit().putBoolean(KEY_GRANTED, keepGranted)
-        .putInt(KEY_CONSENT_REV, DISCLAIMER_REVISION).apply()
+      sessionGranted = keepGranted
+      sessionConsent = DISCLAIMER_REVISION
     } else {
       // 撤销同意必须连带关开关：只清同意而留着 granted=true 会让「未同意但已授权」
       // 成为可达状态，而那个状态正是免责门要杜绝的。旧键一并清零，否则 [consentRevision]
       // 的只读迁移会把这次撤销的旧同意复活。
-      prefs(app).edit().putInt(KEY_CONSENT_REV, 0).putInt(KEY_CONSENT_VC, 0)
-        .putBoolean(KEY_GRANTED, false).apply()
+      sessionConsent = 0
+      sessionGranted = false
     }
     return state(app, channelUidNow(app)).put("ok", true)
   }
@@ -169,7 +159,7 @@ object RootGrant {
       wantOn = on,
     )
     if (refusal == null) {
-      prefs(app).edit().putBoolean(KEY_GRANTED, on).apply()
+      sessionGranted = on
     }
     // 拒绝回包同时带 `reason`（= code）：页面结算的人话翻译只读 reason（user-copy.ts 的
     // CALL_REASON 唯一真源），code 留给 data-code/grep。两个都不带会落「未在本版登记」兜底。
@@ -223,8 +213,8 @@ object RootGrant {
    * 迁移的**纯逻辑核心**（JVM 可直测，不碰 SharedPreferences）。
    *
    * 语义（0.14.7）：
-   *  - 新键 [KEY_CONSENT_REV] `> 0` ⇒ 它已经权威，原样返回（迁移幂等，绝不覆盖新值）；
-   *  - 新键为 0 且旧键 [KEY_CONSENT_VC] `> 0` ⇒ 老用户（0.14.6 及以前，旧值 = 当时的 APK
+   *  - 新键 consentRevision `> 0` ⇒ 它已经权威，原样返回（迁移幂等，绝不覆盖新值）；
+   *  - 新键为 0 且旧键 consentVersionCode `> 0` ⇒ 老用户（0.14.6 及以前，旧值 = 当时的 APK
    *    versionCode）同意过的事实必须保住，返回 [currentRevision]（默认 = [DISCLAIMER_REVISION]）；
    *  - 两键都非正数 ⇒ 0（从未同意或已撤销，fail-closed）。
    *
@@ -246,25 +236,14 @@ object RootGrant {
   /**
    * 已记录的同意所绑定的免责声明版本；0 = 从未同意或已撤销。
    *
-   * 持久化薄壳：读两键 → 交给纯函数 [migratedConsentRevision] 裁决 → 迁移发生时把新值
-   * 落盘（一次性；此后新键即权威）。判定逻辑全部在纯函数里，故可被 JVM 用例真值驱动。
+   * 仅返回本次进程内的确认状态；不从磁盘或旧迁移逻辑恢复授权。
    */
   private fun consentRevision(context: Context): Int {
-    val store = prefs(context)
-    val stored = store.getInt(KEY_CONSENT_REV, 0)
-    val legacy = store.getInt(KEY_CONSENT_VC, 0)
-    val effective = migratedConsentRevision(stored, legacy)
-    // 只在「确实是首次迁移」时写回：新键已有值时不写（幂等），两键都非正数时不写（保持 0）。
-    if (stored <= 0 && effective > 0) {
-      store.edit().putInt(KEY_CONSENT_REV, effective).apply()
-    }
-    return effective
+    return sessionConsent
   }
 
   /** 当前 Shizuku 通道的服务端 uid（读不到 = -1，不阻塞、不抛出）。 */
   internal fun channelUidNow(context: Context): Int =
     runCatching { rikka.shizuku.Shizuku.getUid() }.getOrDefault(-1)
 
-  private fun prefs(context: Context) =
-    context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 }

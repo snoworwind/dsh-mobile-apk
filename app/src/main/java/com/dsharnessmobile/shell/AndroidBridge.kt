@@ -49,6 +49,8 @@ class AndroidBridge(
   /** User-owned scope for model access to real/virtual Android screens. */
   private val onGetScreenScope: () -> String = { "virtual-only" },
   private val onSetScreenScope: (String) -> String = { "virtual-only" },
+  /** Native confirmation; page code cannot supply evidence of user presence. */
+  private val onConfirmPrivileged: (String) -> Boolean = { false },
   /** Trusted UI-only session cwd for an external attachment draft; never returns a source file path. */
   private val onIncomingWorkspacePath: () -> String = { "" },
   /** BrowserHost workbench state and commands; callable only by trusted DSH UI. */
@@ -346,7 +348,9 @@ class AndroidBridge(
 
   /** Persist one normalized screen scope selected from the DSH settings surface. */
   @JavascriptInterface
-  fun setScreenScope(scope: String): String = onSetScreenScope(scope)
+  fun setScreenScope(scope: String): String =
+    if (scope == "virtual-only" || onConfirmPrivileged("允许 AI 访问真实设备屏幕：$scope")) onSetScreenScope(scope)
+    else onGetScreenScope()
 
   /** CWD for the external-open blank session; source file names and paths remain queue-private. */
   @JavascriptInterface
@@ -444,7 +448,9 @@ class AndroidBridge(
 
   /** 0.13.5 W4：一键解锁受限设置（appops set … ACCESS_RESTRICTED_SETTINGS allow，走 Shizuku 特权 shell）。 */
   @JavascriptInterface
-  fun unlockRestrictedSettings(): String = onUnlockRestrictedSettings()
+  fun unlockRestrictedSettings(): String =
+    if (onConfirmPrivileged("解除本应用的 Android 受限设置")) onUnlockRestrictedSettings()
+    else """{"ok":false,"reason":"user-confirmation-required"}"""
 
   /**
    * 0.14.1 设置页「手机控制」：打开登记在册的外部链接。
@@ -500,6 +506,8 @@ class AndroidBridge(
    */
   @JavascriptInterface
   fun setRootGranted(on: Boolean): String {
+    if (on && !onConfirmPrivileged("允许 AI 使用 root 权限（本次应用进程有效）"))
+      return """{"ok":false,"reason":"user-confirmation-required"}"""
     val app = ShellAppContext.get()
       ?: return """{"ok":false,"reason":"no-shell-context"}"""
     return RootGrant.setGranted(app, on).toString()
@@ -512,6 +520,8 @@ class AndroidBridge(
    */
   @JavascriptInterface
   fun setRootConsent(on: Boolean): String {
+    if (on && !onConfirmPrivileged("确认已阅读并同意 root 免责声明（本次应用进程有效）"))
+      return """{"ok":false,"reason":"user-confirmation-required"}"""
     val app = ShellAppContext.get()
       ?: return """{"ok":false,"reason":"no-shell-context"}"""
     return RootGrant.setConsent(app, on).toString()

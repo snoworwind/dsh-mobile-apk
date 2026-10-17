@@ -292,8 +292,8 @@ class RootGrantTest {
     assertTrue("老键为正即认成已同意", migration.contains("legacyVersionCode > 0"))
     assertTrue("迁移只用 >0 判定，不得比 versionCode", !migration.contains("VERSION_CODE"))
     val shell = body("RootGrant.kt", "private fun consentRevision(")
-    assertTrue("必须保留旧键的只读读取", shell.contains("KEY_CONSENT_VC") && shell.contains("KEY_CONSENT_REV"))
-    assertTrue("薄壳必须委托纯函数", shell.contains("migratedConsentRevision(stored, legacy)"))
+    assertTrue("授权仅取本次壳进程状态", shell.contains("return sessionConsent"))
+    assertTrue("不得从同 uid 可写磁盘迁移授权", !shell.contains("prefs(") && !shell.contains("getInt("))
     assertTrue("薄壳不得自己读 versionCode", !shell.contains("VERSION_CODE"))
     // 文案与判据必须同源：常量是唯一的「要求重新确认」触发器。
     assertTrue(RootGrant.DISCLAIMER_REVISION >= 1)
@@ -334,7 +334,7 @@ class RootGrantTest {
   fun effectiveCurrentConsentFeedsBothPrebindAndActualIdentityGates() {
     val grant = body("RootGrant.kt", "fun isGranted(")
     assertTrue(grant.contains("= effectiveGrant("))
-    assertTrue(grant.contains("KEY_GRANTED") && grant.contains("consentRevision(") && grant.contains("DISCLAIMER_REVISION"))
+    assertTrue(grant.contains("sessionGranted") && grant.contains("consentRevision(") && grant.contains("DISCLAIMER_REVISION"))
     val state = body("RootGrant.kt", "fun state(")
     assertTrue(state.contains(""".put("granted", isGranted(context))"""))
     assertTrue(body("ShizukuTransport.kt", "internal fun rootGateRefusal(").contains("RootGrant.isGranted(context)"))
@@ -360,12 +360,12 @@ class RootGrantTest {
   @Test
   fun consentRevokeAndReconsentNeedNoRootAndCannotReviveExpiredGrant() {
     val consent = body("RootGrant.kt", "fun setConsent(")
-    assertBefore(consent, "val keepGranted = isGranted(app)", "putBoolean(KEY_GRANTED, keepGranted)")
+    assertBefore(consent, "val keepGranted = isGranted(app)", "sessionGranted = keepGranted")
     // 安全属性不许放松：取消勾选仍然**立即撤销同意并同时关闭开关**（用户指定语义）。
-    assertTrue(consent.contains("putInt(KEY_CONSENT_REV, 0).putInt(KEY_CONSENT_VC, 0)"))
-    assertTrue(consent.contains("putBoolean(KEY_GRANTED, false)"))
+    assertTrue(consent.contains("sessionConsent = 0"))
+    assertTrue(consent.contains("sessionGranted = false"))
     // 勾选侧：记录的是免责声明内容版本，不是 versionCode（绑版本号正是被修的缺陷）。
-    assertTrue(consent.contains("putInt(KEY_CONSENT_REV, DISCLAIMER_REVISION)"))
+    assertTrue(consent.contains("sessionConsent = DISCLAIMER_REVISION"))
     assertTrue(consent.contains("""put("ok", true)"""))
     assertTrue("同意记录不是资格探测或 root 执行", !consent.contains("decision(") &&
       !consent.contains("RootAccess.requestGrant(") && !consent.contains("RootAccess.isGranted("))

@@ -5,8 +5,8 @@ import android.content.Context
 /**
  * User-owned model screen-access scope.
  *
- * This preference is deliberately native-owned: tool/model paths may read it for fail-closed
- * enforcement, but only the DSH settings UI invokes the bridge setter. Android display ids are not
+ * This session grant lives in native memory and resets to virtual-only on process restart.
+ * Broader access requires native system-credential confirmation. Android display ids are not
  * stored here; stable product aliases express the user's permitted screen family.
  */
 enum class ScreenScope(val wire: String) {
@@ -50,19 +50,16 @@ object ScreenTargets {
 
 /** Native source of truth for the screen scope selector. */
 object ScreenScopePrefs {
-  private const val PREFS = "dsh_screen_scope"
-  private const val KEY_SCOPE = "scope"
+  // Never restore authorization from files writable by the same-UID model runtime.
+  @Volatile private var scope = ScreenScope.VIRTUAL_ONLY
 
   /** @return current normalized scope; absent/corrupt data fails closed to virtual-only. */
-  fun current(context: Context): ScreenScope = ScreenScope.fromWire(
-    context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_SCOPE, null),
-  )
+  fun current(context: Context): ScreenScope = scope
 
   /** Store one user-selected wire value and return its normalized value. */
   fun set(context: Context, value: String?): ScreenScope {
     val scope = ScreenScope.fromWire(value)
-    context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-      .edit().putString(KEY_SCOPE, scope.wire).apply()
+    this.scope = scope
     return scope
   }
 }
