@@ -217,8 +217,13 @@ export function createMobileBootstrap(options = {}) {
   const fetchManifest = async () => {
     const { manifest, releaseTag } = await fetchLatestManifest(releaseUrl, fetchImpl)
     let checked = validateManifestShape(manifest, releaseTag)
-    if (typeof verifyManifest === 'function' && await verifyManifest(checked) !== true) throw new Error('Release manifest verification failed')
+    await requireApprovedManifest(checked)
     return checked
+  }
+  const requireApprovedManifest = async (manifest) => {
+    if (typeof verifyManifest !== 'function' || await verifyManifest(manifest) !== true) {
+      throw new Error('Release manifest is not approved by the source-pinned trust policy')
+    }
   }
   const ensureMobileCompatible = (manifest, current) => {
     if (!current) throw new Error('Current DSH Mobile version is unavailable')
@@ -298,6 +303,7 @@ export function createMobileBootstrap(options = {}) {
   })
 
   async function installRuntime({ manifest, runtimeId, reinstall = false, automatic = false, activate = false }) {
+    await requireApprovedManifest(manifest)
     const runtime = findRuntime(manifest, runtimeId)
     if (!runtime) throw new Error(`Unknown runtime id: ${runtimeId}`)
     await updateMobileVersion()

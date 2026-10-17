@@ -113,6 +113,8 @@ function makeBootstrap({ filesDir, manifest, pluginHost = makePluginHost() }) {
   const { fetchImpl, fetched } = makeFetch(manifest)
   const service = createBootstrap({
     ...createLinuxBootstrapConfig({ filesDir, appVersion: '0.15.0' }),
+    // This fixture explicitly approves its synthetic manifest; production pins remain mandatory.
+    verifyManifest: async () => true,
     pluginHost,
     fetchImpl,
   })
@@ -120,6 +122,18 @@ function makeBootstrap({ filesDir, manifest, pluginHost = makePluginHost() }) {
 }
 
 const installConfirmed = (service) => service.install({ runtimeId: 'debian-minimal', confirmed: true, activate: true })
+
+test('production trust policy refuses a self-declared release before activation', async () => {
+  const filesDir = await tempFilesDir()
+  try {
+    const asset = await stageBundle(filesDir)
+    const pluginHost = makePluginHost()
+    const { fetchImpl } = makeFetch(makeManifest({ asset }))
+    const service = createBootstrap({ ...createLinuxBootstrapConfig({ filesDir, appVersion: '0.15.0' }), pluginHost, fetchImpl })
+    await assert.rejects(installConfirmed(service), /source-pinned trust policy/)
+    assert.equal(pluginHost.activations.length, 0)
+  } finally { await rm(filesDir, { recursive: true, force: true }) }
+})
 
 // ── 正控：真正准备好的暂存包可以激活 ────────────────────────────────────────
 

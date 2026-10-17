@@ -10,6 +10,8 @@ import { pipeline } from 'node:stream/promises'
 import xz from 'xz-decompress'
 import tar from 'tar-stream'
 import { isAbsolute, join, resolve, sep } from 'node:path'
+import { createHash } from 'node:crypto'
+import { LINUX_MANIFEST_PINS } from './linux-release-pins.js'
 
 /** 与 Kotlin `LinuxAssetIO.ENV_DIR` 同口径（`check-linux-host-staging-invariant` 守）。 */
 export const LINUX_ENV_DIR = 'linux-environment'
@@ -187,6 +189,9 @@ export function createLinuxBootstrapConfig(options: {
   return {
     dataDir,
     releaseUrl,
+    verifyManifest: (manifest: unknown) => LINUX_MANIFEST_PINS.includes(
+      createHash('sha256').update(JSON.stringify(manifest)).digest('hex'),
+    ),
     linuxAssetIO: createHostAssetIO({ filesDir }),
     appVersionProvider: () => appVersion,
     stagingDirectory: join(dataDir, STAGING_DIR, 'runtime-plugin'),

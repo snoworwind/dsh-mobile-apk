@@ -54,6 +54,7 @@ const MANIFEST = {
 const LOCAL_PATCHES = {
   'src/asset-bundle.js': '7e32ce0f57ee0a7f75dfd2d2af6ff61357d63b6c34e4f0dbf7aa23cf4300e416',
   'src/github.js': '7b6369b5910ecb3e8b49f75a4dae3ca60ceac2d4164bf7f05f71c81803aa110c',
+  'src/index.js': '27708c714ba0a102a89a72611443c144a107307686146acc49b9fa4b4c1ba4b2',
 }
 
 /** Files this repo adds, including local security regression tests. */
@@ -189,9 +190,10 @@ function selfTest() {
       label: 'negative control: a digest mismatch is reported',
       expect: /drifted from the recorded upstream content/,
       run: () => {
-        const saved = MANIFEST['src/index.js']
-        MANIFEST['src/index.js'] = '0'.repeat(64)
-        try { return run({ quiet: true }) } finally { MANIFEST['src/index.js'] = saved }
+        // Pick an upstream-faithful file; index.js now has an explicit local patch.
+        const saved = MANIFEST['src/manifest.js']
+        MANIFEST['src/manifest.js'] = '0'.repeat(64)
+        try { return run({ quiet: true }) } finally { MANIFEST['src/manifest.js'] = saved }
       },
     },
     {
