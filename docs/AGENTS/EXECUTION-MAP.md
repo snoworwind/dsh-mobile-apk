@@ -1471,7 +1471,7 @@ vendored bootstrap 与注入集的关系（0.15.0）：`plugins/dsh-linux-bootst
   - 运行时缓存读写的路径面：`$DSH_HOME`（壳侧注入点 `EngineManager.kt:1314`）、`$DSH_FILES_DIR`（`EngineManager.kt:1316`）、当前代 `engine.log`（壳侧 `EngineAuth.tokenFromLog` 的唯一输入）。
 - **关键坐标**：
   - `plugins/dsh-android-file-open/src/index.ts:238` — `enqueueSession`：路径断言 + 队列落盘 + 自有临时项记账（POST 的验收判定）
-  - `plugins/dsh-android-file-open/src/index.ts:431` — `safeResolveInside`：两侧 realpath 后的工作区包含判定（H3 + 前缀混用修复）
+  - `plugins/dsh-android-file-open/src/index.ts:431` — `safeResolveInside`：两侧 realpath 后的工作区包含判定（H3 + 前缀混用修复）；content 还须打开并校验持有 FD 的真实归属，使用同一 FD 读取，禁止路径重开（坑 369）。
   - `plugins/dsh-android-file-open/src/index.ts:525` — 五条 exact 路由的鉴权注册（拒绝先于 method 判定与任何副作用）
   - `plugins/dsh-android-file-open/src/index.ts:216` — `purgeStaleUnclaimed('boot'|'ttl')`：未认领草稿的墓碑化判据
   - `plugins/dsh-android-linux-env/src/index.ts:353` — 两条 env 路由的 `wsvc.register`（对照同文件 `:342` 注释与 `:386/:400` 的 `ctx.effect` 形态）

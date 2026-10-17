@@ -7,8 +7,10 @@
 // 令牌来源走 ST-07 的显式测试开关（DSH_CONTROL_TOKEN_TEST=1 + DSH_CONTROL_TOKEN），
 // 因此本文件同时验证「测试开关下 env 生效」这条路径。
 import { test } from 'node:test'
+import fs from 'node:fs'
+import { syncBuiltinESMExports } from 'node:module'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, symlinkSync, realpathSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, symlinkSync, realpathSync, rmSync, renameSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -142,14 +144,14 @@ function fakeReq({ method = 'POST', headers = {}, body, url = '' } = {}) {
   }
 }
 
-async function call(ctx, path, { method = 'POST', headers = {}, body, url = path } = {}) {
+async function call(ctx, path, { method = 'POST', headers = {}, body, url = path, onHeaders } = {}) {
   const route = ctx.routes.get(path)
   assert.ok(route, 'route must be registered: ' + path)
   const req = fakeReq({ method, headers, body, url })
   const chunks = []
   const res = {
     code: 0, body: undefined, headers: {},
-    writeHead(code, h) { this.code = code; this.headers = h ?? {} },
+    writeHead(code, h) { this.code = code; this.headers = h ?? {}; onHeaders?.(code) },
     write(chunk) { chunks.push(Buffer.from(chunk)); return true },
     end(b) { this.body = b ?? (chunks.length === 0 ? '' : Buffer.concat(chunks)) },
   }
@@ -160,6 +162,83 @@ async function call(ctx, path, { method = 'POST', headers = {}, body, url = path
 }
 
 const legit = () => ({ host: HOST, [CONTROL_TOKEN_HEADER]: TOKEN })
+
+for (const replaceParent of [false, true]) {
+  test('content pins the admitted file when ' + (replaceParent ? 'parent' : 'leaf') + ' is replaced before streaming', { skip: process.platform !== 'linux' }, async () => {
+    const ws = freshWorkspace()
+    const parent = join(ws, 'payload')
+    mkdirSync(parent)
+    const probe = join(parent, 'document.txt')
+    writeFileSync(probe, 'ADMITTED')
+    const foreign = mkdtempSync(join(tmpdir(), 'dsh-foreign-'))
+    writeFileSync(join(foreign, 'document.txt'), 'SECRET!!')
+    const { ctx } = makeCtx()
+    await boot(ctx)
+    const delivered = await call(ctx, ROUTES.list, { headers: legit(), body: { path: probe } })
+    assert.equal(delivered.code, 200)
+    const listed = JSON.parse((await call(ctx, ROUTES.list, { method: 'GET', headers: legit() })).body)
+    const claim = await call(ctx, ROUTES.claim, { headers: legit(), body: { entryId: listed.items[0].entryId, sessionId: 'session-abcdef12-3456' } })
+    assert.equal(claim.code, 200)
+    const { ticket } = JSON.parse(claim.body)
+    const descriptors = readdirSync('/proc/self/fd').length
+    try {
+      const content = await call(ctx, ROUTES.content, {
+        method: 'GET', headers: legit(), url: ROUTES.content + '?ticket=' + ticket,
+        onHeaders(code) {
+          if (code !== 200) return
+          const victim = replaceParent ? parent : probe
+          renameSync(victim, victim + '.saved')
+          symlinkSync(replaceParent ? foreign : join(foreign, 'document.txt'), victim)
+        },
+      })
+      assert.equal(content.code, 200)
+      assert.equal(Buffer.from(content.body).toString(), 'ADMITTED')
+      assert.equal(readFileSync(join(foreign, 'document.txt'), 'utf8'), 'SECRET!!')
+      assert.equal(readdirSync('/proc/self/fd').length, descriptors, 'stream must release its descriptor')
+    } finally {
+      rmSync(foreign, { recursive: true, force: true })
+    }
+  })
+}
+
+test('content rejects an outside descriptor after parent replacement at open', { skip: process.platform !== 'linux' }, async () => {
+  const ws = freshWorkspace()
+  const parent = join(ws, 'payload')
+  mkdirSync(parent)
+  const probe = join(parent, 'document.txt')
+  writeFileSync(probe, 'ADMITTED')
+  const foreign = mkdtempSync(join(tmpdir(), 'dsh-foreign-open-'))
+  writeFileSync(join(foreign, 'document.txt'), 'SECRET!!')
+  const { ctx } = makeCtx()
+  await boot(ctx)
+  await call(ctx, ROUTES.list, { headers: legit(), body: { path: probe } })
+  const listed = JSON.parse((await call(ctx, ROUTES.list, { method: 'GET', headers: legit() })).body)
+  const claim = await call(ctx, ROUTES.claim, { headers: legit(), body: { entryId: listed.items[0].entryId, sessionId: 'session-abcdef12-3456' } })
+  const { ticket } = JSON.parse(claim.body)
+  const originalOpen = fs.openSync
+  const descriptors = readdirSync('/proc/self/fd').length
+  let replaced = false
+  try {
+    fs.openSync = function (path, ...args) {
+      if (path === realpathSync(ws) + '/payload/document.txt' && !replaced) {
+        replaced = true
+        renameSync(parent, parent + '.saved')
+        symlinkSync(foreign, parent)
+      }
+      return originalOpen(path, ...args)
+    }
+    syncBuiltinESMExports()
+    const content = await call(ctx, ROUTES.content, { method: 'GET', headers: legit(), url: ROUTES.content + '?ticket=' + ticket })
+    assert.equal(replaced, true)
+    assert.equal(content.code, 410)
+    assert.equal(String(content.body).includes('SECRET!!'), false)
+    assert.equal(readdirSync('/proc/self/fd').length, descriptors, 'rejection must release its descriptor')
+  } finally {
+    fs.openSync = originalOpen
+    syncBuiltinESMExports()
+    rmSync(foreign, { recursive: true, force: true })
+  }
+})
 
 test('FX-205.1 无 cookie 且无令牌 → 401，工作区零变化', async () => {
   const ws = freshWorkspace()

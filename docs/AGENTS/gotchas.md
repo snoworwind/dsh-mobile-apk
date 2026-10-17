@@ -2451,3 +2451,13 @@ CI 39011926728（9bf4ed4）在 `check-contract.mjs` 仅报一条失败：`androi
 修法：登记真实消费名与声明，declarations 可显式指定本地 repo；默认仍检查 upstreamRepo。本地声明文件缺席直接失败，不变成可跳过的上游缺件；增加 scope 漂移、声明文件缺席两条受控负控，上游全集保持不变。
 
 本机验证：旧 `.deploy-tmp/deepseek-harness` 是 0.1.7-rc.2，与固定基线不符，首次全量自检失败，未改该历史树。隔离测试目录复用真实插件源码和构建产物，显式缺席上游树；`node .deploy-tmp/ci-contract-workspace/scripts/check-contract.mjs --self-test` 为 11 例通过、11 例未执行（不计自证），包含本次两条负控和消费面正反例，日志 `.deploy-tmp/ci-contract-isolated-selftest.log`。vdisplay 真实构建及执行地图检查通过。本轮未做设备验证；未改 UI 运行时行为。完整固定上游与来源链结果须以修复提交后的 CI 为准，旧失败日志为 `.deploy-tmp/ci-39011926728-failed.log`。
+
+369. **来件内容校验后异步重开路径可读取被替换的工作区外文件（2026-10-17）**
+
+现象：`/api/android/file-incoming/content` 经 ticket 鉴权后，先 realpath 包含检查和 stat，再发响应头，最后 `createReadStream(path)` 异步打开。持有工作区写权限的进程若在校验与 open 之间替换叶文件或父目录，实际打开对象就不再受先前检查约束。此为有合法 ticket、且能够替换工作区路径条件下的越界读取，不是无鉴权远程入口。
+
+修法：先以 O_NOFOLLOW、O_NONBLOCK 打开文件，用 fstat 拒绝非普通文件；Linux/Android 经 `/proc/self/fd/<fd>` 检查实际持有对象的真实工作区归属，再核对 dev/ino。响应大小取自该 FD，createReadStream 复用该 FD，不再异步按路径重开。处理器在成功、拒绝及响应异常时负责关闭 FD。其他平台使用 canonical 路径与 dev/ino 复核，不能将其证据扩大为 Linux 的 `/proc` 保证。源码与忽略的 lib 产物已重建同步。
+
+证据：插件 TypeScript 构建通过。WSL `node --test plugins/dsh-android-file-open/test/auth.test.mjs` 23 项通过，日志 `.deploy-tmp/incoming-security-tests.log`。真实路由的响应头边界分别替换叶文件和父目录，仍只收到已准入的 ADMITTED 字节；在真实 openSync 之前替换父目录时返回 410，不返回 SECRET!!，成功与拒绝均断言 FD 计数不变。将 0904c52 的旧生产源码转译后替换测试模块导入，同两条读取反例 0 通过、2 失败，实际都收到 SECRET!!，见 `.deploy-tmp/incoming-security/negative.log`；临时旧模块在反证后已从插件 lib 删除，避免进入产物。执行地图与 API 鉴权登记门禁通过。
+
+边界：未构建包含此修复的 APK、未做设备验证。当前 PowerShell 无 adb 命令，ANDROID_HOME/ANDROID_SDK_ROOT 未配置，未执行 CDP/ADB 用户任务；Android SELinux 下 FD 路径可见性、普通下载及前端附件交互仍待验收。新竞态用例在非 Linux 主机显式跳过。此修复不阻止同 UID 进程改写同一已打开 inode 的内容，也不提供对硬链接或工作区根被恶意重新定义的通用隔离保证。

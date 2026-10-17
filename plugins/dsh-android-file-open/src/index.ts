@@ -12,7 +12,7 @@
  * 后都会补建——已建条目不重复创建（同一会话绝不重复开）。消费（claim）只由前端在
  * 确实把界面路由到新会话后执行。
  */
-import { mkdirSync, writeFileSync, appendFileSync, readFileSync, readdirSync, rmSync, existsSync, realpathSync, statSync, createReadStream } from 'node:fs'
+import { mkdirSync, writeFileSync, appendFileSync, readFileSync, readdirSync, rmSync, existsSync, realpathSync, statSync, createReadStream, openSync, closeSync, fstatSync, constants } from 'node:fs'
 import { randomBytes } from 'node:crypto'
 import { join, resolve, sep, basename } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
@@ -738,28 +738,43 @@ export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
           return
         }
         let bytes = 0
+        let fd: number | undefined
         try {
-          const stat = statSync(path)
+          // Pin the object before admission; asynchronous path reopening can follow a replacement.
+          fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0))
+          const stat = fstatSync(fd)
           if (!stat.isFile()) throw new Error('incoming source is not a file')
+          const platform: string = process.platform
+          const openedPath = realpathSync(platform === 'linux' || platform === 'android' ? '/proc/self/fd/' + fd : path)
+          const workspace = realpathSync(tmpWorkspace())
+          if (!openedPath.startsWith(workspace + sep)) throw new Error('incoming source escaped workspace')
+          const admitted = statSync(openedPath)
+          if (admitted.dev !== stat.dev || admitted.ino !== stat.ino) throw new Error('incoming source changed during admission')
           bytes = stat.size
         } catch (e) {
+          if (fd !== undefined) closeSync(fd)
           draftLeases.delete(ticket)
           res.writeHead(410, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
           res.end(JSON.stringify({ ok: false, error: String((e as Error).message) }))
           return
         }
-        res.writeHead(200, {
-          'content-type': 'application/octet-stream',
-          'content-length': String(bytes),
-          'content-disposition': "attachment; filename*=UTF-8''" + encodeURIComponent(lease.name),
-          'cache-control': 'no-store',
-        })
-        await new Promise<void>((resolve) => {
-          const stream = createReadStream(path)
-          stream.on('data', (chunk: string | Buffer) => { res.write(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)) })
-          stream.on('error', () => { res.end(); resolve() })
-          stream.on('end', () => { res.end(); resolve() })
-        })
+        try {
+          res.writeHead(200, {
+            'content-type': 'application/octet-stream',
+            'content-length': String(bytes),
+            'content-disposition': "attachment; filename*=UTF-8''" + encodeURIComponent(lease.name),
+            'cache-control': 'no-store',
+          })
+          await new Promise<void>((resolve) => {
+            const stream = createReadStream(path, { fd, autoClose: false })
+            stream.on('data', (chunk: string | Buffer) => { res.write(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)) })
+            stream.on('error', () => { res.end(); resolve() })
+            stream.on('end', () => { res.end(); resolve() })
+          })
+        } finally {
+          // This handler owns the descriptor on success, stream failure and response exceptions.
+          closeSync(fd!)
+        }
       },
     }))
     // Finalize the process-local lease only after the browser has placed the File into the composer.
