@@ -10,7 +10,7 @@
 
 第二轮补充：`EngineTransportInstrumentedTest` 同时建立 40 条未认证 TCP 连接，再用正确 relay 头访问私有后端，断言未认证连接不能占满流槽位。敏感桥与通知动作必须在设备验证系统凭据成功、取消、无凭据、超时、锁屏、进程重启及旧 PendingIntent；模型自主任务不得获知用户锁屏秘密，也不得由操作者把操作序列逐条喂给模型。详见 [修复账本](SECURITY-REMEDIATION-2026-10-17-R2.md)。
 
-坑 352 的设备负控须使用来源链新包。在任何 Activity/EngineService 启动前的 fresh app process 运行 `EngineTransportInstrumentedTest`：伪造 TCP 监听者先占 3080，初始化与 attach 应拒绝且监听者无连接；关闭伪造监听者后，同 UID 私有 Unix socket 的合成 Cookie 请求应正常转发，后端退出后 relay 自身不能制造存活。编译 androidTest 不能代替执行。随后再以真实模型自主任务验主 WebView、通知应答、控制队列、mux 与引擎重启，按既有 CDP/ADB 双方向留证；该低层负控不代替真人任务。
+坑 352 的设备负控须使用来源链新包。在任何 Activity/EngineService 启动前的 fresh app process 运行 `EngineTransportInstrumentedTest`：伪造 TCP 监听者先占 3080，初始化与 attach 应拒绝且监听者无连接；关闭伪造监听者后，同 UID 私有 Unix socket 的合成 Cookie 请求应正常转发，后端退出后 relay 自身不能制造存活。后端读取完整请求后延迟 200ms 再响应，确保上传方向已经空闲等待，反证 Android SocketAdaptor 的 blockingLock 响应饥饿；响应须在 3 秒内完成。编译 androidTest 不能代替执行。随后再以真实模型自主任务验主 WebView、通知应答、控制队列、mux 与引擎重启，按既有 CDP/ADB 双方向留证；该低层负控不代替真人任务。
 
 | 层 | 手段 | 红了说明什么 |
 |---|---|---|

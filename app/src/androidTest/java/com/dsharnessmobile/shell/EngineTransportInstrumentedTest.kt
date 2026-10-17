@@ -47,6 +47,9 @@ class EngineTransportInstrumentedTest {
               val lines = ArrayList<String>()
               while (true) { val line = reader.readLine() ?: break; if (line.isEmpty()) break; lines.add(line) }
               received.set(lines.joinToString("\n"))
+              // Let the relay's upload half wait for more browser data before responding.
+              // SocketAdaptor streams on Android then deadlock the response behind blockingLock.
+              Thread.sleep(200)
               peer.outputStream.write("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok".toByteArray())
             }
           } catch (e: Throwable) { error.set(e) }

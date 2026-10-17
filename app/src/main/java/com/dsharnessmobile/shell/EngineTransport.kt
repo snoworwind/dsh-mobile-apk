@@ -139,9 +139,9 @@ object EngineTransport {
           }
         }
         if (admitted.isNotEmpty()) {
-          selector.selectNow() // Deregister cancelled keys before switching to blocking streams.
+          selector.selectNow() // Deregister admission keys before handing off to the two I/O selectors.
           for ((socket, bytes) in admitted) {
-            try { socket.configureBlocking(true); stream(socket.socket(), bytes) }
+            try { stream(socket, bytes) }
             catch (_: Exception) { slots.release(); runCatching { socket.close() } }
           }
         }
@@ -150,21 +150,24 @@ object EngineTransport {
     }
   }
 
-  private fun stream(client: java.net.Socket, prefix: ByteArray) {
+  private fun stream(client: java.nio.channels.SocketChannel, prefix: ByteArray) {
       Thread({
         try {
           client.use { tcp ->
-            tcp.soTimeout = 60_000
             backend().use { unix ->
               unix.outputStream.write(prefix)
               val activity = java.util.concurrent.atomic.AtomicLong(android.os.SystemClock.elapsedRealtime())
-              val upload = Thread({
-                try { copyActive(tcp.getInputStream(), unix.outputStream, activity) }
-                catch (_: Exception) { }
-                finally { runCatching { unix.shutdownOutput() } }
-              }, "engine-private-upload").apply { isDaemon = true; start() }
-              try { copyActive(unix.inputStream, tcp.getOutputStream(), activity) }
-              finally { tcp.close(); unix.close(); upload.join(1_000) }
+              relayChannelInput(tcp).use { input ->
+                relayChannelOutput(tcp).use { output ->
+                  val upload = Thread({
+                    try { copyActive(input, unix.outputStream, activity) }
+                    catch (_: Exception) { }
+                    finally { runCatching { unix.shutdownOutput() } }
+                  }, "engine-private-upload").apply { isDaemon = true; start() }
+                  try { copyActive(unix.inputStream, output, activity) }
+                  finally { tcp.close(); unix.close(); upload.join(1_000) }
+                }
+              }
             }
           }
         } catch (_: Exception) { runCatching { client.close() } }
@@ -190,3 +193,50 @@ object EngineTransport {
     }
   }
 }
+
+/** SocketAdaptor streams share blockingLock on Android: an idle upload would block every response.
+ * Keep the channel nonblocking and give each direction its own readiness selector instead.
+ */
+internal fun relayChannelInput(channel: java.nio.channels.SocketChannel): java.io.InputStream =
+  object : java.io.InputStream() {
+    private val selector = java.nio.channels.Selector.open().also {
+      channel.register(it, java.nio.channels.SelectionKey.OP_READ)
+    }
+    override fun read(): Int {
+      val one = ByteArray(1)
+      return if (read(one, 0, 1) < 0) -1 else one[0].toInt() and 255
+    }
+    override fun read(bytes: ByteArray, offset: Int, length: Int): Int {
+      if (length == 0) return 0
+      val buffer = java.nio.ByteBuffer.wrap(bytes, offset, length)
+      val count = channel.read(buffer)
+      if (count != 0) return count
+      selector.select(1_000)
+      selector.selectedKeys().clear()
+      val ready = channel.read(buffer)
+      if (ready == 0) throw java.net.SocketTimeoutException("Relay read idle")
+      return ready
+    }
+    override fun close() { selector.close() }
+  }
+
+internal fun relayChannelOutput(channel: java.nio.channels.SocketChannel): java.io.OutputStream =
+  object : java.io.OutputStream() {
+    private val selector = java.nio.channels.Selector.open().also {
+      channel.register(it, java.nio.channels.SelectionKey.OP_WRITE)
+    }
+    override fun write(value: Int) { write(byteArrayOf(value.toByte()), 0, 1) }
+    override fun write(bytes: ByteArray, offset: Int, length: Int) {
+      val buffer = java.nio.ByteBuffer.wrap(bytes, offset, length)
+      var lastProgress = System.nanoTime()
+      while (buffer.hasRemaining()) {
+        if (channel.write(buffer) > 0) { lastProgress = System.nanoTime(); continue }
+        if (System.nanoTime() - lastProgress >= 60_000_000_000L) {
+          throw java.net.SocketTimeoutException("Relay write stalled")
+        }
+        selector.select(1_000)
+        selector.selectedKeys().clear()
+      }
+    }
+    override fun close() { selector.close() }
+  }

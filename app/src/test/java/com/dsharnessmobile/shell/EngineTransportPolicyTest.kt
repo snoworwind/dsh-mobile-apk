@@ -7,6 +7,43 @@ import org.junit.Test
 
 class EngineTransportPolicyTest {
   @Test
+  fun `idle upload cannot block response and later upload still arrives`() {
+    java.nio.channels.ServerSocketChannel.open().use { server ->
+      server.bind(java.net.InetSocketAddress("127.0.0.1", 0))
+      java.net.Socket("127.0.0.1", (server.localAddress as java.net.InetSocketAddress).port).use { browser ->
+        browser.soTimeout = 2000
+        server.accept().use { channel ->
+          channel.configureBlocking(false)
+          relayChannelInput(channel).use { input ->
+            relayChannelOutput(channel).use { output ->
+              val waiting = java.util.concurrent.CountDownLatch(1)
+              val received = java.util.concurrent.CompletableFuture<Int>()
+              val upload = Thread {
+                waiting.countDown()
+                try {
+                  while (!received.isDone) {
+                    try { received.complete(input.read()) }
+                    catch (_: java.net.SocketTimeoutException) { }
+                  }
+                } catch (e: Throwable) { received.completeExceptionally(e) }
+              }.apply { isDaemon = true; start() }
+              try {
+                assertTrue(waiting.await(1, java.util.concurrent.TimeUnit.SECONDS))
+                Thread.sleep(100)
+                // Browser keeps its upload half open while waiting for the HTTP response.
+                output.write(65)
+                assertEquals(65, browser.getInputStream().read())
+                browser.getOutputStream().write(66)
+                assertEquals(66, received.get(2, java.util.concurrent.TimeUnit.SECONDS).toInt())
+              } finally { channel.close(); upload.join(1500) }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  @Test
   fun `relay admission requires exact secret in a header or cookie field`() {
     val token = "test-secret"
     assertFalse(EngineTransport.admissionAuthorized("GET / HTTP/1.1\r\nHost: 127.0.0.1", token))

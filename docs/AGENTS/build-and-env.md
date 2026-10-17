@@ -8,7 +8,7 @@
 
 契约门禁同时登记上游与本地 UI 槽位：`clientSlots.slots` 包含实际消费的槽名，`declarations` 默认从 `upstreamRepo` 读声明，本地声明显式填写 `repo`，不加入 `upstreamUniverse`。新增本地槽仍须校验 kind/scope 与文件在场，不能通过跳过声明检查放行。CI 39011926728 的阻断与修复见 gotchas 坑 368；自检命令为 `node scripts/check-contract.mjs --self-test`，必须配套固定版本上游树与插件 lib。
 
-引擎私有通信专项：Linux/WSL 执行 `node --test scripts/tests/engine-private-transport.test.mjs`，真实 Unix socket 正反证已接入 PR Gate 与来源构建预检；Windows 的核心 Unix 用例明确 skip，不能据其绿代替 Linux 证据。设备负控 `EngineTransportInstrumentedTest` 须来源链新包且 fresh process，详见 emulator-test-protocol.md；本次源码及本机证据见 gotchas 坑 352。
+引擎私有通信专项：Linux/WSL 执行 `node --test scripts/tests/engine-private-transport.test.mjs`，真实 Unix socket 正反证已接入 PR Gate 与来源构建预检；Windows 的核心 Unix 用例明确 skip，不能据其绿代替 Linux 证据。设备负控 `EngineTransportInstrumentedTest` 须来源链新包且 fresh process，详见 emulator-test-protocol.md；本次源码及本机证据见 gotchas 坑 352；Android SocketAdaptor 阻塞锁导致启动探活超时的后续修复及未验边界见坑 395。
 
 归一化证据当前采用 `normalizationVersion: 3`。v1/v2 摘要分别遗漏内容或文件系统权限/目录等信息，不能与当前版比较；需从原始快照重算。来源链 tarball 重打包与快照摘要共用保留条件导出顺序的规则，专项命令及反证见 [gotchas.md](gotchas.md) 坑 337、338。此修复未重建 APK、未做设备验证，历史 APK 的签名/字节哈希与源码身份事实保留；权限复核须在支持 Unix mode 的文件系统执行，Windows 测试不能代替。
 

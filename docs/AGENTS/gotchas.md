@@ -2579,3 +2579,11 @@ CI 39011926728（9bf4ed4）在 `check-contract.mjs` 仅报一条失败：`androi
 394. **增加本地 vendor 摘要后，旧负控可能只改到不再参与裁决的上游摘要（2026-10-17）**
 
 现象：bootstrap 加入 src/index.js 本地安全偏差后，--self-test 的摘要负控未产生失败。真因：生产判据优先 LOCAL_PATCHES，但旧负控仍篡改 MANIFEST 的同文件项，测试实际上改了被遮蔽的字段。修法：上游摘要负控改用仍保持上游原样的 src/manifest.js，本地摘要负控继续篡改 LOCAL_PATCHES；保持两种信任来源都能被反证。复验：check-vendored-linux-bootstrap.mjs --self-test 正控与四条负控通过，生产树检查通过。
+
+395. **私有引擎转发不能使用 Android SocketAdaptor 的双向阻塞流（2026-10-18）**
+
+现象：来源 APK 引擎已输出 dsh web 地址，壳侧仍停在引擎启动中。真因：EngineTransport 将认证后的 SocketChannel 改成 blocking，再同时使用 socket 的输入输出流。Android libcore SocketAdaptor.SocketInputStream.read 与 Channels.writeFully 都持有同一个 sc.blockingLock；上传线程在 GET 后等待下一段数据，下载线程即使已收到引擎应答也无法写回 TCP，直到上传读超时，超过启动探活预算。这是壳侧 relay 阻塞，日志中的 native binding fallback 本身不是引擎退出证据。
+
+修法：认证后的 TCP channel 保持 nonblocking，relayChannelInput / relayChannelOutput 分别注册独立 selector，直接 channel.read/write；保留未认证连接限制、relay 凭据、私有 socket 的 SO_PEERCRED UID 校验及 60 秒活动/写入停滞预算。主 WebView、HTTP 探活与 mux 共用修复后的通道。JVM 回归在上传半边保持打开时接收响应，再验证后续上传；设备负控后端延迟 200ms 响应，确保上传已经等待，拒绝旧实现的抢跑假绿。
+
+证据：`.deploy-tmp/engine-relay-fix-gradle.log` 完整 Kotlin 单测和 androidTest 编译成功；EngineTransportPolicyTest 5 项、0 失败。`.deploy-tmp/engine-relay-fix-preload.log` Linux 私有 socket 正例、外部占端口负控及无关 HTTP 服务正例通过（2 项、0 skip）。代码地图与 Kotlin 注释门禁通过。Android 原始实现核对 android14-release 的 SocketAdaptor.java / Channels.java，来源为 android.googlesource.com/platform/libcore。未做设备验证：WSL adb devices 为空，16416/16384 均 Connection refused；CDP、ADB 用户体验层和延迟响应设备负控未执行，不能记为三层验收通过。修复必须由来源链新 APK 装机后补验。
