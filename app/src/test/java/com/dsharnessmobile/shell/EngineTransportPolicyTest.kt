@@ -7,6 +7,15 @@ import org.junit.Test
 
 class EngineTransportPolicyTest {
   @Test
+  fun `relay admission requires exact secret in a header or cookie field`() {
+    val token = "test-secret"
+    assertFalse(EngineTransport.admissionAuthorized("GET / HTTP/1.1\r\nHost: 127.0.0.1", token))
+    assertFalse(EngineTransport.admissionAuthorized("GET /?x-dsh-relay=$token HTTP/1.1\r\nX-Other: $token", token))
+    assertFalse(EngineTransport.admissionAuthorized("GET / HTTP/1.1\r\nCookie: dsh-relay=$token-extra", token))
+    assertTrue(EngineTransport.admissionAuthorized("GET / HTTP/1.1\r\nX-DSH-Relay: $token", token))
+    assertTrue(EngineTransport.admissionAuthorized("GET / HTTP/1.1\r\nCookie: a=b; dsh-relay=$token", token))
+  }
+  @Test
   fun `cookie attachment refuses unowned transport before modifying connection`() {
     val connection = object : HttpURLConnection(URL(EngineAuth.BASE_URL)) {
       var touched = false

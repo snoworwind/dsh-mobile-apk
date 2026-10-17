@@ -148,6 +148,7 @@ object EngineProbe {
     return try {
       // Proxy.NO_PROXY: bypass the system proxy selector (see class doc, #118).
       val conn = URL(ENGINE_URL).openConnection(Proxy.NO_PROXY) as HttpURLConnection
+      conn.setRequestProperty("X-DSH-Relay", EngineTransport.admissionCookie().substringAfter('='))
       conn.connectTimeout = timeoutMs
       conn.readTimeout = timeoutMs
       conn.requestMethod = "GET"

@@ -30,6 +30,8 @@ class EngineTransportInstrumentedTest {
       catch (_: java.net.SocketTimeoutException) { }
     }
     EngineTransport.initialize(context)
+    // More than the old 32 streaming slots: these peers never authenticate.
+    val untrusted = List(40) { java.net.Socket("127.0.0.1", 3080) }
     val file = File(context.filesDir, "engine-private.sock")
     file.delete()
     LocalSocket().use { bound ->
@@ -53,8 +55,9 @@ class EngineTransportInstrumentedTest {
         conn.connectTimeout = 3000
         conn.readTimeout = 3000
         conn.setRequestProperty("Cookie", "synthetic-private-cookie")
+        conn.setRequestProperty("X-DSH-Relay", EngineTransport.admissionCookie().substringAfter('='))
         try { assertEquals("ok", conn.inputStream.bufferedReader().use { it.readText() }) }
-        finally { conn.disconnect(); worker.join(4000) }
+        finally { conn.disconnect(); untrusted.forEach { it.close() }; worker.join(4000) }
         assertNull(error.get())
         assertTrue(received.get().contains("synthetic-private-cookie"))
         assertTrue(received.get().contains("/api/test"))

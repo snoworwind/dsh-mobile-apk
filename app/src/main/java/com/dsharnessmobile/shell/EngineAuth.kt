@@ -225,6 +225,7 @@ object EngineAuth {
     }
     // Apply even before initContext or when no cookie exists: POST payloads are sensitive too.
     conn.instanceFollowRedirects = false
+    conn.setRequestProperty("X-DSH-Relay", EngineTransport.admissionCookie().substringAfter('='))
   }
 
   /**
@@ -236,7 +237,8 @@ object EngineAuth {
   fun attachMux(): String? {
     EngineTransport.requireOwnedPort()
     val c = ctx() ?: return null
-    return cookie(c) ?: refresh(c)
+    val auth = cookie(c) ?: refresh(c) ?: return null
+    return auth + "; " + EngineTransport.admissionCookie()
   }
 
   /**
@@ -350,6 +352,7 @@ object EngineAuth {
     return try {
       EngineTransport.requireOwnedPort()
       conn = URL("$BASE_URL/?token=$token").openConnection(Proxy.NO_PROXY) as HttpURLConnection
+      confineConnection(conn)
       conn.instanceFollowRedirects = false // capture the 303 Set-Cookie ourselves
       conn.connectTimeout = 4000
       conn.readTimeout = 4000
