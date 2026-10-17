@@ -2,10 +2,12 @@
 // Source-build replacement for check-engine-overlay.mjs: inspect the final
 // snapshot's pnpm links and source package versions instead of legacy npm paths.
 import { createHash } from 'node:crypto'
-import { spawn } from 'node:child_process'
+import { spawn, execFileSync } from 'node:child_process'
 import { createReadStream } from 'node:fs'
 import {
   existsSync,
+  cpSync,
+  readdirSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -22,6 +24,7 @@ import { XZ_THREADS } from '../lib/shell.mjs'
 import { checkDshRuntimeDependencies } from './check-dsh-runtime-dependencies.mjs'
 import { checkAndroidNativeRuntimePackages } from './check-android-native-runtime-packages.mjs'
 import { checkPresetCarriers } from './preset-carriers.mjs'
+import { verifyPackagePayload, packagePayload } from './verify-package-payload.mjs'
 import { collectPhysicalFiles, matchesPatchTarget, enginePatchTargets, verifyCanonicalEnginePatch } from './reconcile-engine-patch-copies.mjs'
 
 const snapshotArg = process.argv[2]
@@ -33,7 +36,7 @@ if (!snapshotArg) {
 const snapshot = resolve(snapshotArg)
 const sourceBuildRoot = resolve('.deploy-tmp/source-build')
 const sourceManifestPath = resolve('.deploy-tmp/engine-overlay/source-build-manifest.json')
-const reportPath = join(sourceBuildRoot, 'source-engine-snapshot-check.json')
+const reportPath = process.argv[3] ? resolve(process.argv[3]) : join(sourceBuildRoot, 'source-engine-snapshot-check.json')
 const packageCache = resolve('.deploy-tmp/engine-overlay')
 const expectedCommit = '639ed015397290b3745d163aafe02ffee4aa3f84'
 const packagePrefix = 'usr/lib/node_modules/@deepseek-ai/dsh'
@@ -101,6 +104,30 @@ try {
   await Promise.all([successful(decoder, 'xz'), successful(extractor, 'tar')])
   const engineRoot = join(tempRoot, packagePrefix)
   const physicalEngineRoot = realpathSync(engineRoot)
+  // Reconstruct source-owned payload from hash-bound packs, then independently replay
+  // reviewed patches. Do not use snapshot bytes as their own expected JS reference.
+  const referenceStage = join(tempRoot, 'reference')
+  const referenceEngine = join(referenceStage, packagePrefix)
+  cpSync(engineRoot, referenceEngine, { recursive: true, dereference: false, verbatimSymlinks: true })
+  for (const item of sourceManifest.packages) {
+    const archive = resolve(packageCache, item.file)
+    if (!within(packageCache, archive) || sha256(readFileSync(archive)) !== item.sha256) {
+      throw new Error(`${item.name} source archive is not hash-bound`)
+    }
+    const target = item.name === '@deepseek-ai/dsh' ? referenceEngine
+      : join(referenceEngine, 'node_modules', ...item.name.split('/'))
+    const physical = realpathSync(target)
+    if (!within(referenceEngine, physical)) throw new Error('Reference package escaped engine')
+    for (const child of readdirSync(physical)) {
+      if (child !== 'node_modules') rmSync(join(physical, child), { recursive: true, force: true })
+    }
+    execFileSync('tar', ['-xzf', archive, '-C', physical, '--strip-components=1', '--no-same-owner'])
+  }
+  execFileSync(process.execPath, ['scripts/patches/apply-patches.mjs', referenceStage, '--apply', '--scope', 'engine'], { stdio: 'inherit' })
+  execFileSync(process.execPath, ['scripts/check-browser-syntax-floor.mjs', '--degrade', '--stage', referenceStage], { stdio: 'inherit' })
+  execFileSync('python3', ['scripts/fix-shebang.py', join(referenceStage, 'usr'), '/data/user/0/com.dsharnessmobile.shell/files/usr'], { stdio: 'inherit' })
+  const physicalFiles = collectPhysicalFiles(engineRoot)
+  const physicalRelative = physicalFiles.map(file => ({ file, rel: relative(engineRoot, file).split(sep).join('/') }))
   const packageChecks = []
   for (const item of sourceManifest.packages) {
     const packageDir = item.name === '@deepseek-ai/dsh'
@@ -118,14 +145,55 @@ try {
     if (!existsSync(archive) || sha256(readFileSync(archive)) !== item.sha256) {
       throw new Error(`${item.name}@${item.version} source tarball hash mismatch`)
     }
+    const referenceDir = item.name === '@deepseek-ai/dsh' ? referenceEngine
+      : join(referenceEngine, 'node_modules', ...item.name.split('/'))
+    const payloadFiles = verifyPackagePayload(referenceDir, packageDir, item.name)
+    if (item.name !== '@deepseek-ai/dsh') {
+      const prefix = `node_modules/${item.name}/`
+      const expectedPayload = packagePayload(referenceDir)
+      for (const { file, rel } of physicalRelative) {
+        const offset = rel.lastIndexOf(prefix)
+        if (offset < 0) continue
+        const inner = rel.slice(offset + prefix.length)
+        if (inner.includes('/node_modules/') || inner.startsWith('node_modules/') || inner === 'package.json'
+          || !/\.(?:js|cjs|mjs|json|wasm|node)$/.test(inner)) continue
+        if (sha256(readFileSync(file)) !== expectedPayload.get(inner)) {
+          throw new Error(`${item.name}: physical payload copy differs: ${rel}`)
+        }
+      }
+    }
     packageChecks.push({
       name: item.name,
       version: item.version,
       sourceCommit: item.sourceCommit,
       sourceTarballSha256: item.sha256,
+      payloadFiles,
     })
   }
 
+  // pnpm may resolve a physical store package rather than the top-level materialized
+  // copy. Follow its payload links within the engine and compare every such package.
+  const storeRoot = join(engineRoot, 'node_modules', '.pnpm')
+  if (existsSync(storeRoot)) {
+    const checked = new Set()
+    for (const store of readdirSync(storeRoot)) {
+      const scope = join(storeRoot, store, 'node_modules', '@deepseek-ai')
+      if (!existsSync(scope)) continue
+      for (const short of readdirSync(scope)) {
+        const name = `@deepseek-ai/${short}`
+        if (!sourcePackageNames.has(name)) continue
+        const candidate = join(scope, short)
+        const physical = realpathSync(candidate)
+        if (!within(physicalEngineRoot, physical)) throw new Error(`${name} pnpm payload escapes engine`)
+        if (checked.has(physical)) continue
+        checked.add(physical)
+        const expected = name === '@deepseek-ai/dsh' ? referenceEngine : join(referenceEngine, 'node_modules', name)
+        verifyPackagePayload(expected, candidate, `${name} pnpm store`, engineRoot)
+      }
+    }
+  }
+
+  console.log(`source payload byte check passed: ${packageChecks.length} source packages and pnpm physical payloads`)
   const dependencyCheck = checkDshRuntimeDependencies(engineRoot)
   const nativeCheck = checkAndroidNativeRuntimePackages(engineRoot)
   const ptyBuild = JSON.parse(readFileSync(join(sourceBuildRoot, 'node-pty-android-build.json'), 'utf8'))

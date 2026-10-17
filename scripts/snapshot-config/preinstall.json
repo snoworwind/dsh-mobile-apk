@@ -4,7 +4,12 @@
     "https://mirrors.tuna.tsinghua.edu.cn/termux/apt/termux-main",
     "https://packages.termux.dev/apt/termux-main"
   ],
-  "npmMirrors": ["https://registry.npmjs.org", "https://registry.npmmirror.com"],
+  "npmMirrors": ["https://registry.npmjs.org"],
+  "npmIntegrity": {
+    "pnpm@10.12.1": "sha512-8N2oWA8O6UgcXHmh2Se5Fk8sR46QmSrSaLuyRlpzaYQ5HWMz0sMnkTV4soBK8zR0ylVLopwEqLEwYKcXZ1rjrA==",
+    "@napi-rs/canvas@1.0.8": "sha512-/SaLcvlqGWdm0HSCWMgHu7cjJiQXfP8/mOY+6dUyV9flQz7sPBBZ+ed2zYtoukojPmxOaL7bm+d/G4GeWWoN7g==",
+    "@napi-rs/canvas-android-arm64@1.0.8": "sha512-5+nkh8i3gt6lqS/d2jTZ1xAn6tdgtB4Lf1mW6T0Qm5/rXNwBuV1sAEyLEWan5o9gJPU/GuvHR3rvSeZ+FaGrbw=="
+  },
   "targets": [
     "python", "python-pip", "perl", "ruby", "ripgrep", "zip", "vim", "openssl", "openssl-tool",
     "zsh", "socat", "busybox", "dpkg", "termux-exec", "termux-elf-cleaner", "termux-keyring",

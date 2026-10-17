@@ -17,6 +17,7 @@ import { createHash } from 'node:crypto'
 import { wslPath, sh as wsl, XZ_THREADS } from './lib/shell.mjs'
 import { sanitizeSymlinks } from './lib/symlink-sanitize.mjs'
 import { relocateGitShellPath } from './lib/git-shell-path.mjs'
+import { verifyPinnedNpm } from './lib/pinned-npm.mjs'
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const ABI = process.argv[2] ?? 'arm64'
@@ -521,14 +522,18 @@ for (const n of needed) {
   const p = pkgs.get(n)
   if (!p.filename) continue
   const file = join(DEBPOOL, n + '.deb')
-  if (existsSync(file) && statSync(file).size === p.size) { ok++; continue }
+  if (!/^[a-f0-9]{64}$/.test(p.sha256)) throw new Error(`Missing signed SHA256: ${n}`)
+  if (existsSync(file) && statSync(file).size === p.size
+    && createHash('sha256').update(readFileSync(file)).digest('hex') === p.sha256) { ok++; continue }
+  // Never let an invalid old cache survive a failed replacement download.
+  if (existsSync(file)) rmSync(file)
   try {
     const r = await fetchMirror('/' + p.filename, 60000)
-    if (p.sha256 && createHash('sha256').update(r.buf).digest('hex') !== p.sha256) { console.warn(`  SHA256 不匹配: ${n}（重下将被拒绝，跳过）`); continue }
+    if (r.buf.length !== p.size || createHash('sha256').update(r.buf).digest('hex') !== p.sha256) throw new Error(`Signed package integrity mismatch: ${n}`)
     writeFileSync(file, r.buf)
     ok++
   } catch (e) {
-    console.warn(`  下载失败 ${n}: ${e.message}`)
+    throw new Error(`Required package download failed: ${n}: ${e.message}`)
   }
 }
 log(`下载就绪: ${ok}/${needed.size}`)
@@ -743,17 +748,12 @@ try {
     }
     if (!meta) throw new Error('pnpm metadata unavailable from all mirrors')
     const tarball = meta.dist.tarball
-    const expected = meta.dist.sha512
     const buf = Buffer.from(await (await fetch(tarball, { signal: AbortSignal.timeout(120000) })).arrayBuffer())
-    if (expected) {
-      const actual = createHash('sha512').update(buf).digest('base64')
-      if (actual !== expected) throw new Error('pnpm tarball sha512 mismatch')
-    } else {
-      console.warn('  pnpm metadata lacks dist.sha512 — integrity check skipped')
-    }
+    verifyPinnedNpm(buf, 'pnpm', PNPM_VERSION, PREINSTALL.npmIntegrity)
     writeFileSync(pnpmTgz, buf)
     log(`  pnpm ${PNPM_VERSION} downloaded from ${mirror} (${(buf.length / 1024 / 1024).toFixed(1)} MB)`)
   }
+  verifyPinnedNpm(readFileSync(pnpmTgz), 'pnpm', PNPM_VERSION, PREINSTALL.npmIntegrity)
   wsl(`mkdir -p "${wslPath(join(U, 'lib/node_modules/pnpm'))}" && tar -xzf "${wslPath(pnpmTgz)}" -C "${wslPath(join(U, 'lib/node_modules/pnpm'))}" --strip-components=1 && chmod -R a+rX "${wslPath(join(U, 'lib/node_modules/pnpm'))}"`)
   writeFileSync(
     join(U, 'bin/pnpm'),
@@ -764,6 +764,7 @@ try {
 } catch (e) {
   // 不静默：市场安装是本里程碑验收项，装配失败必须可见（build-apk 门禁会因此拒绝打包）
   console.error(`  [pnpm 装配失败] ${e?.stack ?? String(e)}`)
+  throw e
 }
 
 // ── 7c1. PTC node wrapper（0.14.2 缺陷 C：`code run` 的 spawn EACCES / CANNOT LINK）──────────
@@ -861,13 +862,11 @@ if (ABI === 'arm64') {
         }
         if (!meta) throw new Error(`${pkg.name} metadata unavailable from all mirrors`)
         const buf = Buffer.from(await (await fetch(meta.dist.tarball, { signal: AbortSignal.timeout(180000) })).arrayBuffer())
-        if (meta.dist.sha512) {
-          const actual = createHash('sha512').update(buf).digest('base64')
-          if (actual !== meta.dist.sha512) throw new Error(`${pkg.name} tarball sha512 mismatch`)
-        }
+        verifyPinnedNpm(buf, pkg.name, CANVAS_VERSION, PREINSTALL.npmIntegrity)
         writeFileSync(dest, buf)
         log(`  ${pkg.name}@${CANVAS_VERSION} downloaded from ${mirror} (${(buf.length / 1024 / 1024).toFixed(1)} MB)`)
       }
+      verifyPinnedNpm(readFileSync(dest), pkg.name, CANVAS_VERSION, PREINSTALL.npmIntegrity)
       const dstDir = join(profileDir, 'node_modules', scope, short)
       // 0.13.1：目录删除走 WSL（Windows rmSync 对 WSL 创建的目录会 9p EACCES/ENOTEMPTY——雷点 9 同源）。
       wsl(`rm -rf "${wslPath(dstDir)}" && mkdir -p "${wslPath(dstDir)}" && tar -xzf "${wslPath(dest)}" -C "${wslPath(dstDir)}" --strip-components=1 && chmod -R u+rwX "${wslPath(dstDir)}"`)
@@ -881,8 +880,9 @@ if (ABI === 'arm64') {
     writeFileSync(pjPath, JSON.stringify(pj, null, 2) + '\n')
     log('@napi-rs/canvas 平台绑定就位（profiles/web/node_modules + package.json 登记）')
   } catch (e) {
-    // 不静默：arm64 缺 canvas = 扫描 PDF 渲染维持降级，必须可见以便追溯
-    console.error(`  [canvas 装配失败——arm64 维持 PDF 渲染降级] ${e?.stack ?? String(e)}`)
+    // Executable dependency failures block the source artifact, including poisoned caches.
+    console.error(`  [canvas 装配失败] ${e?.stack ?? String(e)}`)
+    throw e // A missing or untrusted executable dependency cannot become a release downgrade.
   }
 }
 

@@ -187,6 +187,7 @@ jobs:
           # Previous stage interruption may leave the project overlay in its source-only form.
           # Regenerate from the immutable audited project commit, not the previous run artifact.
           git show "$GITHUB_SHA:scripts/snapshot-config/engine-overlay.json" > scripts/snapshot-config/engine-overlay.json
+          git show "$GITHUB_SHA:scripts/snapshot-config/preinstall.json" > scripts/snapshot-config/preinstall.json
           cd .deploy-tmp/deepseek-harness
           # Reset only the dedicated build checkout on rerun; retain ignored caches.
           # All vendor sources now follow the official target; no older commit is staged.
@@ -510,6 +511,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p .deploy-tmp/source-build
+          git show "$GITHUB_SHA:scripts/snapshot-config/preinstall.json" > scripts/snapshot-config/preinstall.json
           cp scripts/snapshot-config/preinstall.json .deploy-tmp/source-build/preinstall.original.json
           test -s .deploy-tmp/source-build/engine-overlay.original.json
           node -e 'const fs=require("fs"); const p="scripts/snapshot-config/preinstall.json"; const x=JSON.parse(fs.readFileSync(p,"utf8")); if (!x.targets.includes("nodejs-lts")) x.targets.push("nodejs-lts"); x.requiredTargets=["nodejs-lts"]; fs.writeFileSync(p,JSON.stringify(x,null,2)+"\n")'
