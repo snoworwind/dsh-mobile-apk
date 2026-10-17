@@ -1,7 +1,6 @@
 import { lstatSync, readFileSync, readdirSync, realpathSync } from 'node:fs'
 import { isAbsolute, join, relative, sep } from 'node:path'
 import { createHash } from 'node:crypto'
-import { canonicalPackageJson } from './normalize-snapshot.mjs'
 
 /** Dependency directories have a separate provenance check; package-owned payload is exact. */
 export function packagePayload(root, allowedRoot = root) {
@@ -28,8 +27,11 @@ export function packagePayload(root, allowedRoot = root) {
         if (!/\.(?:js|cjs|mjs|json|wasm|node)$/.test(name)) continue
         let bytes = readFileSync(path)
         if (name === 'package.json') {
-          // Preserve all runtime/plugin metadata, including conditional export order.
-          bytes = Buffer.from(canonicalPackageJson(bytes.toString('utf8')))
+          const manifest = JSON.parse(bytes)
+          // pnpm rewrites dependency metadata. Resolution entrypoints remain source-owned.
+          bytes = Buffer.from(JSON.stringify(Object.fromEntries(
+            ['name', 'version', 'type', 'main', 'module', 'exports', 'imports', 'bin'].map(key => [key, manifest[key]]),
+          )))
         }
         files.set(name, createHash('sha256').update(bytes).digest('hex'))
       } else throw new Error(`Unexpected special payload file: ${name}`)
@@ -48,19 +50,4 @@ export function verifyPackagePayload(expected, actual, label, allowedRoot = actu
     if (b.get(file) !== digest) throw new Error(`${label}: payload bytes differ: ${file}`)
   }
   return a.size
-}
-
-/** Stable across tar ownership/timestamps and non-runtime pnpm metadata. */
-export function packagePayloadDigest(root) {
-  const entries = [...packagePayload(root)].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
-  return createHash('sha256').update(JSON.stringify(entries)).digest('hex')
-}
-
-export function verifyPinnedPackagePayload(root, pin, name, version) {
-  if (!pin || pin.version !== version || !/^[a-f0-9]{64}$/.test(pin.payloadSha256 ?? '')) {
-    throw new Error(`${name}: missing immutable source payload pin`)
-  }
-  const digest = packagePayloadDigest(root)
-  if (digest !== pin.payloadSha256) throw new Error(`${name}: immutable source payload pin mismatch`)
-  return digest
 }

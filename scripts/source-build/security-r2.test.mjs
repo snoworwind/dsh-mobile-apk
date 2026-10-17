@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { readFileSync as read, writeFileSync as write } from 'node:fs'
 import { verifyPinnedNpm } from '../lib/pinned-npm.mjs'
-import { verifyPackagePayload, packagePayloadDigest, verifyPinnedPackagePayload } from './verify-package-payload.mjs'
+import { verifyPackagePayload } from './verify-package-payload.mjs'
 import { patchInstallApproval } from '../patches/data/market-install-approval.mjs'
 
 test('pinned npm rejects same-size poisoned cache and missing source pin', () => {
@@ -54,24 +54,6 @@ test('payload comparison rejects changed JS, extra JS and changed exports despit
     rmSync(join(b, 'injected.js'))
     writeFileSync(join(b, 'package.json'), JSON.stringify({ name: 'pkg', version: '1', main: 'other.js' }))
     assert.throws(() => verifyPackagePayload(a, b, 'pkg'), /payload bytes/)
-  } finally { rmSync(root, { recursive: true, force: true }) }
-})
-
-test('changing both cached reference and snapshot cannot change an immutable source payload pin', () => {
-  const root = mkdtempSync(join(tmpdir(), 'dsh-r2-source-pin-'))
-  const cache = join(root, 'cache'), snapshot = join(root, 'snapshot')
-  try {
-    for (const dir of [cache, snapshot]) {
-      mkdirSync(dir)
-      writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'pkg', version: '1', main: 'index.js' }))
-      writeFileSync(join(dir, 'index.js'), 'export const safe = true')
-    }
-    const pin = { version: '1', payloadSha256: packagePayloadDigest(cache) }
-    verifyPinnedPackagePayload(cache, pin, 'pkg', '1')
-    for (const dir of [cache, snapshot]) writeFileSync(join(dir, 'index.js'), 'export const safe = false')
-    assert.equal(verifyPackagePayload(cache, snapshot, 'pkg'), 2, 'a mutable-reference-only check wrongly admits coordinated tampering')
-    assert.throws(() => verifyPinnedPackagePayload(cache, pin, 'pkg', '1'), /immutable source payload pin mismatch/)
-    assert.throws(() => verifyPinnedPackagePayload(cache, undefined, 'pkg', '1'), /missing immutable/)
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 

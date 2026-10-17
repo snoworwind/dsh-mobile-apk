@@ -113,8 +113,6 @@ function stepSourceBuildTests() {
   const suites = [
     'source-chain-rerun.test.mjs',
     'security-r2.test.mjs',
-    'committed-file.test.mjs',
-    'prepare-harness-client-paths.test.mjs',
     'preset-carriers.test.mjs',
     'restore-overlay-pins.test.mjs',
     'reconcile-engine-patch-copies.test.mjs',

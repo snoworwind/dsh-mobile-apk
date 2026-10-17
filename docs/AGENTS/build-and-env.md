@@ -139,14 +139,6 @@ Harness按固定0.2.0-rc.2源码完成全仓构建；prepare-harness-vendor-over
 
 `check-dsh-source-snapshot.mjs` 的内置预设载体断言与权威门禁 `check-engine-overlay.mjs` 的 CARRIERS 同源，清单在 `scripts/source-build/preset-carriers.mjs`：载体是 `agent-preset/skills/` 与 `web-app/presets/`（0.1.7 把 `dsh-agent-presets` 拆成 agent-preset + agent-preset-registry 后的新形态），判据是目录在场且递归文件数 ≥ 1。`preset-carriers.test.mjs` 读权威源文本双向比对两侧载体集合——权威源重锚而本侧没跟上的话，判红落在秒级的 PR 门禁上，而不是四十分钟后的云端构建（坑 200）。
 
-**来源包载荷 pin（2026-10-17 第二轮加固）**：`scripts/snapshot-config/engine-source-payload-pins.json` 固定 319 个源码包的 runtime payload SHA-256；`check-dsh-source-snapshot.mjs` 用 `readCommittedFile` 从审计提交（`GITHUB_SHA` 必须等于检出 HEAD）逐层验证 commit/tree/blob 对象哈希后读出 pin，再与快照逐包比对，因此缓存 tarball、`source-build-manifest.json` 与快照同时被改写也不能改 pin。pin 同时绑定 `scripts/source-build/prepare-harness-client-paths.mjs` 的 SHA-256（客户端 CSS 绝对路径规范化，保证两次独立构建字节一致）；改路径策略或改适配器必须重新生成 pin，`-text` 行尾规则见 `.gitattributes`。再生成需要两棵**同一 Harness commit / lockfile** 的独立本地来源构建树（各自含 `.deploy-tmp/engine-overlay/source-build-manifest.json`、`.tgz` 与 `.deploy-tmp/deepseek-harness`）：
-
-```bash
-node scripts/source-build/generate-engine-source-payload-pins.mjs <build-root-a> <build-root-b> scripts/snapshot-config/engine-source-payload-pins.json
-```
-
-两棵树对同一包的 payload 摘要必须一致，否则脚本拒绝写出。升 Harness 时先重建两棵树、再生成 pin，最后跑 `check-dsh-source-snapshot.mjs`；只改 `package.json` 依赖元数据而不改 payload 时不会触发 pin 变化。
-
 来源链在构建期会把 `@deepseek-ai/*` 从 `scripts/snapshot-config/engine-overlay.json` 摘除（否则快照构建器会按登记表回拉上游发布版 tarball，整目录覆盖已注入的源码产物），摘除清单记进 `source-build-policy.json`；APK 步骤先由 `scripts/source-build/restore-overlay-pins.mjs` 把这份清单并回去，再跑门禁集——`check-contract.mjs` 第 7 节正是按它定运行时版本、并判 profile 里引擎包 insert 行是否与运行时同版（该门禁在拿不到 semver 时 SKIP，旧链因此从未真判过）。还原记录进策略 provenance，退出 trap 覆盖回原文件（坑 201）。
 
 **设备验证链路**（真机 arm64 vivo V2425A；模拟器 MuMu x86_64 竖屏 `127.0.0.1:16416`、横屏 `127.0.0.1:16384`——横屏实例勿改回竖屏）：
