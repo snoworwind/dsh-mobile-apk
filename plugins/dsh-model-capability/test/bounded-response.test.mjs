@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { boundedResponseText } from '../lib/bounded-response.js'
+import { spawnSync } from 'node:child_process'
 
 test('decoded chunked response is stopped at byte budget and reader is cancelled', async () => {
   let cancelled = false
@@ -34,4 +35,24 @@ test('deadline aborts a stalled response body', async () => {
   const result = boundedResponseText(response)
   controller.abort()
   await assert.rejects(result, /deadline/)
+})
+
+test('tiny chunks cannot amplify a small response into an unbounded retained heap', () => {
+  const count = 400_000
+  const run = code => spawnSync(process.execPath, ['--max-old-space-size=32', '--input-type=module', '-e', code], {
+    encoding: 'utf8', timeout: 20_000, maxBuffer: 1024 * 1024,
+  })
+  // Controlled negative: this heap budget really rejects retaining one allocation per byte.
+  const negative = run(`const held=[];for(let i=0;i<${count};i++)held.push(new Uint8Array([97]));console.log(held.length)`)
+  assert.notEqual(negative.status, 0)
+  assert.match(negative.stderr, /heap|allocation|memory/i)
+  const module = new URL('../lib/bounded-response.js', import.meta.url).href
+  const positive = run(`
+    import { boundedResponseText } from ${JSON.stringify(module)};
+    let sent=0;
+    const body=new ReadableStream({pull(c){if(sent++<${count})c.enqueue(new Uint8Array([97]));else c.close()}});
+    const text=await boundedResponseText({body,text:async()=>{throw Error('must stream')}},${count});
+    if(text.length!==${count}||text[0]!=='a')process.exit(2);
+  `)
+  assert.equal(positive.status, 0, positive.error?.message ?? positive.stderr.slice(-500))
 })

@@ -12,7 +12,7 @@
 | 379 | 通知动作只持不可变 getActivity；原生确认并认证系统凭据后签发内存一次性许可，receiver 消费许可，旧广播 PendingIntent 不能直接应答 | 回复在原生界面输入；无凭据请打开应用作答。通知监听应用只能请求确认界面，不能直接批复 |
 | 380 | market-install-approval-R2 补丁要求每次模型安装都 ask；身份缺失、目录缺项、网络/钩子错误 deny，不回落 allow | riskFlags 仅展示。执行器与 vendor 同步，沿用引擎审批通道 |
 | 381 | bootstrap 发现、安装、重装都强制批准清单验证；宿主固定清单摘要作为批准策略 | **功能阻塞**：原 latest API 只读查询返回 404，没有可批准真实清单，源码 pin 列表为空，安装失败关闭。不能声称 Linux 功能恢复；取得可审查资产后须源码评审加入摘要 |
-| 382 | 四处 response.text 改为有界流读取；目录默认 8 MiB、主动探测 1 MiB；models.dev 30 秒 deadline、禁止 redirect | 解码字节超限取消 reader，旧缓存可沿用。text-only 注入离线适配器仅供宿主夹具，生产 fetch 使用流 |
+| 382 | 四处 response.text 改为有界流读取；使用固定上限缓冲，不保留逐块对象列表；目录默认 8 MiB、主动探测 1 MiB；models.dev 30 秒 deadline、禁止 redirect | 解码字节超限取消 reader，旧缓存可沿用。text-only 注入离线适配器仅供宿主夹具，生产 fetch 使用流 |
 | 383 | public privilege/status 只读缓存，移除 shizukuChannelProbed，不占控制队列 | 初次无事实保持 unknown，刷新由受鉴权控制路径负责 |
 | 384 | nonce 限 1–64 位十六进制再拼入单引号参数 | 对应 BigInteger(256) 非定长输出；引号、换行、命令替换不能进入命令 |
 | 385 | 从摘要绑定源码 tarball 重建参考包，独立重放登记补丁，核对快照 JS/JSON/WASM/native 载荷及解析入口，并检查 pnpm 实体副本与受限链接 | 校验器、源码导出清单、Git 对象库和构建环境仍须可信；不能抵抗能重写检查器的任意构建代码。新来源全链待跑，小夹具不代替全链 |
@@ -30,7 +30,7 @@
 
 日志为本机证据，不是远端已可取得的 CI 资产。源码/命令可由本分支复跑；本轮没有新的云端来源构建 run，也没有发布结论。
 
-- model-capability 最终全量 174 项通过，已包含流上限专项：`security-r2-model-final.log`；三份 npm 官方归档实际下载流的 SHA-512 均与源码 pin 相符，记录 `security-r2-official-pins.json`。
+- model-capability 最终全量 175 项通过，含流上限与 32 MiB 堆预算下大量微块正反证：`security-r2-model-final.log`；三份 npm 官方归档实际下载流的 SHA-512 均与源码 pin 相符，记录 `security-r2-official-pins.json`。
 - manage 82 项通过：`security-r2-manage-tests.log`。
 - bridge 159 项通过：`security-r2-bridge-tests.log`；linux-env POSIX 全量 64 项通过：`security-r2-linux-posix.log`。Windows 最后一轮业务断言通过但清理临时目录出现 ENOTEMPTY，原始失败保留 `security-r2-linux-final.log`，不把该轮写为通过；POSIX 复核未改用例。
 - host-web-compat Linux 59 项与真实注入 smoke 通过：`security-r2-host-linux.log`，含真实路径链接外逃负控；Windows 同链接用例明确 skip，不据 Windows 代替 POSIX 证据。
@@ -41,6 +41,7 @@
 - 新字节门禁实际检查旧来源快照：319 个源码包及 pnpm 物理载荷对账通过，随后既有 narb-android-N1 副本门禁拒绝旧产物，完整命令 exit 1。见 `security-r2-existing-snapshot.log`；这不是新候选来源链通过，旧产物不得用于本轮交付。
 - **未做设备验证**：本机 adb 可执行，设备列表为空；16416、16384 两个模拟器连接拒绝。没有 CDP、ADB 自主真实任务、双方向截图或真机证据。L2/L3 验收仍阻塞，不能作为发布候选。
 - 未生成本轮 APK；后续仅允许最终已提交源码的来源链。旧 APK、热推与宿主单测不能代替。
+- 已实际启动本地完整来源链；先后暴露本地缺 GitHub runner 环境变量、隔离检出无 origin 两个环境前提。补齐值均来自本轮任务目录和原工作树实际仓库坐标，不改校验规则；续跑记录 `security-r2-source-chain.log`。
 - 本轮解压参考树在 finally 清理。工作区清理脚本在本仓及已知相邻入口均不存在，未臆造全树删除命令；旧缓存未删除，仅保留本轮日志、编译产物和测试依赖。
 
 主要复跑命令：

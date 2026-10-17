@@ -18,7 +18,9 @@ export async function boundedResponseText(response: {
     return text
   }
   const reader = response.body.getReader()
-  const chunks: Uint8Array[] = []
+  // Bound allocation independently of chunk count: retaining millions of tiny
+  // chunks can exhaust memory long before their combined bytes reach the limit.
+  const bytes = Buffer.allocUnsafe(maxBytes)
   let size = 0
   try {
     while (true) {
@@ -26,9 +28,9 @@ export async function boundedResponseText(response: {
       if (done) break
       size += value.byteLength
       if (size > maxBytes) throw new Error('HTTP response exceeds byte limit')
-      chunks.push(value)
+      bytes.set(value, size - value.byteLength)
     }
-    return Buffer.concat(chunks, size).toString('utf8')
+    return bytes.toString('utf8', 0, size)
   } finally {
     await reader.cancel().catch(() => {})
     reader.releaseLock()
