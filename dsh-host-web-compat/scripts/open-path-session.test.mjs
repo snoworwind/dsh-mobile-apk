@@ -3,9 +3,9 @@
 // 外加源码级契约断言（DOM 事实判定、sessionId 传递、错误不静默）。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync, readFileSync, realpathSync, symlinkSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, relative as relativePath, sep as pathSep, isAbsolute as isAbsolutePath } from 'node:path'
 import { resolve as resolvePath } from 'node:path'
 
 // 统一换行（文件是 CRLF）：函数体提取按 '\n' 切，不随平台变
@@ -17,7 +17,7 @@ function loadResolveSessionPath() {
   const end = SRC.indexOf('\n}\n', start)
   assert.ok(end > start, 'resolveSessionPath 必须能被完整取出')
   const body = SRC.slice(start, end + 3)
-  return new Function('existsSync', 'resolvePath', 'homedir', body + '\nreturn resolveSessionPath')(existsSync, resolvePath, homedir)
+  return new Function('existsSync', 'resolvePath', 'homedir', 'realpathSync', 'relativePath', 'pathSep', 'isAbsolutePath', body + '\nreturn resolveSessionPath')(existsSync, resolvePath, homedir, realpathSync, relativePath, pathSep, isAbsolutePath)
 }
 
 function fixture() {
@@ -76,27 +76,38 @@ test('会话作用域：该会话内不存在 → 结构化失败并回指会话
   assert.equal(out.sessionId, 'session-a')
 })
 
-test('兼容旧页面（无 sessionId）：保留存在性消歧但显式标记 guessed', () => {
+test('missing session refuses rather than guessing a different workspace', () => {
   const { a } = fixture()
   writeFileSync(join(a, 'legacy.txt'), 'A')
   const resolve = loadResolveSessionPath()
   const ctx = ctxWith([{ header: { id: 'session-a', cwd: a } }])
   const out = resolve('legacy.txt', ctx)
-  assert.deepEqual(out, { abs: join(a, 'legacy.txt'), guessed: true })
+  assert.equal(out.error, 'session-required')
 })
 
-test('绝对路径与不存在路径仍按原语义（结构化原因）', () => {
+test('absolute paths also require a session and cannot escape its physical workspace', () => {
   const { a } = fixture()
   writeFileSync(join(a, 'abs.txt'), 'A')
   const resolve = loadResolveSessionPath()
   const ctx = ctxWith([])
   // 绝对分支按 POSIX 语义判定（设备是 Linux；Windows 上 "C:\\..." 不以 '/' 开头，
   // 落相对分支正是同一实现的行为）——两平台都用 '/' 形态断言：
-  assert.equal(resolve('/definitely/not/here.txt', ctx).error, 'not-found')
-  if (process.platform !== 'win32') {
-    assert.deepEqual(resolve(join(a, 'abs.txt'), ctx), { abs: join(a, 'abs.txt') })
-  }
-  assert.equal(resolve(join(a, 'missing.txt'), ctx).error, 'not-found')
+  assert.equal(resolve('/definitely/not/here.txt', ctx).error, 'session-required')
+  const scoped = ctxWith([{ header: { id: 's', cwd: a } }])
+  assert.deepEqual(resolve(join(a, 'abs.txt'), scoped, 's'), { abs: join(a, 'abs.txt'), sessionId: 's' })
+  writeFileSync(join(a, '..', 'outside.txt'), 'private')
+  assert.equal(resolve('../outside.txt', scoped, 's').error, 'outside-session')
+  assert.equal(resolve(join(a, '..', 'outside.txt'), scoped, 's').error, 'outside-session')
+  assert.equal(resolve(join(a, 'missing.txt'), ctx).error, 'session-required')
   assert.equal(resolve('', ctx).error, 'empty-path')
-  assert.equal(resolve('rel-nothing.txt', ctx).error, 'not-found')
+  assert.equal(resolve('rel-nothing.txt', ctx).error, 'session-required')
+})
+
+test('a symlink inside the workspace cannot resolve another session file', { skip: process.platform === 'win32' }, () => {
+  const { a, b } = fixture()
+  writeFileSync(join(b, 'private.txt'), 'private')
+  symlinkSync(join(b, 'private.txt'), join(a, 'link.txt'))
+  const resolve = loadResolveSessionPath()
+  const ctx = ctxWith([{ header: { id: 's', cwd: a } }])
+  assert.equal(resolve('link.txt', ctx, 's').error, 'outside-session')
 })

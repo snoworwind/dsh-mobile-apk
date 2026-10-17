@@ -224,7 +224,7 @@ try {
   }
 
   const guarded = transforms[0]('<html><head>x-dsh-pick-token</head><body></body></html>')
-  check('idempotent guard skips a page that already carries the injection', guarded === '<html><head>x-dsh-pick-token</head><body></body></html>')
+  check('untrusted token substring cannot suppress injection', guarded.includes('typeof Iterator') && guarded.includes('x-dsh-pick-token'))
 
   // 静态占位自带独立哨兵，**刻意不共用** pick-token 判据：入口 chunk 全灭时它是唯一的可见反馈，
   // 与 pick-token 共用判据会被一起跳过（lib/index.js 的 tapIndex 注释里逐字写了这条理由）。

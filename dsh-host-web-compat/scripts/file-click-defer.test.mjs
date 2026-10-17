@@ -28,6 +28,31 @@ function loadHasUpstreamHandler() {
 
 const hasUpstreamHandler = loadHasUpstreamHandler()
 
+test('browser titles that resemble paths never invoke or consume native file open', () => {
+  const start = SRC.indexOf("document.addEventListener('click',function(e){", SRC.indexOf('// External-reader file open'))
+  const end = SRC.indexOf('},true);', start)
+  const source = SRC.slice(start, end + '},true);'.length)
+  class Element {
+    constructor(marked) { this.marked = marked }
+    matches() { return this.marked }
+    getAttribute(name) { return name === 'title' ? '/sdcard/private.pdf' : '/workspace/file.pdf' }
+  }
+  const calls = []
+  let listener
+  const document = { body: {}, addEventListener(_, fn) { listener = fn } }
+  new Function('HTMLElement', 'window', 'document', 'hasUpstreamHandler', source)(
+    Element, { __dshOpenPath: (...args) => { calls.push(args); return true } }, document, () => false,
+  )
+  let consumed = 0
+  const event = target => ({ target, preventDefault() { consumed++ }, stopPropagation() { consumed++ } })
+  listener(event(new Element(false)))
+  assert.deepEqual(calls, [])
+  assert.equal(consumed, 0)
+  listener(event(new Element(true)))
+  assert.deepEqual(calls, [['/workspace/file.pdf', 'view']])
+  assert.equal(consumed, 2)
+})
+
 test('判据：节点上挂了 React onClick 即视为上游已接管', () => {
   const el = { ['__reactProps$abc']: { onClick: () => {} } }
   assert.equal(hasUpstreamHandler(el), true)

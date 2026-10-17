@@ -6,9 +6,9 @@
 //    engine. External workspaces (/storage/emulated/0/...) need All Files Access; the shell APK guides that.
 
 import { randomUUID } from 'node:crypto'
-import { existsSync } from 'node:fs'
+import { existsSync, realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { resolve as resolvePath } from 'node:path'
+import { resolve as resolvePath, relative as relativePath, sep as pathSep, isAbsolute as isAbsolutePath } from 'node:path'
 import { Service } from '@deepseek-ai/cordis'
 
 /** Polyfill snippet per missing API (idempotent: skipped when already present). */
@@ -615,7 +615,10 @@ document.addEventListener('click',function(e){
 var el=e.target;
 while(el&&el!==document.body&&!(el instanceof HTMLElement)){el=el.parentElement}
 if(!el||el===document.body)return;
-var path=el.getAttribute&&el.getAttribute('title');
+// Titles on browser tabs and other controls are untrusted display text.
+// Only explicitly marked file mentions participate in native path handling.
+if(!el.matches||!el.matches('[data-dsh-file-path]'))return;
+var path=el.getAttribute('data-dsh-file-path');
 var isFileLike=path&&(path.indexOf('/')>=0||path.indexOf('.')>=0)&&path.length<500;
 if(!isFileLike)return;
 // apk #350：上游 fileMention 按钮自带 onClick（ui-primitives render.tsx:320-323 的 mention.open），
@@ -1103,6 +1106,7 @@ export function apply(ctx) {
     ['boot-watchdog', BOOT_WATCHDOG_SCRIPT],
     ['theme-bridge', THEME_BRIDGE_SCRIPT],
     ['picker', PICKER_SCRIPT],
+    ['static-fallback', STATIC_FALLBACK_SCRIPT],
   ]);
 
   // Polyfills + picker bridge script into every index response.
@@ -1112,7 +1116,7 @@ export function apply(ctx) {
   // loop + upload buttons), breaking directory picking and file upload (measured on device/MuMu,
   // 2026-08-16).
   ctx.webServer.tapIndex((html) =>
-    html.includes('x-dsh-pick-token') ? html : html.replace('</head>', POLYFILL_SCRIPT + '</head>')
+    html.replace('</head>', POLYFILL_SCRIPT + '</head>')
   );
 
   // §2.3（0.14.1 块C）静态失败占位：**独立于**上面的 pick-token 幂等判据注入。
@@ -1225,13 +1229,6 @@ export function apply(ctx) {
  */
 function resolveSessionPath(rel, ctx, sessionId) {
   if (typeof rel !== 'string' || rel === '') return { error: 'empty-path', reason: '路径为空' }
-  if (rel.startsWith('/')) {
-    return existsSync(rel) ? { abs: rel } : { error: 'not-found', reason: '该绝对路径不存在' }
-  }
-  if (rel.startsWith('~/')) {
-    const abs = resolvePath(homedir(), rel.slice(2))
-    return existsSync(abs) ? { abs } : { error: 'not-found', reason: '家目录下不存在该文件' }
-  }
   let sessions
   try { sessions = ctx.get('sessions') } catch { sessions = undefined }
   // ST-15：会话作用域优先（F-UI-01）——有 sessionId 就只在该会话的 cwd 内解析。
@@ -1252,20 +1249,19 @@ function resolveSessionPath(rel, ctx, sessionId) {
     if (typeof cwd !== 'string' || cwd === '') {
       return { error: 'session-unknown', reason: '会话不存在或没有工作区', sessionId }
     }
-    const abs = resolvePath(cwd, rel)
+    let base
+    try { base = realpathSync(cwd) } catch { return { error: 'session-unknown', sessionId } }
+    const abs = resolvePath(base, rel)
+    let physical
+    try { physical = realpathSync(abs) } catch { return { error: 'not-found-in-session', sessionId } }
+    const scoped = relativePath(base, physical)
+    if (scoped === '..' || scoped.startsWith('..' + pathSep) || isAbsolutePath(scoped)) {
+      return { error: 'outside-session', sessionId }
+    }
     try {
       if (existsSync(abs)) return { abs, sessionId }
     } catch { /* permission/race: report as not found in that session */ }
     return { error: 'not-found-in-session', reason: '该会话工作区内不存在此文件', sessionId }
   }
-  // 兼容旧页面（无 sessionId）：保留存在性消歧，但显式标记 guessed——不静默把猜解当权威。
-  let list = []
-  try { list = typeof sessions?.list === 'function' ? sessions.list() : [] } catch { list = [] }
-  for (const session of list) {
-    const cwd = session?.header?.cwd
-    if (typeof cwd !== 'string' || cwd === '') continue
-    const abs = resolvePath(cwd, rel)
-    try { if (existsSync(abs)) return { abs, guessed: true } } catch { /* permission/race: try next */ }
-  }
-  return { error: 'not-found', reason: '未提供会话且无法在活动会话中命中' }
+  return { error: 'session-required', reason: '必须指定文件所属会话' }
 }
