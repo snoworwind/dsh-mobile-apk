@@ -1,5 +1,7 @@
 # modules.md — 目录与源文件作用（关键函数锚点）
 
+第二轮安全修复新增 `NotifyConfirmActivity.kt`：通知动作的原生界面与系统凭据认证，认证后签发内存一次性许可给 `NotifyActionReceiver`。`MainActivity.confirmPrivilegedChange` 负责敏感桥授权的原生确认、系统凭据回调、超时撤销；`EngineTransport.admit` 在 selector 上限制未认证连接并在分配后端前验证 relay 凭据。授权存储与兼容变化见 [修复账本](SECURITY-REMEDIATION-2026-10-17-R2.md)。
+
 > grep 用法：`grep -n "<文件名>.kt" docs/AGENTS/modules.md`。行号随版本漂移，以函数名为准。
 > 与 docs/AGENTS/ARCHITECTURE.md 冲突时以 ARCHITECTURE.md 为准。
 
@@ -249,7 +251,7 @@
 | `NotifyStore.kt`（新） | `.notify.ndjson` 消费：FileObserver + **按字节偏移**推进（只消费到最后一个换行符）+ 偏移持久化 + 轮转残段补读 + 双读不双发门 | `start()` / `drain()` / `drainBytes()`（纯函数，单测）/ `parseEntry()` / `dispatch()` / `legacyFallback()` |
 | `NotifyBridge.kt`（新） | 专用 `$events` 流（`streamId = dsh-notify-responder`，独立于悬浮球）：waterfall 投放通知、cancel 帧撤通知、`$events/result` 投递 | `start()` / `isReady()` / `handleValue()` / `markSettled()` / `postResult()` |
 | `NotifyDecisionQueue.kt`（新） | 决策耐久队列：先落盘 `files/notify-decisions.ndjson` 再投递、指数退避 ≤60s、requestId LRU、失败态可见；**NOT_READY（引擎/流未就绪）独立计数 + 5 分钟墙钟预算**（到期转 FAILED + 「提交失败，点击重试」；预算 > 实测冷启动上限 110s）；**触发点自愈**：进程死亡会带走重试定时器，启动/装载路径必须调 `ensureScheduled()` 重评滞留决策的预算（否则永久滞留 pending） | `enqueue()` / `load()` / `mark()` / `compact()` / `flush()` / `handleNotReady()` / `notReadyAction()` / `resumePlan()` / `ensureScheduled()` / `retryDelayMs()` / `requestIdFor()` |
-| `NotifyActionReceiver.kt`（新） | 通知动作接收器（回复/选项/批准/拒绝/重试）：outcome 构造 + 入队 + 后台快速投递，全程不 startActivity | `onReceive()` / `outcomeFor()`（纯函数）/ `replyText()` |
+| `NotifyActionReceiver.kt`（新） | 通知动作接收器：非重试动作先消费原生认证许可，再构造 outcome、入队及后台投递，全程不 startActivity | `onReceive()` / `outcomeFor()`（纯函数）；历史 `replyText()` 不再是生产入队来源 |
 | `NotifyProbe.kt`（新） | 通知面耐久探针：应答流关键状态写 `files/notify-responder.log`（追加 + 128KB 轮转），不依赖调试日志采集器——设备复验用 run-as cat 判定断点 | `log(context, tag, msg)` |
 
 **设备实测缺陷修复（0.14.0 L2，2026-09-13）**：

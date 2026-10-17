@@ -14,6 +14,10 @@
 
 ## 1. 信任与线程边界
 
+第二轮修复：`setScreenScope` 扩大范围、`setRootConsent(true)`、`setRootGranted(true)`、`unlockRestrictedSettings` 必须经过原生确认及 Android 系统锁屏凭据认证；页面参数和同源身份不构成用户在场证明。取消、超时、非前台或未设凭据拒绝；撤销不要求认证。屏幕范围、root 同意/开关和 su 探测状态仅在壳进程内有效，重启需重新确认。方法签名未变，设备边界见 [修复账本](SECURITY-REMEDIATION-2026-10-17-R2.md)。
+
+3080 中继分配后端/流槽位前要求进程随机 relay cookie 或 `X-DSH-Relay`；WebView、原生 HTTP、mux 均接入。此准入不替代引擎会话鉴权；public privilege/status 只读缓存，不主动排特权队列。
+
 主 WebView 只直接注入 `__dshNativeBridge.invoke(capability, bridge, method, arguments)`；`androidBridge` 与 `dshBackBridge` 是保留原同步 ABI 的 JavaScript facade，不再直接 addJavascriptInterface。MainFrameBridge 为每实例生成随机 nonce，先认证再解析参数，仅分派已登记的 `@JavascriptInterface` 方法，并核对实参数量和类型；返回 `{ok,value,void}` JSON，facade 保留同步值、null 与 void，拒绝回包抛出错误。Activity 销毁时 `close` 撤销 transport。
 
 `MainActivity.configureWebView` 注册两份业务对象；支持的 provider 用精确 `EngineAuth.BASE_URL` 的 document-start 脚本安装 facade，旧 provider 在 `onPageStarted/onPageFinished` 用顶层 evaluateJavascript 回退。同一脚本执行时必须同时满足 `window === window.top` 与精确 `location.origin`，避免排队期间跨源导航获得能力；nonce 仅留在外层词法闭包，不能出现在公开方法的函数源码中。重复安装保留已有 facade。安装完成的 `dsh-native-bridge-ready` 事件使 `useShellState` 重读真实状态；返回层栈仍由页面完成后的原生回读拉平。

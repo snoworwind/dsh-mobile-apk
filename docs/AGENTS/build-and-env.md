@@ -1,5 +1,7 @@
 # build-and-env.md — 构建与验证命令 + 环境流程
 
+第二轮来源链加固：preinstall 从审计 Git 提交重建；pnpm/Canvas 固定官方 SHA-512，缓存每次解包前重验；deb 复用同时验签名索引 SHA-256 与体积；Gradle 固定发行 SHA-256；最终快照与源码包重放补丁后的实际载荷逐字节比较。自检与受控负控入口 `node --test scripts/source-build/security-r2.test.mjs`，来源 workflow 与预检均执行。完整新来源链及设备验收边界见 [修复账本](SECURITY-REMEDIATION-2026-10-17-R2.md)。
+
 工作流外部 action 使用完整 commit SHA；更新时核对官方仓库 tag 对应提交，再跑 `node scripts/source-build/check-workflow-action-pins.mjs --self-test` 和来源套件。PR/来源预检实际执行固定引用扫描，禁止退回可变标签或分支；这不固定 action 自身下载的所有依赖。安全回归命令及本轮证据见 [SECURITY-AUDIT-2026-10-17.md](SECURITY-AUDIT-2026-10-17.md)。
 
 契约门禁同时登记上游与本地 UI 槽位：`clientSlots.slots` 包含实际消费的槽名，`declarations` 默认从 `upstreamRepo` 读声明，本地声明显式填写 `repo`，不加入 `upstreamUniverse`。新增本地槽仍须校验 kind/scope 与文件在场，不能通过跳过声明检查放行。CI 39011926728 的阻断与修复见 gotchas 坑 368；自检命令为 `node scripts/check-contract.mjs --self-test`，必须配套固定版本上游树与插件 lib。

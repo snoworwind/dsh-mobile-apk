@@ -84,20 +84,20 @@ All listed preferences use app-private SharedPreferences storage. They survive A
 | `dsh-notify` | `channelsInitialized` (Boolean), `channel.<category>` (String; category is `silent`, `todo`, `report`, `question`, or `approval`), `cat.<category>` (Boolean; same category set), `suppressForeground` (Boolean), `suppressForegroundSchema` (Int), `suppressForegroundLegacy` (Boolean) | `NotifyCenter`: channel/category settings and foreground-suppression migration. | Notification channel selection/category switches, schema migration, and foreground preference. |
 | `dsh-notify` | `notify.markerOffset` (Long) | `WatchdogV2`: notification event-stream cursor read/update through `NotifyCenter.prefs()`. | Durable event-stream cursor. |
 | `dsh-notify` | `notify.deferred.v1` (String, versioned JSON) | `NotifySuppressQueue`: synchronous commit before source offset advances; `NotifyStore.start` restores and resumes delivery. | Pending notification content is app-private, bounded by 8 entries/5-minute TTL; settlement holds up to 32 content hashes for 5 minutes. No credential or engine data migration. Active notification identity recovers the post/settle interruption window. |
-| `dsh_root_grant` | `granted` (Boolean), `consentRevision` (Int), `consentVersionCode` (Int, legacy read-only) | `RootGrant`: grant bit + disclaimer-consent revision; `consentVersionCode` is the pre-0.14.7 key, read once for migration. | Consent is bound to the disclaimer **content** revision (`RootGrant.DISCLAIMER_REVISION`), not to the APK versionCode, so updates no longer drop it. Legacy value `> 0` migrates to `consentRevision` on first read; unchecking clears both keys. |
-| `dsh_root_access` | `state` (String), `uid` (Int) | `RootAccess`: cached root state and UID. | Root state/identity cache. |
+| `dsh_root_grant` (retired) | Historical `granted`, `consentRevision`, `consentVersionCode` | Ignored; no authorization migration from XML. | Current grant and consent live only in native process memory and reset on process restart. |
+| `dsh_root_access` (retired) | Historical `state`, `uid` | Ignored; su identity must be probed in this process. | No authorization restored from same-UID writable storage. |
 | `dsh_root_execution_lease` | `epoch` (String), `startedAt` (Long), `operation` (String), `dispatched` (String), `dispatchedAt` (Long) | `RootMaintenanceLease`: write/read operation lease and clear it after a new boot proves prior process death. | Cross-process privileged-operation lease. |
 | `dsh_settings` | `immersive_mode` (Boolean) | `ShellState`: shell display preference read/write. | User shell display preference. |
 | `dsh-overlay` | `enabled` (Boolean), `pendingEnable` (Boolean) | `OverlayController`: floating overlay intent and pending-enable state. | Floating overlay intent and permission-guidance state. |
 | `overlay_display` | `auto_collapse_on_done` (Boolean) | `OverlayService`: read completion behavior. | Overlay completion presentation preference. |
 | `overlay_display` | `template_thinking` (String), `template_tool` (String), `template_completion` (String) | `OverlayPanel`: read user-editable display templates. | Overlay presentation text preferences. |
-| `dsh_screen_scope` | `scope` (String) | `ScreenScope`: selected scope read/write. | User-selected physical/virtual screen scope. |
+| `dsh_screen_scope` (retired) | Historical `scope` | Ignored. `ScreenScopePrefs` uses native memory. | Process restart restores virtual-only; broader access requires system credential confirmation. |
 | `dsh-vdisplay` | `resolutionScale` (Float), `floatEnabled` (Boolean) | `VdisplayController`: virtual display preference read/write. | Virtual display preferences. |
 | `dsh_prefs` | `dev_log_enabled` (Boolean) | `MainActivity` preference helpers; `AndroidBridge` consumes the setting. | Developer logging opt-in. |
 
 Do not copy raw preference files into ordinary diagnostics or exports: several contain authentication secrets. No UndoGate durable state is stored in SharedPreferences; its recovery authority is the named app-private files above.
 
-**"app-private" 只对别的应用成立，对同 uid 的 agent 不成立**：引擎（Node）由壳以同一 app uid spawn，模型自带的 bash 可读写本表全部 XML；`dsh_screen_scope`、`dsh_root_grant`、`dsh_root_access` 三个文件因此也是**用户授权门的可写存储**，没有 MAC/签名。2026-10-17 晚第二轮挖掘把这一点登记为已知未修风险（坑 376，[SECURITY-AUDIT-2026-10-17-R2.md](SECURITY-AUDIT-2026-10-17-R2.md)）；在它关闭前，不得把本表当成「模型改不了」的依据。
+**"app-private" 只对别的应用成立，对同 uid 的 agent 不成立**：引擎以同一 uid 运行，模型 bash 可写 XML。第二轮修复已停止从上述三个历史文件恢复授权；当前判据与进程重启行为见 [修复账本](SECURITY-REMEDIATION-2026-10-17-R2.md)。这不构成同 uid 任意代码执行的完整隔离，设备验收仍待补。
 
 ## 原生插件管理的待重启状态
 

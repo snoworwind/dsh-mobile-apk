@@ -14,6 +14,8 @@
 
 ## 2. 文件逐项登记
 
+第二轮未改变本节历史 APK 资产；新增市场补丁属于构建期 vendor 变换，实测字节与登记见 §7.1，不得把本节历史资产表当作本轮 APK 证据。
+
 目标根为快照内usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai；下表尺寸来自明确历史批次。注册入口现在为applyRuntimePatches，旧注册行号不再作为当前锚点。
 
 | asset 文件（字节） | 目标快照路径（注册行） | 状态 | 作用 / 来源线索 |
@@ -65,6 +67,7 @@
 <!-- generated:active-registry:start -->
 | 活动补丁 ID | scope | 目标 |
 |---|---|---|
+| `market-install-approval-R2` | undefined | `dshmarketplace-plugin/lib/index.js` |
 | `sidebar-bubble-reorder-B1` | engine | `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-sidebar-right/lib/client.js` |
 | `market-B` | undefined | `dshmarketplace-plugin/lib/index.js` |
 | `market-D-server` | undefined | `dshmarketplace-plugin/lib/index.js` |
@@ -131,6 +134,8 @@
 （fixture = 0.1.5-rc.1 产物；`.deploy-tmp/` 下的临时预检脚本不入库，勿再引用）。
 
 ### 7.1 构建期引擎补丁历史与实现说明（活动状态见 §6.1）
+
+2026-10-17 第二轮：`market-install-approval-R2` 通过 `scripts/patches/data/market-install-approval.mjs` 改写市场模型安装钩子；任何安装均需确认，目录/身份/网络错误拒绝，不再依赖远端 riskFlags。registry、IMPLS 与 vendor 同源；回归 `scripts/source-build/security-r2.test.mjs`。`vendor/dshmarketplace-plugin/lib/index.js` 本轮实测 11,589 字节；未新增或改动 `assets/patched`，§2 历史资产字节数不变。来源快照新门禁还独立重放补丁后比对源码包实际载荷，见修复账本坑 385。
 
 2026-10-17 安全偏差：vendor undo 导入直接使用内存字节，变更点和回归在 `vendor/dsh-undo-savepoint/PATCHES.md`；Linux bootstrap 的 GitHub 发现流式限额/超时已记录于 `check-vendored-linux-bootstrap.mjs` 的 LOCAL_PATCHES，保留上游原始摘要。这两项不修改 `scripts/patches/**` 或 `assets/patched`，§2 资产字节数无变化；根因见 gotchas 坑 373、374。
 
