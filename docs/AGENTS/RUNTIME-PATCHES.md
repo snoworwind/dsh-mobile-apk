@@ -132,6 +132,8 @@
 
 ### 7.1 构建期引擎补丁历史与实现说明（活动状态见 §6.1）
 
+2026-10-17 安全偏差：vendor undo 导入直接使用内存字节，变更点和回归在 `vendor/dsh-undo-savepoint/PATCHES.md`；Linux bootstrap 的 GitHub 发现流式限额/超时已记录于 `check-vendored-linux-bootstrap.mjs` 的 LOCAL_PATCHES，保留上游原始摘要。这两项不修改 `scripts/patches/**` 或 `assets/patched`，§2 资产字节数无变化；根因见 gotchas 坑 373、374。
+
 - **sidebar-bubble-reorder-B1（2026-10-17）**：`dsh-client-ui-sidebar-right/lib/client.js` 增加 `reorderIn(session, tab, before)`。复用原 store 的 `placeTab`，恢复原活动标签；仅操作当前挂载会话的 dock 同分栏，拒绝失效会话、浮动页、跨分栏与无效/无变化目标。补丁接受本代 npm 发布包和 Android 源码构建的两条精确锚点；未知或部分损坏字节拒绝写入。真实夹具、幂等、损坏输入和 runner 集成测试见 `scripts/patches/tests/sidebar-bubble-reorder.test.mjs`。
 
 - **reference-drill-F6（2026-09-11，apk #163）**：`dsh-client-ui-reference/lib/client.js` 的 `onPick` 判定由

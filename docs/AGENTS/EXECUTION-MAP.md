@@ -101,6 +101,10 @@ sequenceDiagram
 
 ### 阶段 3：交互面（用户随时触发）
 
+安全出口补充（K02/K03，坑 372）：主 WebView 的 `shouldOverrideUrlLoading` → `DownloadSaver.openInExternalBrowser(url, request.hasGesture())` → `canOpenExternalBrowser` → BROWSABLE Intent。校验发生在实际启动出口；不把手势当成 frame 身份认证。
+
+备份导入补充（K05/P04，坑 374）：vendor `core.mjs` 的 `importSnapshots` 读取并检查原始字节 → 可选解密 → `zip.mjs/readZip(Buffer)` → 既有条目校验和导入。不再把明文写在归档相邻路径，不重新打开已经读取的归档；回归 `vendor/dsh-undo-savepoint/test/import-plaintext.test.mjs`。
+
 - 悬浮球/光环/面板/报告栏：`app/src/main/java/com/dsharnessmobile/shell/OverlayService.kt:155`（`onCreate` 建三窗口）；
 - 通知中心与通知内应答：`NotifyCenter` → `NotifyStore`（偏移消费）→ `NotifyDecisionQueue`（耐久队列）→ `MuxClient`（`/api/remote.mux`）；
 - BrowserHost捕获Session/tab，UI舞台focus与modelTab分开；新WebView先验证nonDefault profile且无bridge，当前锚点见§6 K08。
@@ -114,6 +118,10 @@ sequenceDiagram
 - 残渣回收与标记恢复（`SnapshotTransaction.kt:190` / `EngineManager.kt:238`）。
 
 ### 横向：构建与验收链
+
+供应链补充（B01/P02，坑 375）：PR 与来源预检 → `scripts/source-build/check-workflow-action-pins.mjs --self-test` → 扫描 workflow 外部 `uses` 完整提交/镜像摘要 → 才继续构建。`check-workflow-action-pins.test.mjs` 对生产目录和真实 CLI 可变 ref 负控复核。
+
+Linux 发现补充（P04，坑 373）：bootstrap `index.js` 串行发现 → `github.js/fetchLatestManifest` → `fetchBytes` 实际字节预算与含 body deadline → manifest 校验 → 现有资产 IO。失败取消 body 并 abort 请求，避免尾队列永远等待；bootstrap 默认仍未挂载。
 
 - 构建链（`scripts/build-apk-013.ps1` → 快照注入 → 门禁 → 打包）见 §6 的 B01；静态门禁与 CI 见 B02；设备验收套件（CDP + adb）见 B03 与 `docs/AGENTS/emulator-test-protocol.md`。
 
@@ -2067,6 +2075,12 @@ node scripts/verify-client-plugin-fail-recovery.mjs --self-test   # 客户端插
 覆盖全域（脚本里定义，构建产物与第三方目录除外）：`app/src/**/*.kt` 与 `AndroidManifest.xml`、`plugins/*/{src,test}/**`、三个子仓 src/lib、`scripts/{check-,verify-,build-,inject-}*` 与 `scripts/patches/**`、`scripts/snapshot-config/**`。
 
 <!-- COVERAGE
+app/src/test/java/com/dsharnessmobile/shell/ExternalBrowserPolicyTest.kt
+scripts/source-build/check-workflow-action-pins.mjs
+scripts/source-build/check-workflow-action-pins.test.mjs
+vendor/dsh-undo-savepoint/test/import-plaintext.test.mjs
+plugins/dsh-linux-bootstrap/test/github-limits.test.mjs
+plugins/dsh-linux-bootstrap/test/github-limits-negative-control.mjs
 app/src/main/java/com/dsharnessmobile/shell/EngineTransport.kt
 app/src/androidTest/java/com/dsharnessmobile/shell/EngineTransportInstrumentedTest.kt
 dsh-client-ui-responsive/src/client/mobile/sidebar-bubbles.ts

@@ -5,6 +5,8 @@
 
 ## 当前入口
 
+- 本轮安全团队审计修复四类边界，见 [SECURITY-AUDIT-2026-10-17.md](SECURITY-AUDIT-2026-10-17.md) 与坑 372–375。**未做设备验证**：WSL ADB 无设备且两个模拟器端口拒绝连接；没有本轮来源 APK/CDP/ADB 自主任务证据。L2/L3 三层仍阻塞验收及发布；普通 web 重定向的手势兼容需设备复核。宿主回归不得代替这项缺口。
+
 - 包管理器别名/清数据漏检与子帧特权下载路由已按源码边界收紧，见 [gotchas.md](gotchas.md) 坑 343、344。代码及服务队列反证完成；**未做设备验证**。尤其是 `shouldOverrideUrlLoading` 的 WebView 子 frame/真实 gesture 事实，须等设备在线后核验，不能用 JVM 判据替代。
 
 - 主 WebView 子帧越权的源码修复与代码层反证已完成，见 [gotchas.md](gotchas.md) 坑 342。**未做设备验证**，不能声称恶意 HTML 的 Android 设备攻击复现/修复验收已完成；原生壳改动须来源链新包，不能热推代验。真实同源页面仍属受信面，预览 sandbox 必须继续保持 opaque。

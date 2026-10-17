@@ -2481,3 +2481,19 @@ CI 39011926728（9bf4ed4）在 `check-contract.mjs` 仅报一条失败：`androi
 证据：WSL 运行生产 workflow 中原样提取的发布 shell，仅将 gh 换成本地参数记录器。旧 shell 的额外 injected.apk 反例返回 0，拒绝断言失败，见 .deploy-tmp/release-asset-boundary/negative.log。修后 python3 -m unittest discover -s scripts/source-build -p 'test_*.py' -v 为 8 项通过，含正常 draft/prerelease、额外 APK、清单漏项、重复项、外部路径和字节篡改检查；node --test scripts/source-build/cloud-workflow.test.mjs 为 6 项通过，日志分别为同目录 tests.log、workflow.log。
 
 边界：未构建 APK、未做设备验证，未运行云端发布。此次只修改发布资产校验，不修改 Android 或 runtime；不把宿主 shell 证据算作 CDP/ADB 或最终候选验收。起初排查的打包目录自身/祖先链接边界未在此项修复中覆盖，未证明其在全新 CI 工作目录中可被攻击者控制。
+
+372. **主 WebView 的外部导航不能直接变成任意 ACTION_VIEW（2026-10-17）**
+
+现象与根因：主 frame 的非引擎地址直接交给系统，缺少手势与协议约束；脚本导航可拉起其他应用，自定义协议扩大了页面影响面。修法：主 WebView 传入 hasGesture，DownloadSaver 在执行出口复查 HTTP(S)、host、端口、userinfo 和歧义字符，Intent 限 BROWSABLE。Kotlin 策略 3/3 及主/测试源码编译通过；未做设备验证，重定向手势兼容仍待三层验收。完整生产路径、条件与证据见 [本轮审计记录](SECURITY-AUDIT-2026-10-17.md)。
+
+373. **GitHub 发现响应不能先读全文再校验（2026-10-17）**
+
+现象与根因：linux bootstrap 的 release JSON 与 manifest 使用无界全文读取且无响应体超时，异常上游可占用内存及串行队列。修法：流式计算实际解码字节、限制元数据体量、请求含 body 设期限并取消；生产正反证、23 项宿主回归及默认未挂载边界见 [本轮审计记录](SECURITY-AUDIT-2026-10-17.md)。未做设备验证，不把未启用 bootstrap 说成默认可达漏洞。
+
+374. **加密备份解密不能使用可预测的相邻临时文件（2026-10-17）**
+
+现象：导入覆盖并删除相邻文件，预置链接可写穿到其他文件。真因：以输入路径拼接 .dec.tmp 并直接 writeFile，明文落在不受信目录；普通导入还二次打开已经查过的路径。修法：readZip 接受 Buffer，直接解析同一次读取/解密的字节，取消临时明文及二次读取。Linux 5 项通过；旧 core 3 项失败，含真实链接覆盖。证据与首次读取/资源限制边界见 [本轮审计记录](SECURITY-AUDIT-2026-10-17.md)。未做设备验证。
+
+375. **版本标签不能固定 CI 外部代码身份（2026-10-17）**
+
+真因：actions 的 @vN 标签可在本仓审查后重新指向，影响来源构建及持写 token 的发布任务。修法：四个 workflow 固定外部 action 的官方完整 commit，新增固定引用门禁与受控可变 ref 负控并接入生产预检；Node 来源套件 98 项、Python 8 项通过。此项是供应链防护，不是已证实的上游入侵；信任边界与日志见 [本轮审计记录](SECURITY-AUDIT-2026-10-17.md)。未做设备验证。
