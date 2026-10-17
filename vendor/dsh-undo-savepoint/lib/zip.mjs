@@ -135,10 +135,12 @@ export const MAX_TOTAL_ENTRY_BYTES = 4 * 1024 * 1024 * 1024;
 /**
  * 读一个标准 ZIP（deflate/store），返回 [{name, data:Buffer}]。
  * 兼容 PowerShell Expand-Archive / archiver / unzip 产物。
- * @param {string} zipPath 目标 .zip 路径
+ * @param {string|Buffer} zipPath 目标 .zip 路径或已读取的归档字节
  */
 export async function readZip(zipPath) {
-  const buf = await fs.readFile(zipPath);
+  // Import passes its already checked/decrypted bytes: never reopen an untrusted
+  // pathname or materialize plaintext next to the supplied archive.
+  const buf = Buffer.isBuffer(zipPath) ? zipPath : await fs.readFile(zipPath);
   // 定位 EOCD（从末尾找 0x06054b50）
   let eocd = -1;
   const min = Math.max(0, buf.length - 22 - 65535);

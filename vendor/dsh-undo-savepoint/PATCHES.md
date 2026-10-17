@@ -7,6 +7,8 @@
 
 ## 追版历史
 
+本地安全偏差：`core.mjs` 的 `importSnapshots` 直接向 `readZip(Buffer)` 传递已读取/解密的字节；不再在输入归档旁写 `.dec.tmp` 明文或重新读取路径。上游追版须保留此边界，`test/import-plaintext.test.mjs` 在 Linux 验证覆盖、链接目标保护及正常导入；根因与证据见 `docs/AGENTS/gotchas.md` 坑 374。
+
 - **0.3.8 → 0.4.9（2026-09-26，fx-2 缺陷 E）**。两条安全级动因：
   1. **0.4.9 把 `settings.yaml` 纳入脱敏**。我方 0.3.8 的 `SENSITIVE_DESTS` 只含
      `home-.env` / `profile-.env` / `home-.credentials.yaml`，**不含 settings.yaml**，

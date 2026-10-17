@@ -2893,7 +2893,8 @@ async function importSnapshots(cfg, zipPath, password) {
   let skipped = 0;
   let rejected = 0;
   try {
-    // V0.4.0 P4：支持可选加密导出。检测到加密头时要求密码；解密到临时文件再解析。
+    // Parse the checked bytes in memory; an adjacent predictable plaintext file
+    // could follow a symlink, disclose the backup, or overwrite another file.
     let entries;
     // H2 加固：整体体积上限（防 zip 炸弹把宿主进程内存打爆）。
     const MAX_ZIP_BYTES = 1024 * 1024 * 1024;
@@ -2910,11 +2911,9 @@ async function importSnapshots(cfg, zipPath, password) {
       let dec;
       try { dec = decryptBuffer(raw, password); }
       catch { return { ok: false, error: '解密失败（密码错误或文件损坏）。', code: 'bad-password' }; }
-      const tmp = `${zipPath}.dec.tmp`;
-      await fs.writeFile(tmp, dec);
-      try { entries = await readZip(tmp); } finally { await fs.rm(tmp, { force: true }).catch(() => { /* noop */ }); }
+      entries = await readZip(dec);
     } else {
-      entries = await readZip(zipPath);
+      entries = await readZip(raw);
     }
     // 先把 blobs/ 目录内容写入共享 blob 库，再处理每个快照目录
     const blobs = entries.filter((e) => e.name.startsWith('blobs/') && !e.name.endsWith('/'));
