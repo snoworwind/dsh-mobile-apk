@@ -1923,11 +1923,8 @@ export function apply(ctx: Context, config: Record<string, unknown> = {}) {
           sendMobileRouteRejection(res, rejection)
           return
         }
-        // A1（0.14.1 设备实测缺陷）：渲染前先把 caps 补探一次，让 status / gates / shell.caps 三处
-        // 读的是同一份**新鲜**事实。此前这条路由只回显「上一次控制 op 带回的 caps」，而冷启动后
-        // 没有任何 op ⇒ 引擎面报 shizukuReady:false，而壳侧同一时刻报「已授权且就绪」——
-        // 同一个事实两种读数，就是用户看到的自相矛盾。探测失败保持三态缺席（不是 false）。
-        await svc.shizukuChannelProbed()
+        // Facts are refreshed by authenticated control paths. Missing cached facts stay unknown.
+        // Public reads consume cached facts only; probing occupies the privileged control queue.
         sendJson(res, 200, buildPrivilegeStatusPayload(svc, controlToken() !== undefined))
       },
     })
