@@ -204,3 +204,35 @@ node scripts/check-release-gates.mjs --list  # 现数门禁集合及「仅构建
 - [changelog-archive.md](changelog-archive.md)：阶段改动与验收状态。
 
 本文件维护分支宗旨、实施原则和已接受边界；具体缺陷与证据留在对应详档，持续随源码更新。
+
+
+## 复核轮次：2026-10-17（吸收上游 `e3e728b`）
+
+本轮合入 `kelai141/dsh-mobile-apk` 的 `5fca94f..e3e728b`，共 11 个提交；保留本分支来源构建、应用内更新退役、凭据 transport 与权限边界。管理中心新增文件仍引用已退役的 `updateButton`、`apkUpdate` 和 `GuidePhase.Updating`，已定点删除引用，未恢复安装权限或更新入口。源码及本机生成的 UI/Linux `lib/` 已重建。
+
+- Linux 资产桥只接受清单，宿主决定落点，先验摘要格式与体量，逐跳约束下载主机，复用现有解包器；新增路由保持鉴权。bootstrap 仅 vendored，未加入快照注入集，默认未启用；具体待接入边界见 known-gaps.md，不能宣称 Linux 已可用。
+- 管理中心复用 `EngineProbe.rpc` 和本分支认证 transport，Hard 插件在读取及修改两端校验；设置按 revision 做字段合并，不把脱敏配置整份覆盖。
+- Shizuku 改用逐代绑定与主线程生命周期，保留原权限与屏幕范围判据；堆下限与快照 wrapper 同区间，诊断出口继续脱敏。新桥及 UI 行为属于 L2/L3，代码检查不能替代设备验收。
+- 文档冲突合并两侧内容；上游新增坑 314–323、325 在本分支追加为 353–362、364（保留上游原条目次序与编号空缺），既有 1–352 不变；Kotlin 基线按合并后的各类数求和，保留 featureRetirements。
+- 证据目录 `.deploy-tmp/upstream-20261017/`；UI 50 文件 / 748 项通过（Node 26 运行 vitest 需 `NODE_OPTIONS=--no-experimental-webstorage`，否则宿主全局 localStorage 覆盖 jsdom）；Linux 新增 26 项在 WSL 通过，Windows 临时目录 rename EPERM 不计通过。堆门自检正控 1 + 负控 8、vendored 自检正控 1 + 负控 3 通过；补丁测试通过，但 PTC 两个跨树检查显式 SKIP，不计入有效证据。静态门禁日志各自留存。
+- **未做设备验证**：ADB 清单为空，两个指定模拟器端口均 connection refused；未生成本轮来源链 APK，未执行 CDP、ADB 自主任务或真机测试。本轮是源码同步，不是候选发布验收，设备三层仍阻断发布。
+
+本轮最终 Kotlin XML：119 类、1301 项，失败/错误/跳过均为 0；主源码和单测源码编译通过。上游基线遗漏 ShizukuBindStateTest 新增的 5 项，本轮按实测结果提升为 26，总基线 1301，未降低任何既有类基线。日志 `kotlin-final.log` 与 `instrumentation-compile-final.log`（开头 XML 汇总）；`:app:compileDebugAndroidTestKotlin` 通过，设备测试仅编译未执行。Linux-env 全套在 WSL 通过（`linux-all-wsl-test.log`）。
+
+
+本轮复现入口（仓库根；Gradle 需 Java 17 + SDK 36，工作树外 buildDirectory 配置见 build-and-env.md）：
+
+```text
+npm --prefix dsh-client-ui-responsive ci
+npm --prefix dsh-client-ui-responsive run build
+NODE_OPTIONS=--no-experimental-webstorage npm --prefix dsh-client-ui-responsive test
+npm --prefix plugins/dsh-android-linux-env run build
+npm --prefix plugins/dsh-android-linux-env test
+node plugins/dsh-linux-bootstrap/build.mjs
+./gradlew :app:testDebugUnitTest :app:compileDebugAndroidTestKotlin --no-daemon
+node scripts/check-engine-heap-floor.mjs --self-test
+node scripts/check-vendored-linux-bootstrap.mjs --self-test
+node --test scripts/patches/tests/sidebar-bubble-reorder.test.mjs scripts/patches/tests/ptc-node-wrapper-c1.test.mjs scripts/patches/tests/combo-probe-p1.test.mjs
+```
+
+上述 NODE_OPTIONS 赋值为 POSIX 写法，Windows PowerShell 用 `$env:NODE_OPTIONS='--no-experimental-webstorage'`。本机 UI 首跑因 Node 26 的 webstorage 与 jsdom 冲突失败，禁用宿主该实验功能后全通过；未改测试断言或产品源码。Windows/Linux 失败原日志保留，不覆盖成通过。

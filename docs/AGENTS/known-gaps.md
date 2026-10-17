@@ -71,8 +71,35 @@
 | 键盘判据在本机语义不稳定 | `mInputShown` 在 CDP 复验读到 false、ADB 探针读到 true；且新建会话后上游聚焦新 composer 本身会弹键盘，属标准 UX。 | 测试侧**只记录键盘数值、不作 FAIL 依据**（避免把正常 UX 写成缺陷）。#349 的「不弹键盘」半条同样待真机复验。 |
 | `visualViewport` 判空曾漏 undefined（本轮已修） | `keyboard-boundary.ts` 原按 `vv === null` 判空，漏掉 `visualViewport` 求值为 `undefined` 的宿主，读 `.height` 抛 TypeError 并打断视口复算链。 | 已修为 `window.visualViewport ?? null` 并补 2 条回归用例（含反证）。记入 gotchas 284。 |
 
+## Linux 内部插件的待接入边界（2026-10-16）
+
+本仓交付实验性、默认不启用的宿主服务/API 与条件设置入口。bootstrap 与 runtime 是**我们自己的实验性内部插件**：按用户口径应随应用放入**内置（hard）插件目录**，但**默认不启用（存在不等于启用）**；应用更新或插件新版本发布都不得启用插件，也不得重新启用用户停用的插件。
+
+现状与缺口（如实登记）：**bootstrap 源码已 vendored 进本仓** `plugins/dsh-linux-bootstrap/`（`@dsh-android/linux-bootstrap` 0.5.0，源 `kelai141/dsh-bionilux@3f86a85` `packages/linux-bootstrap`；只源码，无二进制/构建产物/LFS）。它**刻意不在注入集**：`scripts/plugin-dirs.json`、`scripts/contract.json` 的 `inserted`、`scripts/profile-web.cordis.patch.yml` 都不登记它，因为 bootstrap 的 `apply()` 需要**函数型 config**（`linuxAssetIO.downloadAsset`/`extractArchive`、`appVersionProvider`），profile 的 YAML 装配表达不了——把它挂进 profile 只会在装配期抛 `TypeError`。不入注入集同时让 `check-patch-mounts.mjs`（双向）与 `check-contract.mjs`（幽灵登记）保持真绿：它们守的是注入集与挂载集的双向一致，而本包不在任一集合内。代价是「写进 hard 目录」在**装配面**没有登记位，这一层的如实形态是：包字节随本仓（因而随 APK 源码分发）在场，但启用只发生在用户显式动作时，由宿主动态加载，不由 profile 决定。
+
+漂移由 `scripts/check-vendored-linux-bootstrap.mjs` 守（`--self-test` 含 1 正控 + 3 负控）：断言 vendored 文件集 == 上游包去掉 `test/` 加本仓两个文件、9 个上游一致文件的 EOL 归一秒摘要、以及三条刻意偏差（`exports` 指 `./lib`、保留 `build` 脚本、去掉 `test` 脚本、`private:true`）。它**不进** `check-release-gates.mjs` 的 `GATES`（进册即要求本地链与云端链同时接线，而那是镜像面文件），故以文档化命令 + 自检形式提供。
+
+`kelai141/dsh-bionilux` 的内部 bootstrap 需被启用后提供 `linuxBootstrap` 服务、调用 `linuxPluginHost`（含 `isInjected` 在场查询）后再激活；构造/下载/解包由 bootstrap 拥有，运行时 manager 装配由宿主从激活作用域读出并交回（`install` 返回 `{manager, rollback?}`）。**未覆盖**：runtime 插件本体仍未 vendored（按设计只来自 Release），因此 `linuxPluginHost.install` 与 manager 交接只由单测（真实 Cordis + 受控 manager）覆盖，**没有**跑过真实 Release 产物。
+
+设备验收仅覆盖未注入状态：不显示 Linux 设置入口、API 503、无运行目录或 Linux 工具自动创建；没有执行真实 Linux 安装、更新、重装、卸载，也没有打包最终 APK 或完成真机验收。这些不登记为通过。这两个插件是我们自己的实验性内部插件（默认不启用），发布不得自动修改注入目录或启用它们；实际启用与完整安装验收须基于用户显式启用后的成品另行完成。
+
+### 0.15.0 追加：宿主侧「准备」已就位，端到端仍差三段（如实登记）
+
+已落地并有反证：`LinuxAssetIO`（来源面/落点面/摘要+体量/解包面判据，复用 `SnapshotExtractor` 与 `SnapshotBundledAsset`）与 `LinuxAssetPrepare`（客户端触发入口，`@JavascriptInterface` `linuxAssetPrepare`/`linuxAssetPrepareStatus`）。五条负控（穿越、符号链接逃逸、炸弹、摘要不符、字节数不符）在 Kotlin 侧各有真实用例，且失败一律不发布产物。
+
+**仍未打通的三段（均不记通过）**：① ~~引擎侧 bootstrap 的 `linuxAssetIO` 透传/占位接线**未做**~~ —— **0.15.0 已接**：`plugins/dsh-android-linux-env/src/linux-host-asset-io.ts` 造出透传 + 失败关闭的 `downloadAsset`/`extractArchive`，负控见 `test/linux-host-asset-io.test.mjs`（无暂存 → 拒；摘要不符 → 拒；包名不符 → 拒；`unpackedSize` 不符 → 拒；恶意摘要 → 拒且环境根外哨兵不动；另有 1 正控证明真实暂存包可激活）。**配套的上游复用分支缺口亦已闭合**：bootstrap 在 `dsh-bionilux@3f86a85` 起，激活前会复验宿主暂存的包（自算归档 SHA-256 与体量、重算 `unpackedSize`、校验包名与入口），命中自己写下的标记也不再免检——被篡改的槽位**不会被复用**，而是从已复验的宿主暂存**重建**；需要重建而重建源又不可信时**失败关闭**。两条都有内容级用例钉住（`re-verifies on reuse: a tampered published slot is rebuilt, not trusted`、`refuses when a rebuild is needed and the retained archive no longer matches the manifest`），且已用**撤掉上游修复**的变异验证证明它们确实会变红。② **页面侧没有调用者**：`linuxAssetPrepare` 在 `android-bridge.ts` 里只是声明位，实际调用点应由 Linux 设置页（vendored bootstrap 客户端，上游所有）在用户点安装前发起，属于上游改动；③ bootstrap 包**仍未进注入集**，不随应用分发；④ 因此**没有任何端到端安装验收**，也没跑过真实 Release 产物。
+
 ## 历史事项不自动关闭
 
 旧登记的浏览器自动落位、看门狗恢复入口、API<30 截图回落、多 ROM 限制、动效、滚动条、低置信度依赖判据等，保留当时证据。应按当前源码逐项分类为已改、仍存在或仅特定设备待验；不得把旧“未修”直接当当前事实，也不得把归档当完成。
 
 完整原文在 [历史缺口登记](../archive/known-gaps-pre-0.14.5-2026-10-07.md)。当时版本结论、授权和停止点均不覆盖当前本轮要求。
+
+## 原生管理中心（2026-10-16）
+
+当前上游插件管理 API 不提供静态依赖图。壳侧在停用前确认操作，比较操作前后完整运行清单并尝试恢复造成失活的变更；这是运行状态检查，不等同于静态依赖分析。只读/不可寻址条目保留展示并禁用开关。插件详情复用运行时暴露的配置 Schema；未激活或未提供可编辑 Schema 的插件明确说明原因。高级配置为合并保存，删除 JSON 字段不代表重置。
+
+
+## 2026-10-17 上游同步验收边界
+
+上游 `e3e728b` 已同步到安全分支工作树；本轮 **未做设备验证**，模拟器两端口拒绝连接且无在线真机。管理中心、气泡导航、Shizuku 及新增 Linux 桥的 CDP/ADB 层均未关闭；本轮没有来源链新 APK，不得沿用上游设备截图作为本分支验收。源码检查和本机测试证据见 SECURITY-HARDENING.md 同日复核。

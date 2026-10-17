@@ -19,6 +19,14 @@
 3. **跑排查入口**：查点「症状 → 排查」里的命令 / grep 关键词 / logcat tag（都是本块独有的，别从别处抄）。
 4. **先看疑点**：§3 疑点清单里该查点是否已有登记（含证据、影响、状态），避免重复踩坑。
 
+## 右侧气泡导航实施补充（2026-10-17，不改版本）
+
+- P03：`sidebar-bubbles.ts` 从原生 strip 读取当前会话标签，窄于 768 CSS 像素时挂载导航；`sidebar-bubbles.css.ts` 提供可滚动胶囊与 180ms 退出/进入动画，`sidebar-bubbles.locales.ts` 管理文案。选择和关闭点击原控件，内容节点不迁移。原 strip 重建后按元素身份刷新代理，卸载时恢复 aria/样式并释放引用。
+- K08 / P03：`native-browser-presentation.ts` 观察气泡 open/closing 标记，隐藏原生显示层直到退出动画完成；同一浏览器页与 profile 保留。原生 IME 高度和 visualViewport 共同约束列表下沿。
+- P03：`back-stack.ts` 先收起气泡再走右栏原返回路径；取消长按后首次返回可用，并恢复三点按钮焦点。`sidebar-gestures.ts` 排除导航触点，普通滑动保持列表滚动。
+- 构建期 B1：`scripts/patches/data/sidebar-bubble-reorder.mjs` 通过原 `placeTab` 提交同分栏排序并保留活动页；发布包/Android 源码构建双形态夹具和拒绝写入反例由 `scripts/patches/tests/sidebar-bubble-reorder.test.mjs` 执行。
+- 验收入口：`scripts/verify-sidebar-bubbles.mjs` 在真实 WebView 上读取业务语义，ADB 执行点击、滑动、长按、取消与返回并保存截图。宽屏使用 `--wide`；`--owner` 可选择专用验收会话。详见 `docs/maintenance/sidebar-bubbles-2026-10-17.md`。
+
 ## 0.14.5-fx-1 实施补充（2026-10-09）
 
 - K08 / 前端呈现：`BrowserHost.setStageBounds` 与 `BrowserOverlayPolicy` 的 4000ms TTL 为租约；`dsh-client-ui-responsive/src/client/mobile/native-browser-presentation.ts` 可见挂载时每1000ms续租，普通几何去重不得饿死续租。隐藏/卸载停止，前台强制重放；原生 `onActivityResumed` 仅在租约新鲜时重算/请求绘制，不刷新租约。测试 `BrowserOverlayContractTest.kt` 和客户端 `native-browser-presentation.spec.ts`。
@@ -218,15 +226,15 @@ sequenceDiagram
 - [K05] 漂移：`docs/AGENTS/ACCESSIBILITY-API.md:167` 说「⑤ 多窗口 `getWindows()` 的窗口选择面未接」，源码已接：`getWindowsOnAllDisplays()` + `WindowPick.order`（`app/src/main/java/com/dsharnessmobile/shell/DeviceControlService.kt:353-434`，回归 `app/src/test/java/com/dsharnessmobile/shell/WindowPickTest.kt`）。
 - [K05] 漂移：`docs/AGENTS/ACCESSIBILITY-API.md:99` 说 `MENU` / `MEDIA_PLAY_PAUSE` 为 API 36，源码 `app/src/main/java/com/dsharnessmobile/shell/GlobalActionCatalog.kt:33-34` 写 minSdk=31（SDK `api-versions.xml` 两个 android-36 平台均 `since="36"`，支持文档口径，影响见可疑点 2）。
 - [K06] 1. 双引号内的命令替换不被扫描 → 范围门 fail-open（S-1/S-2 家族的残留面，已确认）。`ShellOps.kt:319-338` 的 `"` 分支整段吞掉引号区域且不递归；`decideScreenCommand` 再经 `stripQuotedText` 抹白引号，于是该段既无命令词也无目标屏参数 → `ALLOW`。引擎侧 `plugins/dsh-android-bridge/src/screen-scope.ts:242-250` 同一形态（跨语言 fixture 因此恒绿，`test/fixtures/screen-scope-cases.json` 只覆盖裸 `` ` ``/`$()`）。触发：scope=virtual-only 时 `shExec('echo "$(screencap -p /sdcard/real.png)"')`（或 `sh -c 'echo "$(input -d 0 tap 1 2)"'`）→ 放行且内层真实执行，随后 `shPull` 取回（`shPull` 无范围门）→ 范围门被绕过的净效果。
-- [K06] 2. `capture`/spool 面无任何生产调用方，大输出被 16 KiB 内联路径截断（S-6 面，已确认）。`ShellOps.exec` 的 `capture = args.optBoolean("capture", false)`（`ShellOps.kt:99`）在引擎 `execAdbShell`/`execAdbLine` 的投递参数里都不存在（`index.ts:1052-1055`、`:1092`），故走 `ShizukuUserService.exec`：读满 16 KiB 即 `break` 并关闭管道（`ShizukuUserService.kt:70-75`、`:29`）。总输出超过约 64 KiB 管道缓冲时子进程会被提前关闭的读端打死 → `ok=false` 而引擎却按 128 KiB 承诺（`index.ts:1063`）；AIDL 注释与 `ShizukuTransport.kt:269` 都按「capture 在用」措辞。
+- [K06] 2. `capture`/spool 面无任何生产调用方，大输出被 16 KiB 内联路径截断（S-6 面，已确认）。`ShellOps.exec` 的 `capture = args.optBoolean("capture", false)`（`ShellOps.kt:99`）在引擎 `execAdbShell`/`execAdbLine` 的投递参数里都不存在（`index.ts:1052-1055`、`:1092`），故走 `ShizukuUserService.exec`：读满 16 KiB 即 `break` 并关闭管道（`ShizukuUserService.kt:70-75`、`:29`）。总输出超过约 64 KiB 管道缓冲时子进程会被提前关闭的读端打死 → `ok=false` 而引擎却按 128 KiB 承诺（`index.ts:1063`）；AIDL 注释与 `ShizukuTransport.kt:806` 都按「capture 在用」措辞。
 - [K06] 3. 「危险命令黑名单在壳侧复查」不成立，且 `controlExec` 直连路径没有这层（S-5 残留，已确认）。`app/src/main/aidl/com/dsharnessmobile/shell/ShizukuUserService.aidl:31` 声称黑名单在壳侧；壳侧 Kotlin 无任何黑名单（`app/src/main` grep `黑名单|dangerous|危险命令` 零命中），黑名单只在引擎 `index.ts:368/1038/1074/1375`，而 `controlExec` 只做档位门（`index.ts:949-956`）。连带：`shRemove` 全仓零调用方（仅登记面），却可经 uid 2000 删除任意绝对路径且目录递归（`ShellOps.kt:123-129`、`ShizukuUserService.kt:207-233`）——登记了但没有任何一层守。未证实是否有意预留。
 - [K06] 4. `ensureBound` 15s 预算与 `shExec` 20s 执行时限叠加可越过引擎 25s 入队时限（S-6 不变量的缺口，已确认代码路径、未证实实机频度）。冷启动/Shizuku 重启后最早几条命令最坏 15s+20s=35s > 25s：引擎在 25s 放弃并报「设备控制超时」，壳侧稍后仍会执行该命令 → 正是 S-6 想消灭的「假失败 + 副作用已发生」（非幂等命令会被模型重试二次执行）。叠加 `ControlPoller` 单线程（`ControlPoller.kt:96` 循环、`:125` 执行）：慢命令期间 a11y/browser/vd 全部排队。
 - [K06] 5. `MainActivity` 两处直连 `ShizukuTransport.runShell`，绕开 `ShellOps.scopeDenied` 这个执行点（未证实有实害）。`unlockLegacyStorageApi29`（`MainActivity.kt:1054`、`:1059`）与 `unlockRestrictedSettingsViaShizuku`（`MainActivity.kt:1076`）的命令是固定 argv、不含屏幕命令词，故当前不构成真实屏绕过；但「所有特权命令都过执行点复查」这条不变量在此不成立，后续若有人把模型可控串接进来即失守。
-- [K06] 漂移：`历史 BRIDGE-API 副本（当前契约见§6 K04）` 说 ShizukuTransport/ShizukuUserService 是「固定 argv、16KB 输出上限；页面/引擎拿不到原始 binder 或任意 shell 面」（AIDL v1），源码 `ShizukuUserService.kt:30` 是 `PROTOCOL_VERSION = 2`（execCapture 落盘面 + 单文件 256 MiB），`ShizukuTransport.kt:271-301` 与 `ShellOps.kt:91-103` 交给引擎的正是任意 `sh -c` 命令面。
+- [K06] 漂移：`历史 BRIDGE-API 副本（当前契约见§6 K04）` 说 ShizukuTransport/ShizukuUserService 是「固定 argv、16KB 输出上限；页面/引擎拿不到原始 binder 或任意 shell 面」（AIDL v1），源码 `ShizukuUserService.kt:30` 是 `PROTOCOL_VERSION = 2`（execCapture 落盘面 + 单文件 256 MiB），`ShizukuTransport.kt:821-846` 与 `ShellOps.kt:91-103` 交给引擎的正是任意 `sh -c` 命令面。
 - [K06] 漂移：`历史 BRIDGE-API 副本（当前契约见§6 K04）` 说 ScreenScope「执行点复查在 DeviceControlService」，源码 `ShellOps.kt:132`（scopeDenied）才是特权 shell 通道的执行点复查，`DeviceControlService.kt:703`（realScreenScopeError）只管无障碍 op 面。
 - [K06] 漂移（注释）：`app/src/main/aidl/com/dsharnessmobile/shell/ShizukuUserService.aidl:31` 说「危险命令黑名单仍在壳侧判定」，源码壳侧无任何黑名单（`app/src/main` 下 grep `黑名单|dangerous|危险命令` 零命中），黑名单只在 `plugins/dsh-android-bridge/src/index.ts:368`。
 - [K06] 漂移（注释）：`app/src/main/res/xml/file_paths.xml:3` 说安全边界「与 MainActivity.OPEN_READER_ROOTS 同步」，全仓无该符号（仅此注释一处），运行时白名单实为 `app/src/main/java/com/dsharnessmobile/shell/FileIncoming.kt:467` 的 `isReaderAllowed`。
-- [K06] 漂移（提示文案）：`app/src/main/java/com/dsharnessmobile/shell/ShizukuProbe.kt:69` 说「本应用清单尚未声明 rikka.shizuku.ShizukuProvider，属已知未落地项」，`app/src/main/AndroidManifest.xml:158` 已声明该 provider（authorities 为 `${applicationId}.shizuku`）。
+- [K06] 漂移（提示文案）：`app/src/main/java/com/dsharnessmobile/shell/ShizukuProbe.kt:71` 说「本应用清单尚未声明 rikka.shizuku.ShizukuProvider，属已知未落地项」，`app/src/main/AndroidManifest.xml:158` 已声明该 provider（authorities 为 `${applicationId}.shizuku`）。
 - [K06] 补充：本轮抽查的 6 个桥接镜像文件（`plugins/dsh-android-bridge/src/screen-scope.ts`、`src/index.ts`、`src/shell-ops.ts`、`src/control-queue.ts`、`test/screen-scope.test.mjs`、`test/fixtures/screen-scope-cases.json`）协调仓与 apk 仓副本逐字节一致；壳侧 fixture 副本 `app/src/test/resources/screen-scope/screen-scope-cases.json` 与插件侧权威源仅排版不同（规范化后的标准形态），内容等价。
 - [K07] 1. 已确证（V-R0 / F-10）：`touch()` 全仓零调用点（`VdisplayController.kt:84` 只有定义），`lastUsedAt` 的唯一写入是 `Record` 构造默认值（`:60`）。于是「空闲回收」实际是「建屏后满 10 分钟必回收」：长任务里模型第一条 vd 调用会在解析阶段把屏删掉并回 `screen-not-ready`，guidance 只说「已回收空闲虚拟屏」，归因误导。插件侧 `tools-callable.test.mjs` 只断言 `reclaimIdle/IDLE_RECLAIM_MS/lastUsedAt` 三个字符串在场，所以失效不会判红。
 - [K07] 2. 未证实（有触发条件，与 S-8 同族）：`touch()` 的 `records.values.forEach`（`:86`）与 `status()` 里的 `records[selected]`（`:253`）都在 `synchronized(lock)` 之外读 `records`，而 `records` 有两个跨线程写者（控制队列线程的 `create/destroy`、主线程 reaper 的 `reclaimIdle`）。今天 `touch` 是死代码所以不发作；F-10 的修法（在 status/select/input/screens 里刷新）一落地，主线程就会在遍历中撞上控制线程的 `records.remove` → ConcurrentModificationException 打穿主线程 = 闪退。修 F-10 时必须同时把刷新点收进锁内。
@@ -664,7 +672,7 @@ sequenceDiagram
 | 1. 一批桥断言同时读成 `undefined` / `false`（`verify-webview-015` 的 `:21-23` 与 `:60-76` 整批连红） | B03 | 九成是连错 target 不是回归。查 `adb shell "cat /proc/net/unix | grep webview_devtools"`、`adb forward --list`、`curl -s http://127.0.0.1:29225/json/list`；主页面 target 的 `url` 应是引擎 Web UI，隔离浏览器页是 `https://example.com/` 之类。grep `webview_devtools_remote_`。 |
 | 2. `verify-state-sync` 的重启类用例（ST-02 / ST-10 / ST-11）恒报「未收敛」，其余全绿 | B03 | 先看命令行是不是带了 `--ws`（`:244` 短路重解析，force-stop 后旧 ws 必然连不上，却被渲染成业务未收敛）。 |
 | 3. 断言返回 `null`，或 status JSON 里 `available:false` + `reason:"main-thread-timeout"` | B03 | 是壳侧主线程 2s 预算超时（`BrowserHost.kt:1661-1673`），副作用可能已经发生（post 出去的块不会被取消）；重跑一次再判，别当业务缺陷。grep `main-thread-timeout`。 |
-| 4. vdisplay 套件第一步就红 | B03 | 读 `vdisplayStatus()` 的 `code`：`shizuku-not-running` / `shizuku-not-ready`（`ShizukuProbe.kt:75`、`ShizukuTransport.kt:98`、`VdisplayController.kt:326`）是前置不满足，不是回归；`adb shell dumpsys accessibility | grep -A2 "Bound services"` 与 Shizuku App 状态一起确认。 |
+| 4. vdisplay 套件第一步就红 | B03 | 读 `vdisplayStatus()` 的 `code`：`shizuku-not-running` / `shizuku-not-ready`（`ShizukuProbe.kt:77`、`ShizukuTransport.kt:98`、`VdisplayController.kt:326`）是前置不满足，不是回归；`adb shell dumpsys accessibility | grep -A2 "Bound services"` 与 Shizuku App 状态一起确认。 |
 | 5. `verify-state-sync` 首跑部分红、复跑全绿 | B03 | 先清 uid-mode appop 残留（`adb shell appops set --uid <op> default` + `appops reset --uid com.dsharnessmobile.shell`）并重设 a11y 服务（坑 46，`docs/AGENTS/gotchas.md:74`）；两条都在 `docs/AGENTS/emulator-test-protocol.md:57-58` 有原文。 |
 
 ## 6. 分块详解（职责 / 运行顺序 / 嵌套 / 耦合 / 流程图）
@@ -672,6 +680,11 @@ sequenceDiagram
 ### 壳侧（Kotlin，app/src/main/java/com/dsharnessmobile/shell/）
 
 #### K01 启动与引导面
+
+原生插件页先探测引擎：OFFLINE 正常引导 → 用户显式启动（复用主操作）→ STARTING 轮询 → ONLINE 读库存；FAILED 提示恢复，离页取消轮询。控制台仍由独立 ConsoleActivity 承载原 bash 会话。
+
+原生管理导航：`GuidePageRenderer` 建 `GuideChrome` 后连接 `GuideManagementController`。齿轮点击与系统返回共用目的页；动画只从当前进度前往 0/240°，不累计角度。三级插件页先消费详情返回，再回管理中心。异步引擎探活仍运行，管理页打开时 `showWeb()` 不抢走当前页面。存储页只展示路径、容量和显式授权入口，不删除用户数据。
+
 
 - **顺序**：MainActivity恢复saved/persistent userClosed、构造主WebView/guide/native holders并装精确可信桥；后台startup先共享RootOwnershipJobs，pending延后不读事务；已结算才恢复事务→探活→strict SHA/fresh→必要refresh→spawn→90s轮询→WebUI。
 - **CAS所有权**：StartupFlowOwnership的一份CAS状态绑定running/token/generation/destroyed；重复begin不推进世代，旧finally只finish旧token；close/destroy只中断caller，不取消共享root worker。阻塞维护/恢复后及每个UI/引擎后续效果均查generation。ownership pending六次2/4/8/16/30/30秒与普通engine失败5/10秒两次重试分开。
@@ -881,6 +894,8 @@ flowchart TD
 ```
 
 #### K06 特权执行、屏幕范围与本地文件面
+
+- **Shizuku 建链**：`kickBind/ensureBound` 在锁内创建独立 `BindAttempt`，由主线程 `bindOnMain` 注册；重置/20s 超时先作废代次、释放该代等待锁，再排队 `discardOnMain`（先注销 SDK 缓存、再移除远端），之后的新绑定按 FIFO 执行。回调须同时匹配当前 attempt 与 generation；主线程调用者立即回读，不能等待同线程回调。
 
 - **执行门**：ShellOps→ShizukuTransport，native controller固定argv；su只精确派发前通道不可用fallback一次，policy refusal/nonzero exit/timeout/Binder未知不重放。有效versionCode AI consent与应用su授权分离，uid2000不是root；会话danger与native screen scope继续复查。
 - **durable admission**：RootExecutionFence(Context)锁前/锁内查RootMaintenanceLease；fair read timed tryLock(0,MILLISECONDS)尊重writer。真正UID0dispatch前commit epoch/start/operation，epoch或commit失败零派发；Shizuku RpcLease持久化后复查identity/consent，每pull/push chunk本地准备后RPC紧前再查。
@@ -1422,6 +1437,14 @@ flowchart TD
 
 #### P04 文件打开、Linux 环境与模型能力插件
 
+Linux 内部插件宿主适配（实验性 internal，默认不启用）：`plugins/dsh-android-linux-env/src/linux-environment.ts` 提供受鉴权的 Linux 生命周期 HTTP 路由和 `linuxPluginHost`；`plugins/dsh-android-linux-env/src/linux-host-asset-io.ts` 提供引擎侧 `linuxAssetIO` 的**宿主透传面**（见下）。bootstrap 与 runtime 是我们自己的实验性内部插件，随应用放入内置（hard）插件目录，但**默认不启用——存在不等于启用**；应用更新或插件新版本发布都不会启用它们。宿主不下载、校验或解包资产，也不替用户启用；内部 bootstrap 被启用（服务在场）后设置页才注册「Linux环境」，未启用则 503 且无入口。runtime 目录由内部 bootstrap 完成事务后交给宿主，必须位于 `$DSH_FILES_DIR/linux-environment/plugins` 内；宿主核对 realpath 后动态 import，等待 Cordis fiber 激活，失败或卸载时 dispose。`linuxPluginHost.isInjected({name?,runtimeId?,directory?})` 只读上报**在场**（平铺或 `<name>/<version>` 布局，拒绝分隔符与外逃符号链接）并作为权威判定：显式查询未命中即不在场（不回落内存已激活目录），手工删除后 `install()` 以不在场失败关闭，新 Release 或新应用版本不会把插件重新写回。
+
+引擎侧 `linuxAssetIO` 透传面（0.15.0，(iii) 的分工）：`plugins/dsh-android-linux-env/src/linux-host-asset-io.ts` 造出 bootstrap 必需的 `downloadAsset` / `extractArchive`（另导出 `createLinuxBootstrapConfig` 组装 `dataDir`/`releaseUrl`/`appVersionProvider`/`stagingDirectory`）。两者是**透传 + 失败关闭**，不是下载器：`downloadAsset` 只把宿主已暂存的 `<filesDir>/linux-environment/staging/<sha256>/asset.tar.xz` 路径交回 bootstrap（落点由 **manifest 摘要**推导，调用方不能指定；摘要格式与包含关系两道判据与 Kotlin `LinuxAssetPrepare.stagedDir` 同口径），`extractArchive` 按**归档自身摘要**定位宿主已解包的 `<sha256>/unpacked/` 并**复制**进 bootstrap 目标目录（复制而非移动——宿主那份要留着供复验）。宿主没准备、摘要不合规、树含符号链接一律抛带稳定码的错，**绝不回退成自行下载**。`stagingDirectory` 故意**不等于**宿主暂存目录：bootstrap 把 `<stagingDirectory>/<sha256>/` 当自己的包槽位（先 `rename` 到 `.backup-*`，成功后再递归删除），指向宿主暂存会**删掉宿主保留的归档与解包树**，而那两样正是复验依据。复验权威仍在 bootstrap：它自算归档 SHA-256 与体量、重算 `unpackedSize`、校验包名与入口之后才激活；自 `dsh-bionilux@3f86a85` 起**宿主暂存直取路径**（`hostStagingRoot` 默认 `<dataDir>/staging`，与宿主暂存同处）会在调用本模块的 `downloadAsset`/`extractArchive` **之前**就完成复验，因此「已暂存但不合格」由上游拒绝；**没暂存**时才落到本模块的透传钩子并以 `linux-asset-not-prepared` 失败关闭（两条路径都全复验，不一致时取更严的一条）。复用分支亦已复验：被篡改的槽位不被复用而是从已复验的暂存**重建**。
+
+版本变化链为 `linuxBootstrap 服务就绪 → 读取持久化安装版本/应用基线/自动更新偏好/尝试记录 → 基线不同时 checkForUpdates({source:'mobile-version-change'})`；偏好开关和页面挂载都不发更新检查。手动检查只调用 `source:'manual'`，安装、重装、卸载与开关写入均需 `confirmed:true`。设置页不持久化第二份系统状态，读写都回到 bootstrap；无该服务时 HTTP 503 且不注册设置入口。这两个实验性内部插件的发布不修改注入目录或默认启用状态。
+
+vendored bootstrap 与注入集的关系（0.15.0）：`plugins/dsh-linux-bootstrap/`（源 `kelai141/dsh-bionilux@3f86a85`，只源码；`lib/` 由 `build.mjs` 在链上重建）**刻意不登记**进 `scripts/plugin-dirs.json`、`scripts/contract.json` 的 `inserted`、`scripts/profile-web.cordis.patch.yml` —— 它的 `apply()` 需要函数型 config（`linuxAssetIO`），YAML 挂载表达不了，挂进 profile 只会抛 `TypeError`；不入注入集也让 `check-patch-mounts`/`check-contract` 的双向一致断言保持真绿（它们守注入集 ↔ 挂载集，本包两边都不在）。漂移由 `scripts/check-vendored-linux-bootstrap.mjs` 守（自带 `--self-test`：1 正控 + 3 负控），它**不进** `check-release-gates.mjs` 的 `GATES`（进册即要求本地链与云端链接线，而那两处是逐字节镜像面）。完整协议见 `docs/AGENTS/BRIDGE-API.md` 的 Linux 内部插件宿主节；设备证据限未启用状态，不代表完成真实安装验收。
+
 
 - **一句话**：三个引擎侧插件的合块——`dsh-android-file-open` 把壳侧拷好的外部文件变成一条「强制新会话、未发送的附件草稿」（配五条受鉴权的 exact 路由与自有临时项清单）、`dsh-android-linux-env` 提供工具链/环境配方视图与开发者选项的运行时缓存白名单清理、`dsh-model-capability` 为手填供应商路由探测能力并把缺失字段写回 settings.yaml。
 - **入口/触发**：① 外部应用 `ACTION_VIEW`/`ACTION_SEND` → 壳侧 `FileIncoming.processIncomingIntent`（`app/src/main/java/com/dsharnessmobile/shell/FileIncoming.kt:379`）→ POST `/api/android/file-incoming`；② 设置页/开发者选项 → file-incoming 五条 exact 路由（GET 统计、claim、content、complete、clean）、`/api/android/env/status|recipe`、`/api/android/runtime-cache/scan|execute`；③ cordis 装配调三个插件的 `apply()`：注册工具 `android_file_incoming_status` / `android_toolchain_status` / `android_env_recipe` / `model_capability_probe` / `model_capability_apply`，并给 model-capability 起 auto-apply 轮询。
@@ -1962,7 +1985,7 @@ flowchart TD
   1. **一批桥断言同时读成 `undefined` / `false`**（`verify-webview-015` 的 `:21-23` 与 `:60-76` 整批连红）→ 九成是连错 target 不是回归。查 `adb shell "cat /proc/net/unix | grep webview_devtools"`、`adb forward --list`、`curl -s http://127.0.0.1:29225/json/list`；主页面 target 的 `url` 应是引擎 Web UI，隔离浏览器页是 `https://example.com/` 之类。grep `webview_devtools_remote_`。
   2. **`verify-state-sync` 的重启类用例（ST-02 / ST-10 / ST-11）恒报「未收敛」，其余全绿** → 先看命令行是不是带了 `--ws`（`:244` 短路重解析，force-stop 后旧 ws 必然连不上，却被渲染成业务未收敛）。
   3. **断言返回 `null`，或 status JSON 里 `available:false` + `reason:"main-thread-timeout"`** → 是壳侧主线程 2s 预算超时（`BrowserHost.kt:1661-1673`），**副作用可能已经发生**（post 出去的块不会被取消）；重跑一次再判，别当业务缺陷。grep `main-thread-timeout`。
-  4. **vdisplay 套件第一步就红** → 读 `vdisplayStatus()` 的 `code`：`shizuku-not-running` / `shizuku-not-ready`（`ShizukuProbe.kt:75`、`ShizukuTransport.kt:98`、`VdisplayController.kt:326`）是前置不满足，不是回归；`adb shell dumpsys accessibility | grep -A2 "Bound services"` 与 Shizuku App 状态一起确认。
+  4. **vdisplay 套件第一步就红** → 读 `vdisplayStatus()` 的 `code`：`shizuku-not-running` / `shizuku-not-ready`（`ShizukuProbe.kt:77`、`ShizukuTransport.kt:98`、`VdisplayController.kt:326`）是前置不满足，不是回归；`adb shell dumpsys accessibility | grep -A2 "Bound services"` 与 Shizuku App 状态一起确认。
   5. **`verify-state-sync` 首跑部分红、复跑全绿** → 先清 uid-mode appop 残留（`adb shell appops set --uid <op> default` + `appops reset --uid com.dsharnessmobile.shell`）并重设 a11y 服务（坑 46，`docs/AGENTS/gotchas.md:74`）；两条都在 `docs/AGENTS/emulator-test-protocol.md:57-58` 有原文。
 - **可疑点**：
   1. 已证实：`scripts/verify-vdisplay-float.mjs:95-103` 的「非法档位必须被拒」是**永久假通过 + 顺手改设备状态**。链路：`setVdisplayScale(0.123)` → `VdisplayPrefs.setScale` 用 `coerceIn(0.4, 1.0)` 把值钳成 0.4 存盘（`VdisplayController.kt:753-756`）→ 返回的 `VdisplayPrefs.scale()` 是**数值 0.4**（`MainActivity.kt:788`），既不是 `true` 也不是 `{ok:true}` → 脚本走 `else` 分支打印 `PASS 非法档位被拒 → rejected`。而第 3 步之后**没有任何还原**（对比第 1、2 步都有还原），设备档位就停在 0.4（默认 0.75），后续所有 vdisplay 用例的几何随之变化。影响：断言假绿 + 跨轮设备状态漂移。
@@ -2043,12 +2066,22 @@ node scripts/verify-client-plugin-fail-recovery.mjs --self-test   # 客户端插
 <!-- COVERAGE
 app/src/main/java/com/dsharnessmobile/shell/EngineTransport.kt
 app/src/androidTest/java/com/dsharnessmobile/shell/EngineTransportInstrumentedTest.kt
+dsh-client-ui-responsive/src/client/mobile/sidebar-bubbles.ts
+dsh-client-ui-responsive/src/client/mobile/sidebar-bubbles.css.ts
+dsh-client-ui-responsive/src/client/mobile/sidebar-bubbles.locales.ts
+scripts/verify-sidebar-bubbles.mjs
+scripts/patches/data/sidebar-bubble-reorder.mjs
+scripts/patches/tests/sidebar-bubble-reorder.test.mjs
+glob:scripts/patches/tests/fixtures/dsh-client-ui-sidebar-right-0.2.0-rc.2/**
+glob:scripts/patches/tests/fixtures/dsh-client-ui-sidebar-right-mobile-0.2.0-rc.2/**
 # 0.14.3 actual new source/fixture ledger (not execution evidence)
 app/src/main/java/com/dsharnessmobile/shell/RootMaintenanceLease.kt
 app/src/main/java/com/dsharnessmobile/shell/BrowserHostProfile.kt
 app/src/main/java/com/dsharnessmobile/shell/ForegroundPageRecoveryPolicy.kt
 app/src/main/java/com/dsharnessmobile/shell/SnapshotFingerprintPolicy.kt
 app/src/main/java/com/dsharnessmobile/shell/ProfilePackageManifest.kt
+app/src/main/java/com/dsharnessmobile/shell/LinuxAssetIO.kt
+app/src/main/java/com/dsharnessmobile/shell/LinuxAssetPrepare.kt
 app/src/test/java/com/dsharnessmobile/shell/ProfilePackageManifestTest.kt
 app/src/test/java/com/dsharnessmobile/shell/OwnershipRepairCoreTest.kt
 app/src/test/java/com/dsharnessmobile/shell/RootMaintenanceLeaseTest.kt
@@ -2076,6 +2109,9 @@ app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt
 app/src/main/java/com/dsharnessmobile/shell/UserCopy.kt
 app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt
 app/src/main/java/com/dsharnessmobile/shell/GuideChrome.kt
+app/src/main/java/com/dsharnessmobile/shell/GuideManagementController.kt
+app/src/main/java/com/dsharnessmobile/shell/PluginManagementRepository.kt
+app/src/main/java/com/dsharnessmobile/shell/PluginManagementPage.kt
 app/src/main/java/com/dsharnessmobile/shell/SnapshotRecoveryNotice.kt
 app/src/main/java/com/dsharnessmobile/shell/RuntimeTree.kt
 app/src/main/java/com/dsharnessmobile/shell/GuidePageRenderer.kt
@@ -2151,6 +2187,7 @@ app/src/main/java/com/dsharnessmobile/shell/VdisplayFloat.kt
 app/src/main/java/com/dsharnessmobile/shell/VdisplayOps.kt
 app/src/main/java/com/dsharnessmobile/shell/VirtualDisplayProbe.kt
 app/src/androidTest/java/com/dsharnessmobile/shell/VdisplayProbeTest.kt
+app/src/androidTest/java/com/dsharnessmobile/shell/ShizukuReconnectTest.kt
 app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt
 app/src/main/java/com/dsharnessmobile/shell/BrowserHostNavigationPolicy.kt
 app/src/main/java/com/dsharnessmobile/shell/BrowserOverlayPolicy.kt
@@ -2205,6 +2242,11 @@ plugins/dsh-android-file-open/src/index.ts
 plugins/dsh-android-file-open/src/route-auth.ts
 plugins/dsh-android-linux-env/src/index.ts
 plugins/dsh-android-linux-env/src/runtime-cache.ts
+plugins/dsh-android-linux-env/src/linux-environment.ts
+plugins/dsh-android-linux-env/src/linux-host-asset-io.ts
+plugins/dsh-linux-bootstrap/build.mjs
+glob:plugins/dsh-linux-bootstrap/src/*.js
+glob:plugins/dsh-linux-bootstrap/client/*.js
 plugins/dsh-model-capability/src/index.ts
 plugins/dsh-model-capability/src/capability-probe.ts
 plugins/dsh-model-capability/src/settings-writer.ts
@@ -2316,7 +2358,7 @@ app/src/main/java/com/dsharnessmobile/shell/LogSanitizer.kt
 - [K05] 漂移：`docs/AGENTS/ARCHITECTURE.md:65` 说 ShizukuProbe.kt 被 MainActivity、DeviceControlService、VdisplayController 依赖，源码零引用——`grep -rl ShizukuProbe app/src/main` 只命中 `app/src/main/java/com/dsharnessmobile/shell/ShizukuProbe.kt` 自身（main 与 test 均无其它引用）。
 - [K05] 漂移：`docs/AGENTS/ACCESSIBILITY-API.md:167` 说「⑤ 多窗口 `getWindows()` 的窗口选择面未接」，源码已接：`getWindowsOnAllDisplays()` + `WindowPick.order`（`app/src/main/java/com/dsharnessmobile/shell/DeviceControlService.kt:353-434`，回归 `app/src/test/java/com/dsharnessmobile/shell/WindowPickTest.kt`）。
 - [K05] 漂移：`docs/AGENTS/ACCESSIBILITY-API.md:99` 说 `MENU` / `MEDIA_PLAY_PAUSE` 为 API 36，源码 `app/src/main/java/com/dsharnessmobile/shell/GlobalActionCatalog.kt:33-34` 写 minSdk=31（SDK `api-versions.xml` 两个 android-36 平台均 `since="36"`，支持文档口径，影响见可疑点 2）。
-- [K06] 漂移：`历史 BRIDGE-API 副本（当前契约见§6 K04）` 说 ShizukuTransport/ShizukuUserService 是「固定 argv、16KB 输出上限；页面/引擎拿不到原始 binder 或任意 shell 面」（AIDL v1），源码 `ShizukuUserService.kt:30` 是 `PROTOCOL_VERSION = 2`（execCapture 落盘面 + 单文件 256 MiB），`ShizukuTransport.kt:271-301` 与 `ShellOps.kt:91-103` 交给引擎的正是任意 `sh -c` 命令面。
+- [K06] 漂移：`历史 BRIDGE-API 副本（当前契约见§6 K04）` 说 ShizukuTransport/ShizukuUserService 是「固定 argv、16KB 输出上限；页面/引擎拿不到原始 binder 或任意 shell 面」（AIDL v1），源码 `ShizukuUserService.kt:30` 是 `PROTOCOL_VERSION = 2`（execCapture 落盘面 + 单文件 256 MiB），`ShizukuTransport.kt:821-846` 与 `ShellOps.kt:91-103` 交给引擎的正是任意 `sh -c` 命令面。
 - [K06] 漂移：`历史 BRIDGE-API 副本（当前契约见§6 K04）` 说 ScreenScope「执行点复查在 DeviceControlService」，源码 `ShellOps.kt:132`（scopeDenied）才是特权 shell 通道的执行点复查，`DeviceControlService.kt:703`（realScreenScopeError）只管无障碍 op 面。
 - [K07] 漂移：`docs/AGENTS/ARCHITECTURE.md:90` 说 `VdisplayController.kt` 389 行、`:91` 说 `VdisplayHost.kt` 177 行，源码 `app/src/main/java/com/dsharnessmobile/shell/VdisplayController.kt` 是 766 行、`VdisplayHost.kt` 是 214 行（`wc -l` 现场数）。
 - [K07] 漂移：`历史 BRIDGE-API 副本（当前契约见§6 K04）` 与 `:195` 说页面桥面有 `vdisplayLaunchSettingsProbe`/`backProbe`，源码 `app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:319-351` 没有这两个方法（`sendBackProbe` 只有定义、无调用点，`VdisplayController.kt:529`）；实际存在的 `vdisplaySelect`、`get/setVdisplayScale`、`get/setVdisplayFloatEnabled`、`forceDestroyVdisplay` 未列出。

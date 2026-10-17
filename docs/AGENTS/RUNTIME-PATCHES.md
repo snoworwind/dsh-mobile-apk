@@ -65,6 +65,7 @@
 <!-- generated:active-registry:start -->
 | 活动补丁 ID | scope | 目标 |
 |---|---|---|
+| `sidebar-bubble-reorder-B1` | engine | `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-sidebar-right/lib/client.js` |
 | `market-B` | undefined | `dshmarketplace-plugin/lib/index.js` |
 | `market-D-server` | undefined | `dshmarketplace-plugin/lib/index.js` |
 | `market-route-auth-U2` | undefined | `dshmarketplace-plugin/lib/index.js` |
@@ -130,6 +131,8 @@
 （fixture = 0.1.5-rc.1 产物；`.deploy-tmp/` 下的临时预检脚本不入库，勿再引用）。
 
 ### 7.1 构建期引擎补丁历史与实现说明（活动状态见 §6.1）
+
+- **sidebar-bubble-reorder-B1（2026-10-17）**：`dsh-client-ui-sidebar-right/lib/client.js` 增加 `reorderIn(session, tab, before)`。复用原 store 的 `placeTab`，恢复原活动标签；仅操作当前挂载会话的 dock 同分栏，拒绝失效会话、浮动页、跨分栏与无效/无变化目标。补丁接受本代 npm 发布包和 Android 源码构建的两条精确锚点；未知或部分损坏字节拒绝写入。真实夹具、幂等、损坏输入和 runner 集成测试见 `scripts/patches/tests/sidebar-bubble-reorder.test.mjs`。
 
 - **reference-drill-F6（2026-09-11，apk #163）**：`dsh-client-ui-reference/lib/client.js` 的 `onPick` 判定由
   `fileKind === "directory" && action === "drill"` 改为 `... || document.documentElement.hasAttribute("data-dsh-mobile-form")`——

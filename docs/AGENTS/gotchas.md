@@ -1,5 +1,7 @@
 # gotchas.md — 关键实现细节与坑（全量）
 
+324. **气泡导航代理必须跟随原生标签栏节点重建**：上游在活动 TabHost 下挂载 strip；同分栏切页会替换结构相同的原按钮。只比 outerHTML 会保留断连按钮闭包，导致全屏、收起和新标签无响应。代理缓存同时比较元素身份，并释放断连 strip 引用。长按后只抑制物理释放产生的标签点击，取消/失焦要清理；系统返回不能被吞，并须把焦点交还三点按钮。列表范围同时读取 visualViewport 与原生 IME inset；Android adjustNothing 下真实键盘出现时 visualViewport 仍可保持全高。真实设备复验入口：`scripts/verify-sidebar-bubbles.mjs`。
+
 > grep 用法：`grep -n "<坑号>\." docs/AGENTS/gotchas.md` 或按关键词（如 `borrowSession`、`MANAGE_EXTERNAL_STORAGE`、`store-rehome`）定位。
 > 维护约定：新坑追加到文末并递增编号；修复后保留条目（教训与历史归档）。
 
@@ -2270,3 +2272,154 @@ spawnSync("node", ["--version"])               status=0  v24.18.0        ← 走
 **设备边界**：ADB devices 为空，连接 `127.0.0.1:16416`、`127.0.0.1:16384` 均返回 connection refused，真机未在线。**未做设备验证**，未执行 instrumentation、CDP 或 ADB 自主任务；源码修复不等于漏洞已完成三层关闭，来源链新包和双方向设备证据仍待补齐。
 
 本轮实际编译与测试：WSL Java 17 执行 `:app:testDebugUnitTest :app:compileDebugAndroidTestKotlin` 成功；最终 XML 为 113 类、1244 项，失败/错误/跳过均为 0，包含新增 3 条生产入口拒绝反证；instrumentation 仅编译，未执行。日志 `.deploy-tmp/security-350/gradle-final.log`。单测数量基线仅提升总数并登记新类，保留既有 featureRetirements；本机 buildDirectory 重定向到 WSL 私有缓存，仓内旧 app/build XML 不可作为当前证据。
+
+353. **主题里的 navigationBarColor 就是「底部栏没有沉浸」的那条色带（issue #392，本轮实修）**：
+
+现象：屏幕最底部有一条色带，与应用底栏不衔接，用户报「没有做 edge-to-edge」。
+
+真因：壳侧其实**已经**做了 `WindowCompat.setDecorFitsSystemWindows(false)`（内容确实铺到了物理底边），
+但四份 `res/values*/themes.xml` 把 `android:navigationBarColor` 钉成 `@color/ds_bg`——夜色下是纯黑
+`#000000`，而页面画布是 `#151517`。系统于是在最底那段涂自己的颜色。
+
+**判据口径（本条踩过坑，务必照后面写）**：截图本身**不足以定案**。主题里
+`android:windowBackground` 也是 `@color/ds_bg`，夜色同为 `#000000`，所以「最底一段纯黑且竖直
+恒定」在两种假设下都成立：①系统导航条涂色；②页面没画到那一段、露出窗口底色。
+本轮一度直接用截图推出「⇒ 是系统涂的条」，属过度推断，且把「截图 54px」与「模拟器 inset 63px」
+并列却没给截图设备与 density，不可复算——该判据已作废。
+
+**定案只能靠设备层 A/B（同设备、同入口，只换 APK）**。本轮实测（模拟器 Medium_Phone，
+1080x2400，**420dpi**，**手势条**形态即 `navigation_mode=0` 且 overlay 为 `navbar.gestural`，
+导航条 inset `frame=[0,2337][1080,2400]` 高 63px，夜色模式）：
+
+- 改前：y2337-2399（恰为 inset 区间）三列采样恒 `(0,0,0)`；其上 y2336 是 `(10,10,11)`。
+- 改后：同一区间变为 `(10,10,11)`，与页面画布一致。
+
+这条 A/B 顺带解掉了上面的二义性：若页面本就没画到该段，改透明后那里只会露出窗口底色
+`(0,0,0)`；实际变成页面画布色 `(10,10,11)` ⇒ 页面本就铺到物理底边，原色带确系系统涂的。
+
+修法：导航条透明（`@android:color/transparent`）+ Android 10+ 关 `window.isNavigationBarContrastEnforced`
+（不关的话手势条背后仍会被系统叠一层 scrim，透出来的仍不是页面色）。避让仍由壳侧下发的
+`--dsh-android-system-bottom` 承担，两者互不替代。
+
+验证口径：改四份主题任一份回 `@color/ds_bg`，`ImmersiveBottomBarContractTest` 必红（阴性对照）。
+**不要**只改 values-night——四份变体（values / values-v27 / values-night / values-night-v27）都要改，
+少一份就会在对应 ROM 上照旧露色带。
+
+CDP 层交叉读数（同设备）：页面 `visualViewport.height=914.29`、`innerHeight=914`，
+而 2400 / 2.625 = 914.3 ⇒ 布局视口已铺满到物理底边；`--dsh-android-system-bottom=32px`
+仍正常下发。这三条与设备层像素读数互证：页面铺到底，且壳侧仍在给避让量。
+
+354. **把「官方管理器包名」当成 Shizuku 能力的唯一事实 = 把分支实现（Stellar 等）判成「未检测到」（源码实证 + 用户报告）**：
+
+现象：用户装的是 Shizuku 的深度定制分支 Stellar（管理器包 `roro.stellar.manager`，内置 Shizuku 兼容层），
+Stellar 在跑、兼容层正常，本应用却在设置页与工具面一律报 `shizuku-absent`「未检测到 Shizuku」，
+虚拟屏与特权 shell 全不可用；换成官方 Shizuku 立刻可用。用户口径：「只认 Shizuku，不认分支」。
+
+真因：`ShizukuTransport.installed()` 用 `getPackageInfo("moe.shizuku.privileged.api")` 当事实判定，
+且 `status()` 在 `installed == false` 时**先短路返回** `shizuku-absent`——同一函数第 196 行已经算出来的
+`Shizuku.pingBinder()`（唯一能证明服务真的在跑的面）根本没机会被读到；`kickBind()`/`ensureBound()` 的守卫
+同样按 `installed` 早退，连后台补绑都不会发生。而 Shizuku 分支实现经兼容层提供同一套 API
+（pingBinder/getVersion/getUid/checkSelfPermission/requestPermission/addUserService），只是**不安装那个包名的 APK**；
+`Shizuku.requestPermission()` 走 binder（api 13.1.5 `Shizuku.java`），binder 由服务端经
+`moe.shizuku.api.action.BINDER_RECEIVED` 投递给客户端的 `ShizukuProvider`——两步都不依赖官方包名。
+
+修法（0.14.8）：**能力门只看 `Shizuku.pingBinder()`（binder 连上即可用）**，包名彻底退出判据；
+包名表（`ExternalLinks.SHIZUKU_MANAGER_PACKAGES`：官方 + `roro.stellar.manager`）只剩两个用途——
+「把用户送到哪个管理器」（`openShizukuManager` 逐包尝试拉起）与「没连上时分流
+`shizuku-absent` / `shizuku-not-running` 文案」。`ShizukuProbe` 同源。
+
+判据（可判红）：`ExternalLinksTest.installedProbeUsesTheSharedManagerTableAndBinder`——
+把判据改回官方包名裸查询、或删掉 binder 面，用例必红。
+
+教训：**「某个包名装没装」是引导事实，不是能力事实**。能力判据要落在协议面（binder / 兼容 API 可达）上，
+否则每来一个兼容实现或分支都要在代码里再登记一次，而登记永远滞后于分支的出现。
+
+355. **Cordis 动态插件「拿到 fiber」不等于插件已经启用，失败的部分服务必须回收（Linux 宿主反证）**：
+
+现象：只执行 `ctx.plugin(module, config)` 就报告 runtime 安装成功，会把等待依赖的 PENDING fiber 或异步初始化失败的 fiber 当成可用环境；初始化中途提供的服务也可能残留。
+
+真因：Cordis `plugin()` 返回可等待的 fiber，调用本身只创建生命周期实例。`.await()`/thenable 完成后仍须确认 `FiberState.ACTIVE`，稳定的 PENDING 不代表已经执行插件。Context 本身也没有 `dispose()`，清理入口是所属 fiber 的 disposer。
+
+修法：Linux pluginHost 等待真实 fiber 激活，拒绝非 ACTIVE；失败时 dispose 已创建的 fiber，显式卸载及宿主卸载同样等待 disposer。目录以 `DSH_FILES_DIR` 为根做 realpath 校验，不把外部发行资产或 `$HOME/.dsh` 当作在场事实。bootstrap/runtime 是我们自己的实验性内部插件，随应用放入内置（hard）插件目录但**默认不启用（存在 ≠ 启用）**；未启用（无 `linuxBootstrap` 服务）时 API 503 且设置入口不注册。
+
+**0.15.0 追加（同一个坑的第二形态：把 fiber 包成普通对象会丢可等待性）**：`install` 要交出 bootstrap 要求的 `{manager}`，就得读激活作用域里的 `linuxRuntimeManager`，于是宿主把 fiber 适配成 `{state, dispose, get}` 的普通对象——普通对象**不可 await**，`await activation` 立刻返回，`state` 还在 PENDING，健康的异步 `apply()` 被误判成「did not become active」。修法：适配器保留 `ready`（承载 fiber 自身的 thenable 结算）并在 ACTIVE 判定前 await；`state` 用 getter 保持实时。适配器 `cordisScope` 由模块导出，`src/index.ts` 与单测共用同一份，避免「宿主能读到服务、测试读不到」的两侧漂移。
+
+复验证据：`plugins/dsh-android-linux-env/test/linux-environment.test.mjs` 用真实 Cordis 跑异步服务提供/卸载，另注入启动异常和缺依赖反证，断言失败不能留下部分服务；在场用例覆盖平铺/版本化布局、越级目录名、外逃符号链接，以及「先激活 → 手工移除 → 在场转 false 且 install 失败关闭、运行中 scope 不被写回」这条不复活链。`install` 无 manager 时报 bootstrap 原文错误、`rollback` 释放作用域、以及「只有 install/uninstall 齐全才算 manager」各有用例。`settings.section` 的归属反证：`dsh-client-ui-slots` 对 list 槽重复 id 抛错，故壳侧同名分区已于 0.15.0 撤回（见 modules.md），未启用时无入口。
+
+356. **引擎侧（Node/Cordis）没有反向通道调用壳侧 Kotlin —— 「让宿主提供原语」必须走客户端或新队列（Linux 资产 IO 实证）**：
+
+现象：设计「引擎侧 bootstrap 需要宿主做下载/解包」时，直觉是「插件直接调 Kotlin 桥方法」。实际结构不支持这个方向：壳侧是**客户端**，长轮询引擎的 `/api/android/ui/pending`（`ControlPoller.kt:48` `BASE = http://127.0.0.1:3080`、`:101-113` 取 `{reqId,op,args}` 执行、`:138` 回投 `/api/android/ui/result`），路由由引擎侧 `registerControlRoutes` 注册（`plugins/dsh-android-bridge/src/control-queue.ts:345-369`）。`app/src/main` 全树**没有** `ServerSocket`/`HttpServer`，唯一直连是 WebView 的 `@JavascriptInterface`。
+
+真因：那条队列**就是设备控制队列**，其策略要求 `danger-full-access`（`control-policy.ts:68`，`:84-87` 以「会话档位为 X，设备控制面要求 danger-full-access」拒绝）。把 Linux 资产下载挂上去 = 「装 Linux 必须先开设备控制档」，与用户「Linux 不是沙箱、不要只靠 danger-full-access」的要求相悖；而 `dsh-android-bridge` 对外只 `provide('androidPrivilege')`（`index.ts:1608`），没有任何「入队」可给第三方插件用。
+
+修法：字节获取走**客户端触发**（页面 `@JavascriptInterface` → 宿主下载/校验/解包），不新增引擎→壳能力、不动镜像面的 `ControlProtocolV2.SUPPORTED_OPS` / `ControlOp`。另一条路（新增一条**非门禁**的资产队列）会引入一个「任何能访问引擎 localhost 的东西都可调用」的新特权原语，得不偿失。
+
+复验证据：`app/src/test/java/com/dsharnessmobile/shell/LinuxAssetIOTest.kt`、`LinuxAssetPrepareTest.kt`（16 例）：来源面（http/非白名单主机/跨仓/latest 非版本化/带 query/多一段路径全部判红）、落点面（绝对路径/`..`/NUL）、摘要与字节数各自的负控、穿越与符号链接逃逸的「不得落地」断言、解压炸弹（条目数/单文件）判红、以及环境不在场/来源不合规时**在起线程之前**拒绝（连网络都不触达）。
+
+357. **会话标题跑马灯的 scroll 会误取消长按拖动**：
+
+现象：长标题会话长按后没有蓝色侧开接收区，短标题却能触发。CDP 事件轨迹显示，手指静止时标题后代连续发送 scroll，400ms 长按尚未达成就被清掉。
+
+真因：侧栏拖动在 document capture 上把所有 scroll 都当成列表滚动。标题 hover 跑马灯也会横向滚动，其事件经同一路径到达，造成误取消。
+
+修法：只在源行祖先容器实际滚动时取消待激活长按；忽略源行及后代的标题滚动。侧开落点先捕获会话身份，再结算排序，避免排序收尾重建节点后丢失打开动作。退出及卸载清除蓝区和动效计时器。
+
+复验证据：`dsh-client-ui-responsive/tests/conversation-dock.spec.ts` 同时覆盖标题滚动不取消、祖先滚动取消、排序收尾移除源节点仍准确打开、提前删除源节点不打开。设备轨迹与热推结论见本轮 PR。
+
+358. **旧 WebView 将自定义协议 URL 当作无 host 路径，子代理原生侧开被拒**：
+
+现象：`new URL('dsh-resource://subagentchat/session/<child>?parent=<parent>&mode=continuable')` 在设备上给出空 hostname，pathname 带 `//subagentchat/`；原生 `subagentchat` 类型据此拒绝有效地址。模拟器上的普通侧开按钮也可复现。
+
+修法：新增对话拖动入口使用自身的 conversation 资源格式，以明确前缀、编码后的路径和 URLSearchParams 解析直接父子地址，不依赖自定义协议的 hostname。子代理身份来自运行时目录，完整核对弹窗行序、层级和标签；身份不一致则不打开。保留原生子代理提供方，避免修改全局 URL 或服务方法。
+
+触摸还须在长按前对会话与子代理行禁止原生文字选择及 HTML drag，否则 WebView 先发 touchcancel，JS 的 dragstart 拦截会来不及。只在 coarse pointer 下禁用这些原生行为，桌面鼠标原有排序不受影响。
+
+复验证据：`dsh-client-ui-responsive/tests/conversation-dock.spec.ts` 覆盖同名条目、目录漂移、父子路由与引用隔离；设备证据与运行树哈希见本轮 PR。
+
+
+359. **原生管理页不可把配置脱敏结果当完整替换文档**：`settings/describe` 会省略敏感值；把这份 user 对象交给 `settings/replace` 会重建可编辑配置并丢失未回填字段。原生页面改用 `settings/mutate` 按字段合并保存，携带 `expectedRevision`；密码框留空不提交。插件启停的 `ChangeResult.application=failed` 也不保证磁盘未变，必须重新读取状态。停用前后比较完整运行清单，发现其他 active 插件失活则补偿目标状态并核验恢复。测试见 `PluginManagementRepositoryTest.kt`，设备范围见本轮开发报告。
+
+360. **插件库存 ID 与 Hard 清单 ID 不在同一层**：真实 `pluginManager/listPlugins` 返回 `include:<profile id>`，受保护条目可能没有 `patchId`；Hard manifest 保存配置 ID。直接比较库存 entryId 会漏掉过滤。本轮设备返回 197 个条目，按当前清单映射后命中 192 个 Hard 条目。仓储按 exact moduleName 加 profile ID（可信 patchId 或根 include 路径）匹配，启停入口也独立复核；禁止只在 UI 按名称或目录过滤。回归测试包含没有 patchId 的真实树前缀反证。
+
+361. **齿轮点击矩形波纹与切页端点跳位**：通用 `DsUi.ripple` 只复制 cornerRadius，传 oval 时 mask 仍是矩形；原生管理齿轮改用独立 oval mask，并只旋转 RotateDrawable。原切页按目的页交换两个加权内容区，动画端点又根据进度隐藏目标内容区，导致同一帧无 View 占满剩余高度，底部操作区跳到顶部。两页改为单个稳定加权 FrameLayout 内切换，操作区不参与内容切换测量。构建与回归证据见 `.deploy-tmp/management-ui/gradle-gear-fix.log` 及同目录 `gear-fix-*.png`。
+362. **引擎的 V8 堆此前无人管理：没人设过上限，它只由设备物理内存推导——小内存设备可能推出连 boot 都撑不住的值（本轮实修，L3）**：
+
+现象：社区反馈「因为 Node 进程的 JavaScript 堆太小而导致引擎启动失败」。反馈者未提供诊断包（自行修完后才说），故**没有第一手现场**。
+
+真因（源码级确证，非猜测）：全链路**没有任何一处为引擎设定 V8 老生代上限**——
+① 引擎 argv（`EngineManager.startWithArgs` 的 `val args = arrayOf(nodeBin…, "--expose-internals", dshBin…, "web", …)`）没有堆标志；
+② `shellEnv()` 注入的 20 余个变量里没有 `NODE_OPTIONS`；
+③ profile（`scripts/profile-web.cordis.patch.yml`）也没有。
+于是 `heap_size_limit` 完全由 V8 按物理内存推导。**实测口径**（逐档回读 `v8.getHeapStatistics().heap_size_limit`）：
+6GB 设备 1120MB / 4GB 设备 1075MB / 3GB 设备 844MB；设 `--max-old-space-size=N` 则恒为 **N+96MB**（512 到 608、256 到 352、2048 到 2144）；
+**引擎最小可用堆约 70MB**（64MB 起步在约 21s 内 `FATAL ERROR: Reached heap limit`）。树里那个 `512` 是 **PTC 子进程专用**（patch A1/L1 走 `NODE_OPTIONS`），与引擎本体无关——这正是「看起来有人管、其实没人管」的误导来源。
+**未证实**（如实登记）：到底**是谁**在反馈那台设备上把堆压小的，仍无直接证据；候选是未知的显式注入 / 用户自起引擎 / 小内存推导。本修法不依赖该答案——它把「没人管」变成「有下限兜住」。
+
+修法（两个注入点，必须是同一个 clamp 区间 `clamp(总内存/2, 512, 1024)MB`）：
+① **壳侧**：`shellEnv()` 注入 `NODE_OPTIONS=--max-old-space-size=<engineHeapMb(deviceTotalRamMb())>`。用 `NODE_OPTIONS` 而不是 argv，因为**argv 会覆盖 NODE_OPTIONS**（实测 argv 2048 + env 512 得 2240），二者表达同一件事必冲突；
+② **快照内启动器**：`usr/libexec/dsh-node`（C1 wrapper）在 `NODE_OPTIONS` **未设置**时按设备 `/proc/meminfo` 自适应填同一个区间。为什么必须双源：有些调用方给子进程的是**过滤后的 env**（PTC 只放 6 个名字），壳侧注入到不了那条路径。启动器必须**不覆盖**调用方显式给的值（PTC 的 `maxOldGenerationSizeMb` / 用户自定义优先）。
+
+**诊断面的同型缺陷（本次一并修）**：`describeEngineLogState()` 此前只报 `firstLine`（首个非空行），而真实的堆 FATAL **不是首行**——本轮设备实测捕获的输出里它是**第 6 行**（前面是 4 行 GC 统计 + 空行）。
+后果：一次堆 OOM 在 `boot-fail.log` 里显示成一句无害的开场白，真因彻底不可见（与「兜底码丢真因」同族）。现新增独立 `heapOom=` 字段（与 `firstLine` **并存**，仅在真出现时写）。
+判据按「FATAL 级 + 堆语义」而非逐条枚举原句——枚举会随 V8 版本过时：本轮测试**当场抓到**漏了 `MarkCompactCollector: young object promotion failed` 一族（该行不含 `heap` 字样）。
+另在 boot-segments 的 `note=boot-start` 行追加 `engineHeapMb=`，让「这次到底给了多大堆」第一次成为可核对事实（此前任何诊断面都取不到）。
+
+判据与门禁：`scripts/check-engine-heap-floor.mjs`（已进 `check-release-gates.mjs` 声明集合，本地链 / 云端链 / apk CI 三处接线，静态接线断言核过）。
+它断言：壳侧两常量在场且为正、取值走 clamp 而非裸除法、读不到内存退回下限、启动器真读 meminfo 且除数为 2048（KB 转一半 MB）、**双源上下限逐值相等**、启动器不覆盖已设值、argv 不含堆标志。
+`--self-test` = 1 正样本 + **8 条受控负控**（删下限 / 去 clamp / 去自适应 / 上下限分叉 / 除数改坏 / 无条件覆盖 / argv 混标志 / 上限分叉），逐条证明仍会判红。
+JVM 边界测试在 `EngineBootInstrumentationTest`（取值与 clamp 边界、退化输入不得逃出下限、标志格式可被 parseInt）；源码扫描接线在 `W3ShellContractTest`（函数写得对但没接进 `shellEnv()` 即判红，防「能力在、入口无」）。
+
+**设备实测证据（本轮）**：模拟器 Android 16 上真实复现并捕获堆 OOM 原文（`--max-old-space-size=64`），该真实多行输出已固化为回归用例 `heapExhaustionIsDetectedOnRealCapturedV8OutputWhereFatalIsNotTheFirstLine`——覆盖「真实 FATAL 不在首行」这一关键形态，而不是只测构造的简写。
+启动器算术在设备上用合成 MemTotal 逐档对照 Kotlin 口径，12 档（256MB 到 16GB）**逐值一致、0 处不符**；显式预设 `NODE_OPTIONS` 时启动器确实不覆盖。
+**未覆盖（不记通过）**：未在真机（arm64 / Enforcing）验证；未验证「堆下限真的让某台小内存设备从起不来变成起得来」（手头模拟器均 ≥3GB，自然推导值本就高于下限）——该因果只能由反馈设备的复现来确认，本轮给出的是「下限已被显式兜住」与「诊断面能看见堆 OOM」两条。
+
+**为什么不把堆调到多 GB**：`lmkd` 会把堆开得过大的进程杀掉，且会**掩盖**真实内存缺陷；上下限（512/1024）在最小可用值之上留足量级，又不越过实测的自然推导值太多。
+**同轮踩到的两个既存问题（都不是本次改动引入，一并如实登记）**：
+① `ptc-node-wrapper-c1.test.mjs` 的「带可执行位」判据把 `writeFileSync(...)` 与 `{ mode: 0o755 }` 之间的窗口写死为 400 字符——wrapper 内容一长（本次加了堆下限段）就**假红**。已把窗口放宽到 2000 并补三条锁新行为的判据（未设时才填、自适应 clamp、落在 `exec` 之前）。教训：这类「窗口长度」是恒定量，本质是在断言「实现必须短」，与真正要守的语义（同一个 `writeFileSync` 落了 755）无关。
+② `combo-probe-p1.test.mjs` 的「重复 phase 记录聚合到固定阶段行」判据把行数上界**写死成常量 `<= 2`**，实际是在断言「这段洪水必须在 2 个窗口（500ms）内跑完」——而窗口本身是 250ms（`dshMobileComboProbePhaseWindowMs`），16 轮 × 25ms 的 sleep 加上每轮构造的真实开销必然落在多个窗口里（本机实测稳定 3 行：窗口起点 531.6 / 798.4 / 1086.4ms，共约 1.1s）。机器一慢或构造一变重就假红；且**纯净 `origin/main` 上同样判红**（用 detached worktree 复现确认），是 `check-patch-test-manifest.mjs` 的未声明失败来源，会随机卡住本地全链构建。
+   修法：断言的应是**被守着的不变量，不是这台机器的速度**。改为按实测耗时算窗口上界（`ceil(elapsedMs/250)+1`）并要求 `行数 < 轮数`——后者才是「聚合」的判据（退化成事件级 push 时 16 轮会产出 16 行）。受控负控已验证：把窗口改成 1ms（等价于每事件一行）时新判据判红（`constructorRows=16 rounds=16`），证明它没有变成恒绿。修后连跑 5 次全部通过（修前 5 次红 3 次）。
+
+364. **Shizuku 的 remove=true 不会清 SDK 连接缓存，超时只清本地记账会反复卡在建链中（2026-10-17）**：授权后一直显示建立通道，重置也可能被旧回调打回未连接。固定依赖 API 13.1.5 的实际字节确认：`unbindUserService(remove=true)` 仅移除远端服务；只有 `remove=false` 才清理应用内的连接集合与缓存。旧实现复用一个 ServiceConnection，后台注册又与主线程回调并发，超时也没有移除远端坏实例。修法：SDK 生命周期统一排入主线程；先注销缓存，再按需移除远端；每次绑定独立回调、latch 与 generation，重置/超时后的迟到回调无效。状态机回归覆盖旧连接、旧断连、旧异常与重复回调；设备与 CI 证据随本次 PR 记录。
+
+
+365. **自动合并不会发现新文件对本分支退役功能的引用（2026-10-17 上游同步）**：管理中心新文件直接引用 `updateButton`、`apkUpdate`、`GuidePhase.Updating`，Git 自动合并没有代码冲突，但 Kotlin 编译实际失败。根因是上游保留应用内更新，本分支已整体退役。删除新文件中的更新入口和状态引用，保留插件、存储及控制台功能；不能用复活控制器的方式凑编译。编译与测试日志在 `.deploy-tmp/upstream-20261017/kotlin-final.log`，设备未验，范围见 SECURITY-HARDENING.md 本轮复核。
