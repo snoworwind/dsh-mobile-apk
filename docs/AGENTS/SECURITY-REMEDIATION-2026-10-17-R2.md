@@ -40,8 +40,9 @@
 - 桥对称、API 路由鉴权、Manifest、Kotlin 注释、补丁 id 自洽、vendor 补丁在场、执行地图、维护文档、Linux vendor 摘要检查通过；执行地图及 Linux vendor 的自检/负控通过。各日志按上述本机前缀保存。
 - 新字节门禁实际检查旧来源快照：319 个源码包及 pnpm 物理载荷对账通过，随后既有 narb-android-N1 副本门禁拒绝旧产物，完整命令 exit 1。见 `security-r2-existing-snapshot.log`；这不是新候选来源链通过，旧产物不得用于本轮交付。
 - **云端来源链实测（2026-10-18 00:00 前后）**：[run 39047619605](https://github.com/snoworwind/dsh-mobile-apk/actions/runs/39047619605)（`build-apk` 的 `draft_release=true`，HEAD `df5e295`）第 1–19 步全部通过（包含 17 项修复后的 Harness/插件/Termux/快照前置步骤），第 20 步「Build runtime snapshot from verified inputs」在**来源包 payload pin** 处失败：`@deepseek-ai/dsh-api-gateway: immutable source payload pin mismatch`。这是 pin 判据不可满足，不是构建或 17 项修复的失败；草稿未创建。随后撤回该判据（revert `5472ce9`，提交 `c37f354`），原因与证据见下节。该 run 的日志是「17 项修复能走完快照前全部构建」的云端证据，但不等于快照/APK/设备通过。
+- **云端草稿成功（2026-10-18 01:13）**：[run 39050643684](https://github.com/snoworwind/dsh-mobile-apk/actions/runs/39050643684)（HEAD `bb8176a`，撤回 pin 后的最终源码）四个 job 全过：`branch → build-arm64 → prepare → draft`。创建 Release `hardening-source-bb8176a9ca99-39050643684-1`，**isDraft=true、isPrerelease=true**，target 提交 `bb8176a9ca99…`；资产恰为 4 个：`dsh-mobile-apk-v0.14.7-source-arm64.apk`（161,215,810 B）、`provenance.zip`（2,837,504 B）、`SHA256SUMS.txt`、`notes.md`。本机重新下载 APK 与 provenance 并按 SHA256SUMS 复算：APK `63b5dedc34eb…`、provenance `04581f9b5c92…` 均一致；provenance.zip 内含 source-build-manifest、component/project provenance、gradle/apk 摘要等预期证据。草稿说明明确标注「Device validation has NOT been performed」。该 Release 未公开，仍需设备三层验收后才能发布。
 - **未做设备验证**：本机 adb 可执行，设备列表为空；16416、16384 两个模拟器连接拒绝。没有 CDP、ADB 自主真实任务、双方向截图或真机证据。L2/L3 验收仍阻塞，不能作为发布候选。
-- 未生成本轮 APK；后续仅允许最终已提交源码的来源链。旧 APK、热推与宿主单测不能代替。
+- 已由云端来源链生成 ARM64 APK 并进入**草稿** Release（见上条），未公开；设备层未验，旧 APK、热推与宿主单测不能代替。
 - 已实际启动本地完整来源链（来源输入 `0f917ed`，隔离目录 `/tmp/dsh-source-chain-tbcbnf`）；先后暴露本地缺 GitHub runner 环境变量、隔离检出无 origin 两个环境前提，补齐值均来自本轮任务目录和原工作树实际仓库坐标，不改校验规则。执行到第 12/19 步（node-pty/NDK 交叉编译的 704 MB 下载）因会话中断停止，未进入快照与 APK 步骤；该目录保留用于取证（下节的字节对账就来自它）。本地链不是候选产物的来源，云端 run 39047619605 才是本轮流水线的权威证据。
 - 本轮解压参考树在 finally 清理。工作区清理脚本在本仓及已知相邻入口均不存在，未臆造全树删除命令；旧缓存未删除，仅保留本轮日志、编译产物和测试依赖。
 
