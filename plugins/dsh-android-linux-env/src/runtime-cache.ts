@@ -264,6 +264,10 @@ export function scanTargets(dshHome: string, logRoot: string): { targets: Cleanu
       const candidate = join(logRoot, CURRENT_ENGINE_LOG + '.' + String(generation))
       if (!existsSync(candidate)) continue
       try {
+        if (!lstatSync(candidate).isFile()) {
+          skipped.push({ id: 'engine-log-' + String(generation), path: candidate, reason: 'not-regular-file' })
+          continue
+        }
         const measured = measure(candidate)
         targets.push({
           id: 'engine-log-' + String(generation),
@@ -389,13 +393,20 @@ export function executeCleanup(
     }
     let result: CleanupItemResult
     try {
+      const isLog = plan.logRoot !== '' && ROTATED_LOG.test(relativeUnder(target.path, plan.logRoot) ?? '')
       // 执行前对每一项再复核作用域：扫描与执行之间若有任何状态漂移，拒绝而非误删。
       if (!insideAllowedScope(target.path, plan.dshHome, plan.logRoot)) {
         result = { id: target.id, path: target.path, status: 'skipped', bytes: 0, reason: 'scope-rejected' }
       } else if (!existsSync(target.path)) {
         result = { id: target.id, path: target.path, status: 'skipped', bytes: 0, reason: 'vanished' }
+      } else if (isLog && !lstatSync(target.path).isFile()) {
+        result = { id: target.id, path: target.path, status: 'skipped', bytes: 0, reason: 'not-regular-file' }
       } else {
-        remove(target.path)
+        // Log slots never authorize recursive deletion, even if replaced after lstat.
+        if (isLog) {
+          if (options.remove) options.remove(target.path)
+          else unlinkSync(target.path)
+        } else remove(target.path)
         result = { id: target.id, path: target.path, status: 'removed', bytes: target.bytes }
       }
     } catch (error) {

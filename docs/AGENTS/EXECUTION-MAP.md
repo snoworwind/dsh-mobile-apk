@@ -1475,7 +1475,7 @@ vendored bootstrap 与注入集的关系（0.15.0）：`plugins/dsh-linux-bootst
   - `plugins/dsh-android-file-open/src/index.ts:525` — 五条 exact 路由的鉴权注册（拒绝先于 method 判定与任何副作用）
   - `plugins/dsh-android-file-open/src/index.ts:216` — `purgeStaleUnclaimed('boot'|'ttl')`：未认领草稿的墓碑化判据
   - `plugins/dsh-android-linux-env/src/index.ts:353` — 两条 env 路由的 `wsvc.register`（对照同文件 `:342` 注释与 `:386/:400` 的 `ctx.effect` 形态）
-  - `plugins/dsh-android-linux-env/src/runtime-cache.ts:469` — `insideAllowedScope`：执行前的第二道白名单闸门
+  - `plugins/dsh-android-linux-env/src/runtime-cache.ts:492` — `insideAllowedScope`：执行前的第二道白名单闸门；历史日志另在扫描与执行端核对普通文件，默认只 unlink，禁止递归删除日志槽目录（坑 367）。
   - `plugins/dsh-model-capability/src/index.ts:134` — `pickDialect`：无 `compat.thinkingFormat` 即不写 `reasoningEfforts`（坑 54）
   - `plugins/dsh-model-capability/src/settings-writer.ts:239` — 唯一的 settings 写入点（set + revision + 冲突重试）
 - **不变量**：

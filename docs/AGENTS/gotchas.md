@@ -2433,3 +2433,13 @@ JVM 边界测试在 `EngineBootInstrumentationTest`（取值与 clamp 边界、�
 **代码层证据**（`.deploy-tmp/linux-security-fix/`）：Linux-env 61 项全过，包含真实 USTAR/XZ、等长篡改缓存、篡改宿主树、真实 bootstrap 的 HTTP 安装/重装/卸载、未确认拒绝及不安全归档；旧完整性实现使两条等长反证判红，撤掉确认参数使真实路由用例判红（negative-summary.log、negative-integrity.log、negative-confirmation.log）。WSL Java 17 全量 Kotlin 119 类/1305 项，失败/错误/跳过均为 0；LinuxAssetPrepareTest 从 10 提升到 14，新增无效请求不释放 busy、调度/工作异常收敛及陈旧完成拒绝。日志 kotlin-tests.log。
 
 **边界**：未做设备验证；ADB 无设备，两模拟器均 connection refused（adb.log）。本轮未构建 APK、未执行 CDP/ADB 自主任务，不宣称完成 L2/L3 三层关闭。bootstrap 的注入和页面调用者缺口不因源码修复而关闭；来源链候选还须核对新增依赖及许可资产。此修复不提供对任意同 UID 恶意进程并发替换 staging 的通用沙箱保证。
+
+367. **历史日志文件名不能授权递归删除目录（2026-10-17）**
+
+现象：`/api/android/runtime-cache/execute` 在服务端重新扫描后执行清理，`scanTargets` 对 `engine.log.1..32` 只检查存在性，`measure` 接受目录，执行端再按文件名通过白名单后调用通用 `removeTree`。因此只需日志槽变成目录，目录内任意内容就会被递归删除；扫描后把普通日志换成目录同样可触发。需要具备日志根写权限或出现错误的目录落点，并非已证实外部应用可无权限触发。
+
+修法：扫描与执行都用 lstat 限定普通文件，目录、链接及特殊文件跳过为 `not-regular-file`；默认日志删除只调用 unlink，不调用递归删除器，即使类型检查后变成目录，也只能删除失败，不能下探。真正的编译缓存仍走原目录清理路径。源码与本地忽略的 lib 构建产物已同步，不改变插件声明与版本。
+
+证据：`npm.cmd --prefix plugins/dsh-android-linux-env run build` 通过；WSL `node --test plugins/dsh-android-linux-env/test/*.test.mjs` 63 项通过，日志 `.deploy-tmp/cache-security-wsl-tests.log`。两条新增用例检查目录内容逐字节保留、普通历史日志仍删除；把 HEAD 旧源码经 TypeScript 转译后替换测试导入，运行 `node --test --test-name-pattern="log-looking|execution rechecks" .deploy-tmp/cache-security/negative.test.mjs`，2 项均失败（`.deploy-tmp/cache-security/negative.log`）。执行地图门禁通过。Windows 全套 57 通过、6 项资产安装在目录 rename 报 EPERM，记录于 `.deploy-tmp/cache-security-tests.log`，不能当成全绿；同批在 WSL 全过。
+
+边界：未构建 APK、未做设备验证。当前 PowerShell 找不到 adb，WSL 的 PATH 与常用安装位置也未找到；未执行 CDP/ADB 用户任务。数据删除行为尚未完成设备验收，不能随候选发布。此修复不提供同 UID 恶意进程并发替换缓存树、日志父目录或普通文件内容的通用隔离保证。

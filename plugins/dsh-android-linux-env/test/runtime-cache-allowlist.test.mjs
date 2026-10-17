@@ -25,6 +25,36 @@ import {
   scanTargets,
 } from '../lib/runtime-cache.js'
 
+test('log-looking directories are not scanned or recursively deleted', (t) => {
+  const { root, home, files } = fixture()
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  const slot = join(files, 'engine.log.1')
+  rmSync(slot)
+  mkdirSync(slot)
+  writeFileSync(join(slot, 'important.txt'), 'USER DATA')
+  const plan = planCleanup({ DSH_HOME: home, DSH_FILES_DIR: files })
+  assert.equal(plan.targets.some(item => item.path === slot), false)
+  assert.ok(plan.skipped.some(item => item.path === slot && item.reason === 'not-regular-file'))
+  executeCleanup(plan)
+  assert.equal(readFileSync(join(slot, 'important.txt'), 'utf8'), 'USER DATA')
+  assert.equal(existsSync(join(files, 'engine.log.2')), false)
+})
+
+test('execution rechecks log type after scanning and preserves replacement contents', (t) => {
+  const { root, home, files } = fixture()
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  const plan = planCleanup({ DSH_HOME: home, DSH_FILES_DIR: files })
+  const slot = join(files, 'engine.log.1')
+  assert.ok(plan.targets.some(item => item.path === slot))
+  rmSync(slot)
+  mkdirSync(slot)
+  writeFileSync(join(slot, 'important.txt'), 'USER DATA')
+  const report = executeCleanup(plan)
+  assert.ok(report.items.some(item => item.path === slot && item.status === 'skipped' && item.reason === 'not-regular-file'))
+  assert.equal(readFileSync(join(slot, 'important.txt'), 'utf8'), 'USER DATA')
+  assert.equal(existsSync(join(files, 'engine.log.2')), false)
+})
+
 /** 造一份 fixture 树：DSH_HOME 下的用户资产 + 白名单内/外的缓存目录 + 日志世代。 */
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'dsh-runtime-cache-'))
