@@ -897,7 +897,7 @@ class MainActivity : ComponentActivity() {
           view.loadUrl(url)
           return true
         }
-        downloadSaver.openInExternalBrowser(request.url)
+        downloadSaver.openInExternalBrowser(request.url, request.hasGesture())
         return true
       }
 

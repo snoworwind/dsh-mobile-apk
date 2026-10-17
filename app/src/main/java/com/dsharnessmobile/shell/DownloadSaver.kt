@@ -19,6 +19,19 @@ internal fun isEngineSource(url: String): Boolean = EngineProbe.isEngineOrigin(u
 /** 会话日志导出端点路径（WebView 内双拦截识别用）。 */
 internal const val SESSION_EXPORT_PATH = "/api/session.export"
 
+/** A renderer navigation may open another app only for a user-selected web address. */
+internal fun canOpenExternalBrowser(url: String, hasGesture: Boolean): Boolean {
+  if (!hasGesture || url.any { it <= ' ' || it == '\\' || it == '\u007f' }) return false
+  return try {
+    val parsed = java.net.URI(url)
+    (parsed.scheme.equals("http", true) || parsed.scheme.equals("https", true)) &&
+      !parsed.host.isNullOrEmpty() && parsed.rawUserInfo == null &&
+      (parsed.port == -1 || parsed.port in 1..65535) && !isEngineSource(url)
+  } catch (_: Exception) {
+    false
+  }
+}
+
 /** 命中判定：引擎源 + 会话导出路径 + GET（HEAD 是前端预检，不得触发跳转）。 */
 internal fun isSessionExport(url: String, method: String): Boolean {
   if (method != "GET" || !isEngineSource(url)) return false
@@ -132,13 +145,14 @@ internal class DownloadSaver(private val activity: MainActivity, private val dsh
     }.start()
   }
 
-  fun openInExternalBrowser(uri: Uri): Boolean {
+  fun openInExternalBrowser(uri: Uri, hasGesture: Boolean): Boolean {
+    if (!canOpenExternalBrowser(uri.toString(), hasGesture)) return false
     if (!exportLaunching.compareAndSet(false, true)) return true // 已在途：吞掉重复触发
     return try {
-      activity.startActivity(Intent(Intent.ACTION_VIEW, uri))
+      activity.startActivity(Intent(Intent.ACTION_VIEW, uri).addCategory(Intent.CATEGORY_BROWSABLE))
       true
     } catch (_: Exception) {
-      // 无浏览器可处理：回退 MediaStore 下载路径
+      // No compatible browser: leave the page in place and report launch failure.
       false
     } finally {
       exportLaunching.set(false)
