@@ -97,6 +97,8 @@ All listed preferences use app-private SharedPreferences storage. They survive A
 
 Do not copy raw preference files into ordinary diagnostics or exports: several contain authentication secrets. No UndoGate durable state is stored in SharedPreferences; its recovery authority is the named app-private files above.
 
+**"app-private" 只对别的应用成立，对同 uid 的 agent 不成立**：引擎（Node）由壳以同一 app uid spawn，模型自带的 bash 可读写本表全部 XML；`dsh_screen_scope`、`dsh_root_grant`、`dsh_root_access` 三个文件因此也是**用户授权门的可写存储**，没有 MAC/签名。2026-10-17 晚第二轮挖掘把这一点登记为已知未修风险（坑 376，[SECURITY-AUDIT-2026-10-17-R2.md](SECURITY-AUDIT-2026-10-17-R2.md)）；在它关闭前，不得把本表当成「模型改不了」的依据。
+
 ## 原生插件管理的待重启状态
 
 `PluginManagementRepository` 新增 SharedPreferences `plugin_management_pending`。键绑定插件 entryId 与 moduleName，只保存已被运行时确认持久化、但需要重启的期望启用状态；运行时实际状态匹配后移除。实际配置仍由引擎 `pluginManager` 写入原有 profile patch。配置编辑走 `settings/mutate` 与 revision 校验，省略的字段（包括脱敏 secret）保持原值。本改动不迁移或重写用户文件。

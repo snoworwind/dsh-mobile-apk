@@ -2497,3 +2497,75 @@ CI 39011926728（9bf4ed4）在 `check-contract.mjs` 仅报一条失败：`androi
 375. **版本标签不能固定 CI 外部代码身份（2026-10-17）**
 
 真因：actions 的 @vN 标签可在本仓审查后重新指向，影响来源构建及持写 token 的发布任务。修法：四个 workflow 固定外部 action 的官方完整 commit，新增固定引用门禁与受控可变 ref 负控并接入生产预检；Node 来源套件 98 项、Python 8 项通过。此项是供应链防护，不是已证实的上游入侵；信任边界与日志见 [本轮审计记录](SECURITY-AUDIT-2026-10-17.md)。未做设备验证。
+
+<!-- 以下 376-392 为 2026-10-17 晚第二轮挖掘的登记项：用户明确要求「先不修，先记到项目文档」。
+     因此没有修法、没有新增回归用例；证据等级与未证边界逐条写在
+     [第二轮审计](SECURITY-AUDIT-2026-10-17-R2.md) 同名条目里。 -->
+
+376. **「用户拥有」的授权状态本身在 app-uid 可写文件里，模型自带 bash 可直接改写（2026-10-17 登记，未修复）**
+
+现象：屏幕范围（`ScreenScope.kt:52-66` 的 `dsh_screen_scope`/`scope`）、AI root 同意与开关（`RootGrant.kt:63-73/160-185` 的 `dsh_root_grant`）、应用 su 授权态（`RootAccess.kt:55-57` 的 `dsh_root_access`）都是普通 SharedPreferences，无 MAC/签名；唯一执行门 `ShizukuTransport.rootGateRefusal`（`ShizukuTransport.kt:987-995`）只查 `RootGrant.isGranted`。引擎由壳以同一 app uid spawn（`EngineManager.kt:1462`、`:2287-2341`），README:16 明写「能真实执行 bash」，因此模型可写 `$DSH_FILES_DIR/../shared_prefs/*.xml` 伪造 `granted=true`/`consentRevision=1`/`scope=all`。边界：prefs 进程内缓存，需在首次读取前写入或让壳进程重启（`EngineService` 是 START_STICKY）；未做设备验证。详见 [R2 审计 376](SECURITY-AUDIT-2026-10-17-R2.md)。
+
+377. **桥面「用户专属」写方法没有用户在场证明，第三方客户端插件与页面同源（2026-10-17 登记，未修复）**
+
+现象：`setScreenScope`（`AndroidBridge.kt:343-349` → `MainActivity.kt:1208` 直接写 pref）、`setRootConsent`（`:508-518`）、`setRootGranted`（`:497-506`）、`unlockRestrictedSettings`（`:445-447`）都没有前台/焦点校验、没有一次性手势 token；唯一门是 `MainFrameBridge` 的顶层同源判断（`MainFrameBridge.kt:96-119`），而 BRIDGE-API.md:21 自述「不承诺隔离同源任意脚本」。与 380 成链：无确认安装的市场插件，其 client 脚本可在引擎页静默勾同意、开 root 开关、改屏幕范围。未做设备验证。
+
+378. **3080 中继的 32 个槽位无鉴权，本地任意应用可占满并阻断 WebView→引擎（2026-10-17 登记，未修复）**
+
+真因：`EngineTransport.kt:18` 全局 `Semaphore(32)`，`:78` 拿不到槽位就 `client.close()`；TCP 接入没有 uid 校验（350/352 修的是 Unix socket 侧与监听者冒充），单连接 60s 空闲超时还会被任意字节续期（`:101-116`）。本地零权限应用开 32 条连接即可让第 33 条（WebView 自己）被关掉。属可用性缺陷，无提权/泄露；未在设备复现。
+
+379. **通知审批/提问动作可被任意通知监听应用代按（2026-10-17 登记，未修复）**
+
+现象：审批与提问的作答动作是 `PendingIntent`（`NotifyCenter.kt:1155-1166`、`:1231-1249`），任何持有通知访问权限的应用可从 `StatusBarNotification` 取到并 `send`；回复动作刻意 `FLAG_MUTABLE`（`:1191-1203`），可改写 `dsh.reply` 文本代答；`APPROVAL_REQUIRE_UNLOCK = false`（`:88-89`）且未调用 `setAuthenticationRequired`，锁屏亦可触发。`exported=false` 对 PendingIntent 不构成限制。未做设备验证。
+
+380. **市场安装把「是否需要用户确认」交给远端 riskFlags，空标记即无确认安装（2026-10-17 登记，未修复）**
+
+真因：`dshmarketplace-plugin`（`scripts/plugin-dirs.json:17`、`profile-web.cordis.patch.yml:52-53` 默认注入）的 `tools/pre-execute` 钩子只在 `riskFlags.length>0` 时返回 `{kind:"ask"}`，其余落到 `{kind:"allow"}`（`vendor/dshmarketplace-plugin/lib/index.js` 的 `y`/`M`/`b`）；安装执行 `dsh plugin add`，目标支持 `github:<owner>/<repo>`。远端目录因此是唯一判据，模型可在无用户确认下安装任意插件（引擎进程内 app uid 代码执行）。未实际调用市场工具。
+
+381. **Linux 运行时代码的信任锚是第三方仓 latest Release（2026-10-17 登记，未修复）**
+
+真因：默认 `https://github.com/kelai141/dsh-bionilux/releases/latest`（`linux-host-asset-io.ts:167`），壳侧只认该仓资产路径（`LinuxAssetIO.kt:66-74`），bootstrap 从**同一份** `linux-release.json` 取 `sha256` 再校验（`github.js:80-96`、`asset-bundle.js:37-92`）——摘要不是 APK 内固定值也不是独立签名。默认不启用（`environmentVerdict` 要求状态文件在场），启用后即把 app uid 的代码执行权交给该仓发布权限。详见 [R2 审计 381](SECURITY-AUDIT-2026-10-17-R2.md)。
+
+382. **model-capability 的响应体没有字节上限（2026-10-17 登记，未修复）**
+
+真因：`index.ts:743-748`（models.dev，启动期刷新）、`capability-probe.ts:403-409/541-547/579-585` 都是 `await response.text()` 后再解析，没有流式计数；唯一的尺寸门在 `models-dev.ts:333-338`，是读完之后才量。对照坑 373 已把 bootstrap 发现改成有界流式。影响：恶意/异常网关或 models.dev 源可让引擎 OOM；models.dev 在启动期刷新，超大响应会变成启动即崩。未构造大响应测试。
+
+383. **未鉴权的 `GET /api/android/privilege/status` 会触发一次特权控制队列占用（2026-10-17 登记，未修复）**
+
+真因：`plugins/dsh-android-bridge/src/index.ts:1917-1933` 用 `authorizePublicReadOnlyRoute`（401 放行），但 handler 在回包前 `await svc.shizukuChannelProbed()`（`:1930`）→ `controlExec('vdInfo')`（`:701-713`），占的是与模型设备工具共用的单槽队列（`control-queue.ts:141-144`）。登记表 rationale 写「no mutation route」，与实际副作用不符（`scripts/api-route-auth-policy.json`）。每 10s 一次即可让设备工具随机报「已有在途」。可达性依赖 350/352 后的中继仍转发本地连接（源码上是转发的）；未设备压测。
+
+384. **ADBKeyboard 的 auth nonce 未加引号拼进 uid 2000 命令（2026-10-17 登记，未修复）**
+
+真因：`plugins/dsh-android-manage/src/index.ts:43-52` 的 ` --es auth '${nonce}'` 未做引号转义（同函数对 `msg` 做了 `'` 转义，`:2006`/`:2029`）。nonce 正常是纯十六进制，属防御纵深缺口：同 uid 写坏 `adb-keyboard-nonce` 后，`android_ui_input` 的 uid 2000 命令可在单引号处断出。增量能力有限（模型本就有 `android_shell_exec`），但「输入文本」变 shell 应登记。
+
+385. **最终快照与源码没有字节级绑定（2026-10-17 登记，未修复）**
+
+真因：`check-dsh-source-snapshot.mjs:105-120` 只验快照内 `package.json` 的 name/version，再哈希**缓存里的 tarball**，从不比快照内实际运行的 JS 字节；manifest 与 tarball 都由同一次构建生成（`export-dsh-engine.mjs:94-101/106-121`），且都在可写工作区。坑 336 已确立「报告可被构建脚本改写、不可变字段必须从 Git 重建」的原则（`record-project-components.mjs:97-99`），本路径未应用。前置 = 构建期代码执行（被投毒依赖/构建脚本）；未改字节跑门禁。
+
+386. **`preinstall.json` 不从 `$GITHUB_SHA` 重建（2026-10-17 登记，未修复）**
+
+真因：`build-apk-source.yml:189` 用 `git show "$GITHUB_SHA:…engine-overlay.json"` 重建 overlay，而 `:513` 直接从工作树 `cp …preinstall.json`、`:515` 原地改、`:609-611` 用这份「原件」恢复。`preinstall.json` 决定 Termux targets、pnpm standalone 版本、canvas npm 包（`build-snapshot-013.mjs:59/71/727/840-841`），且复制点在所有构建动作之后。构建期改写或本地续跑目录里的改动可让快照装入不在 commit 里的包。未实际篡改。
+
+387. **pnpm standalone 与 canvas 只以同一服务器自声明的 sha512 校验（2026-10-17 登记，未修复）**
+
+真因：`build-snapshot-013.mjs:744-753`（缺 `dist.sha512` 只 warn 跳过）与 `:862-867`；摘要来自同一份元数据响应，不是仓库内固定值；`preinstall.json:7` 的 `npmMirrors` 含 `registry.npmmirror.com`，npmjs 失败时无条件兜底，workflow 只覆盖 `mirrors`（`:618`）。APK 内 pnpm 与 canvas 是仅有的「无仓库内哈希」运行时字节。未实际切镜像。
+
+388. **`.debs` 缓存命中只比 size（2026-10-17 登记，未修复）**
+
+真因：`build-snapshot-013.mjs:524` 命中条件只有 `existsSync + size 相等`，`:527` 的 sha256 校验被 `continue` 跳过；pnpm/canvas tarball（`:731`/`:849`）连 size 都不比。`DEBPOOL` 在工作区内，本地 `--build-workspace` 续跑会保留。与同仓其它缓存「命中重验」的做法和 `source-chain-rerun.test.mjs:104-123` 的断言相反。CI 全新目录不触发。
+
+389. **Gradle 发行包没有 `distributionSha256Sum`（2026-10-17 登记，未修复）**
+
+真因：`gradle/wrapper/gradle-wrapper.properties:3` 只有 `distributionUrl`，无校验和；APK 由 `build-apk-source.yml:716-717` / `scripts/build-apk.mjs:377-386` 调 `./gradlew`，CI 无缓存，每次全新下载。它是整条 APK 链唯一没有仓库内哈希的下载（NDK/bootstrap/marketplace 都有且命中重验）。services.gradle.org 或其 CDN 被替换时，构建工具本身可被植入且无门禁可见。未实际替换。
+
+390. **隔离浏览器页面的 `document.title` 被当成设备路径（2026-10-17 登记，未修复）**
+
+现象：注入层的捕获 click 监听把任何含 `/` 或 `.` 的 `title` 当路径（`dsh-host-web-compat/lib/index.js:614-626`），而隔离浏览器的网页标题会进入气泡导航按钮的 title（`BrowserHost.kt:993-995` → `sidebar-bubbles.ts:342`，`cloneTitle` 不剥离 title）。恶意页设 `document.title="/storage/emulated/0/Download"` 后，用户点气泡切页会弹出原生「打开方式」选择器，且点击被 `preventDefault+stopPropagation` 吞掉。边界：`PathOpen` 仍校验存在性与允许面，用户仍选应用；不是代码执行。本地假 DOM harness 已复现路径调用，未做设备验证。详见 [R2 审计 390](SECURITY-AUDIT-2026-10-17-R2.md)。
+
+391. **整文档子串哨兵可被插件命名命中，静默跳过整个注入层（2026-10-17 登记，未修复）**
+
+真因：`dsh-host-web-compat/lib/index.js:1114-1116` 用 `html.includes('x-dsh-pick-token')` 决定是否注入 `POLYFILL_SCRIPT`；该串同时是目录选择鉴权头名，而客户端 boot graph（`__DSH_BOOT__`，含插件 id 与 inject 服务名）也被注入 index。任一第三方插件的 client id/inject 键叫 `x-dsh-pick-token`，哨兵每次命中，polyfill、启动看门狗与 `[dsh-boot-*]` 契约行、主题桥、路径桥、剪贴板回退全部静默消失。**HYPOTHESIS**：boot graph 是否序列化进同一份 HTML 未在本仓验证（host-webserver 不在仓内），设备侧一次 curl 即可判定。
+
+392. **`/api/android/open-path` 的会话范围只是建议（2026-10-17 登记，未修复）**
+
+真因：`dsh-host-web-compat/lib/index.js:1228-1230` 绝对路径直通、只判 `existsSync`；`:1261-1270` 缺 session 时跨全部会话 cwd 取首个存在项并标 `guessed:true`，页面 `:717` 不读 `guessed`。路由有 token 门，调用者是引擎页/模型内容：影响是页面获得全设备存在性 oracle 与跨会话文件解析，不越过 `PathOpen` 允许面。未跑反证用例。
