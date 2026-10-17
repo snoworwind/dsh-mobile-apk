@@ -1,5 +1,7 @@
 # build-and-env.md — 构建与验证命令 + 环境流程
 
+引擎私有通信专项：Linux/WSL 执行 `node --test scripts/tests/engine-private-transport.test.mjs`，真实 Unix socket 正反证已接入 PR Gate 与来源构建预检；Windows 的核心 Unix 用例明确 skip，不能据其绿代替 Linux 证据。设备负控 `EngineTransportInstrumentedTest` 须来源链新包且 fresh process，详见 emulator-test-protocol.md；本次源码及本机证据见 gotchas 坑 352。
+
 归一化证据当前采用 `normalizationVersion: 3`。v1/v2 摘要分别遗漏内容或文件系统权限/目录等信息，不能与当前版比较；需从原始快照重算。来源链 tarball 重打包与快照摘要共用保留条件导出顺序的规则，专项命令及反证见 [gotchas.md](gotchas.md) 坑 337、338。此修复未重建 APK、未做设备验证，历史 APK 的签名/字节哈希与源码身份事实保留；权限复核须在支持 Unix mode 的文件系统执行，Windows 测试不能代替。
 
 维护文档生成区按内容比较，兼容 Windows CRLF 检出；换行归一化只用于比较，生成区完整性和内容要求不变。根因与检查范围见 [gotchas.md](gotchas.md) 坑 318。

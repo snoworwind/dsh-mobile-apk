@@ -48,7 +48,7 @@
 
 | 项 | 当前事实 | 必须取得的结论 |
 |---|---|---|
-| **本机 3080 伪造监听者可接收引擎会话 Cookie（高风险，待修）** | `EngineProbe.check()` 在监听进程身份核验前调用 `EngineAuth.attach()`；精确 loopback URL 和关闭重定向不能认证初始 TCP 监听者。其他 Android 应用可访问 localhost IPC，官方安全清单明确不建议用 localhost 端口承载敏感 IPC。源码链与触发条件见 [gotchas.md 坑 350](gotchas.md) | 设计并实现壳侧引擎进程归属证明，在所有敏感 HTTP 调用发送 Cookie/载荷前强制核验；覆盖探活、refresh、RPC、通知和控制队列。补代码反证及设备上伪造监听者负控，证明 Cookie/敏感载荷未发送且正常引擎路径仍可用；完成前该项保持未修复 |
+| **本机 3080 伪造监听者凭据泄露（高风险，源码已修、设备待验）** | 壳进程持续持有 TCP 端口，转发仅连应用私有 Unix socket 并验证已连接对端 app UID；覆盖探活、refresh、RPC、通知、mux、控制队列、来件与 WebView。根因见 [坑 350，修复及证据见坑 352](gotchas.md) | 宿主 HTTP/WS 正反证已通过；**未做设备验证**（ADB 为空，两个模拟器拒绝连接）。须来源链新包执行 fresh-process 伪造监听者 instrumentation 负控，再补 CDP/ADB 自主任务与双方向验收；补验前不得将此项记为完整关闭 |
 | Hard / Soft 插件状态 | 可信 factory identity、四态与真实冷启动健康正在实施；live 用户 patch 不能成为 Hard 来源 | 冻结后统一测试；Disabled 官方条目不能阻止健康；隔离不丢源码/config；退出 Safe Mode 恢复用户配置 |
 | 历史 ONLINE 事务与健康 | 本分支已删除新在线更新入口，保留旧 journal、usr-only 交换与 probation/commit/rollback 的恢复兼容 | 最终新包验证历史中断恢复不改用户 HOME；仅 HTTP 活着不得提前提交；失败后可恢复 |
 | 回撤节流纪元 | `.undo-auto-done` schema 2 仅抑制相同安装指纹 + 回滚前失败 patch digest，成功回滚后原子写入；身份变化重开观察窗，旧数字时间戳在有效期内保守抑制并记诊断；显式用户重启在确认本壳子进程停止后清 marker，自动重试不清。纯逻辑与源码接线测试已补，仍待本批 Gradle fresh 验证 | 同一失败配置防循环，新安装/新配置不继承旧事件；marker 写入只发生在成功整份恢复后 |

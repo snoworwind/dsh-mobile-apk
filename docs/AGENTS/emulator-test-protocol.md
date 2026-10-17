@@ -8,6 +8,8 @@
 
 ## 0. 三层验收（任一层红即系统有问题）
 
+坑 352 的设备负控须使用来源链新包。在任何 Activity/EngineService 启动前的 fresh app process 运行 `EngineTransportInstrumentedTest`：伪造 TCP 监听者先占 3080，初始化与 attach 应拒绝且监听者无连接；关闭伪造监听者后，同 UID 私有 Unix socket 的合成 Cookie 请求应正常转发，后端退出后 relay 自身不能制造存活。编译 androidTest 不能代替执行。随后再以真实模型自主任务验主 WebView、通知应答、控制队列、mux 与引擎重启，按既有 CDP/ADB 双方向留证；该低层负控不代替真人任务。
+
 | 层 | 手段 | 红了说明什么 |
 |---|---|---|
 | **代码层** | Kotlin 单测 + 静态门禁 + 本改动自带的反证用例 | 根本就是代码有问题 |

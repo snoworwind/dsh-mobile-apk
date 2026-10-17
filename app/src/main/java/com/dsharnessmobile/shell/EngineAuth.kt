@@ -158,6 +158,8 @@ object EngineAuth {
    */
   fun initContext(context: Context) {
     appContext = context.applicationContext
+    runCatching { EngineTransport.initialize(context.applicationContext) }
+      .onFailure { Log.w(TAG, "engine transport unavailable: ${it.javaClass.simpleName}") }
     // ST-10：同一绑定点也把进程级上下文交给 ShellAppContext——桥 getImmersiveMode() 没有
     // Context 形参，这是它读壳侧权威值的唯一入口（MainActivity.onCreate 已先于桥安装调用）。
     ShellAppContext.bind(context)
@@ -217,6 +219,7 @@ object EngineAuth {
 
   /** A manually supplied Cookie header must never follow a redirect to another origin. */
   private fun confineConnection(conn: HttpURLConnection) {
+    EngineTransport.requireOwnedPort()
     if (!EngineProbe.isEngineOrigin(conn.url.toExternalForm())) {
       throw SecurityException("Engine authentication requires the exact local engine origin")
     }
@@ -231,6 +234,7 @@ object EngineAuth {
    * next successful refresh.
    */
   fun attachMux(): String? {
+    EngineTransport.requireOwnedPort()
     val c = ctx() ?: return null
     return cookie(c) ?: refresh(c)
   }
@@ -344,6 +348,7 @@ object EngineAuth {
   private fun exchange(context: Context, token: String): String? {
     var conn: HttpURLConnection? = null
     return try {
+      EngineTransport.requireOwnedPort()
       conn = URL("$BASE_URL/?token=$token").openConnection(Proxy.NO_PROXY) as HttpURLConnection
       conn.instanceFollowRedirects = false // capture the 303 Set-Cookie ourselves
       conn.connectTimeout = 4000

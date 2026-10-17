@@ -7,7 +7,7 @@
 > 3. 想**先通读一遍** → §1 全局运行顺序（阶段 0-4 + 时序图）→ §2 主表 → §4 耦合矩阵。
 >
 > **当前源码登记**：v0.14.5基线 + 0.14.5-fx-1本地实施（详见下方实施补充）；上游官方639ed015（0.2.0-rc.2），新模块/fixtures与当前锚点见§6/§7；旧cc0c921/coord1f9852d审查条目仅历史溯源，非本轮运行证据。
-> 锚点格式 `path:line`，路径一律**相对 apk 仓根**；插件与三个子仓（`plugins/*`、`dsh-client-ui-responsive`、`dsh-host-web-compat`、`dsh-shell-termux`）在本仓是协调仓的**逐字节镜像**，行号以本仓副本为准。
+> 锚点格式 `path:line`，路径一律**相对 apk 仓根**；插件与三个子仓（`plugins/*`、`dsh-client-ui-responsive`、`dsh-host-web-compat`、`dsh-shell-termux`）在本分支以树内副本为权威，跨树镜像约束已退役（AGENTS.md §4.6），行号以本仓副本为准。
 >
 > **锚点会漂**：改了代码就跑 `node scripts/check-code-map.mjs`——它守「覆盖完整、锚点有效、编号一致」（详见 §7）。
 > **维护**：新增/删除块、调用顺序或耦合关系变化 → 改本文对应查点（`AGENTS.md` §5.1 已登记）。
@@ -445,7 +445,7 @@ sequenceDiagram
 | K04 | 插件面 | 控制队列的 exact 路由、令牌校验与 pv/caps 协商在 plugins/dsh-android-bridge/src/control-queue.ts | plugins/dsh-android-bridge/src/control-queue.ts:347 |
 | K04 | 快照与更新 | UndoGate 调急救 CLI 按壳侧 known-good ID 回撤并把现场镜像到共享目录；成功回滚后复位看门狗锁存 | app/src/main/java/com/dsharnessmobile/shell/UndoGate.kt:278-434 |
 | K04 | 日志与诊断 | EngineAuth 只输出脱敏状态行；UndoGate 另立不受 DevLogPrefs 闸门的 undo-gate.log | app/src/main/java/com/dsharnessmobile/shell/UndoGate.kt:136 |
-| K04 | 原生认证 HTTP 连接 | 两个 attach 入口均先约束精确源及重定向，再读取 Context/Cookie；无 Cookie 时也不自动转发 POST | app/src/main/java/com/dsharnessmobile/shell/EngineAuth.kt:219 |
+| K04 | 原生认证 HTTP 连接 | attach / token exchange / mux 先要求本壳持续持有 3080 listener，再约束精确源及重定向；ControlPoller、FileIncoming 同样先守归属。listener 仅向私有 Unix socket 转发，先在已连接 socket 核对 SO_PEERCRED UID；引擎重启不释放 TCP 绑定；portReachable 看后端，防 relay 自己制造假活 | app/src/main/java/com/dsharnessmobile/shell/EngineTransport.kt:15 |
 | K04 | 门禁与测试 | check-bridge-symmetry 守页面/壳两侧方法对称，check-control-ops 守 op 登记面，跨语言 fixture 守协议 V2 | scripts/check-bridge-symmetry.mjs:1 |
 | K04 | 构建与发布 | app/build.gradle.kts 的单测依赖决定 jsString 类缺陷的判据落在哪个 org.json 实现上 | app/build.gradle.kts:127 |
 | K05 | K04 | 控制队列与回填协议：op 名 / args 里的 screenId 与 gen / row 句柄 / caps 与 pv 全由 ControlPoller 与 ControlProtocolV2 编解码，两边 op 集合由 check-control-ops.mjs 六面对齐 | app/src/main/java/com/dsharnessmobile/shell/ControlPoller.kt:158 |
@@ -2041,6 +2041,8 @@ node scripts/verify-client-plugin-fail-recovery.mjs --self-test   # 客户端插
 覆盖全域（脚本里定义，构建产物与第三方目录除外）：`app/src/**/*.kt` 与 `AndroidManifest.xml`、`plugins/*/{src,test}/**`、三个子仓 src/lib、`scripts/{check-,verify-,build-,inject-}*` 与 `scripts/patches/**`、`scripts/snapshot-config/**`。
 
 <!-- COVERAGE
+app/src/main/java/com/dsharnessmobile/shell/EngineTransport.kt
+app/src/androidTest/java/com/dsharnessmobile/shell/EngineTransportInstrumentedTest.kt
 # 0.14.3 actual new source/fixture ledger (not execution evidence)
 app/src/main/java/com/dsharnessmobile/shell/RootMaintenanceLease.kt
 app/src/main/java/com/dsharnessmobile/shell/BrowserHostProfile.kt

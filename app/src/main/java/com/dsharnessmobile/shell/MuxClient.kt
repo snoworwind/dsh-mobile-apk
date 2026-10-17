@@ -74,6 +74,9 @@ class MuxClient(
         if (!running) return
         // 失败必须可见（首败 + 每分钟一条节流；引擎冷启动前 refused 是预期噪音）
         Log.w(TAG, "mux attempt failed: ${e.message}")
+      } finally {
+        runCatching { socket?.close() }
+        socket = null
       }
       if (!running) return
       try { Thread.sleep(backoff) } catch (_: InterruptedException) { return }
@@ -82,6 +85,8 @@ class MuxClient(
   }
 
   private fun connectAndServe() {
+    require(host == "127.0.0.1" && port == 3080) { "Mux requires the local engine origin" }
+    EngineTransport.requireOwnedPort()
     val s = Socket()
     s.connect(InetSocketAddress(host, port), 3000)
     socket = s

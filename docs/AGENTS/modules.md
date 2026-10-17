@@ -9,6 +9,8 @@
 
 `app/src/main/java/com/dsharnessmobile/shell/`：
 
+`EngineTransport.kt`：`initialize` 在读取凭据/加载引擎页之前独占绑定 TCP 3080，绑定保留到壳进程退出；`preparePreload` 从 APK asset 写入本代引擎 `--require` 模块，使 HTTP server 改绑私有 Unix socket；`backend` 在已连接 socket 核验对端 UID，`accept` 有界转发 HTTP/WS，`backendReachable` 为启动与看门狗提供真正后端存活。入口为 `EngineAuth.initContext`、`EngineManager`（包括 Service 冷启）；失败时不向未知 TCP listener 发送凭据或控制载荷。详细边界与证据见 gotchas 坑 352。
+
 | 文件 | 作用 | 关键点（0.13.0 定稿） |
 |---|---|---|
 | **ShellOps.kt** | 特权 shell 执行点与屏幕范围复查 | `splitCommandSegments` 递归检查可见载荷；`scopeCommandText` 还原静态参数并排除注释/重定向文件名；`hasUncertifiedSelector` 核对各 Android CLI 的目标参数拼写和位置。脚本路径、动态命令及不可判定包装在受限范围拒绝，与插件 `screen-scope.ts` 保持同口径。 |

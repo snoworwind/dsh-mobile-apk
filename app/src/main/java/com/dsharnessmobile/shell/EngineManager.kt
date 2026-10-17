@@ -14,6 +14,11 @@ import java.nio.file.Files
  */
 class EngineManager(private val context: Context, private val pickToken: String? = null) {
 
+  init {
+    runCatching { EngineTransport.initialize(context.applicationContext) }
+      .onFailure { Log.w(TAG, "engine transport unavailable: ${it.javaClass.simpleName}") }
+  }
+
   val usrDir = File(context.filesDir, "usr")
   val homeDir = File(context.filesDir, "home")
 
@@ -1559,6 +1564,8 @@ class EngineManager(private val context: Context, private val pickToken: String?
    * mechanism as native libraries (always permitted for app data).
    */
   private fun startWithArgs(args: Array<String>, env: Map<String, String>): Process {
+    val preload = EngineTransport.preparePreload(context)
+    val privateArgs = listOf(args.first(), "--require", preload.absolutePath) + args.drop(1)
     val log = File(context.filesDir, "engine.log")
     rotateEngineLog(log)
     // Rotation must isolate the active path; otherwise an old token could survive a failed rename.
@@ -1581,11 +1588,11 @@ class EngineManager(private val context: Context, private val pickToken: String?
         b.redirectOutput(log)
       }
     val process = try {
-      build(args.toList()).start()
+      build(privateArgs).start()
     } catch (e: java.io.IOException) {
       if (e.message?.contains("Permission denied") != true) throw e
       Log.w(TAG, "direct exec denied, falling back to linker64: " + e.message)
-      build(listOf("/system/bin/linker64") + args.toList()).start()
+      build(listOf("/system/bin/linker64") + privateArgs).start()
     }
     if (!log.isFile) {
       runCatching { process.destroyForcibly() }

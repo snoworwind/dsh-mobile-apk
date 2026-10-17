@@ -127,6 +127,10 @@ node scripts/check-release-gates.mjs --list  # 现数门禁集合及「仅构建
 
 ## 当前状态与未覆盖范围
 
+### 初始 loopback 监听者冒充（2026-10-17）
+
+坑 350 的源码修复使用壳进程持续持有的 TCP 3080 listener 与私有、逐连接校验对端 UID 的 Unix socket；覆盖原生 HTTP/WS、WebView、控制队列和来件载荷，入口拒绝发生在发送秘密之前。宿主 HTTP/WS 反证已通过，Kotlin 与设备用例编译结果及边界统一记录于 [gotchas.md 坑 352](gotchas.md)。当前没有在线 ADB 设备，**未做设备验证**，不能视为漏洞三层验收关闭或发布候选通过。
+
 ### 模型能力探测凭据出口（2026-10-16）
 
 被动/主动 fetch 重定向、Gemini query key 和诊断回显的泄漏路径已修，插件编译及 170 项测试通过，源码/lib 同步。真实 HTTP 服务反证覆盖跳转和正常请求，真实 apply/discover 覆盖诊断日志出口。高风险 runtime 面的 CDP/ADB 层当前因设备离线未执行，**未做设备验证**，不构成功能或候选验收；继续条件、兼容变化与完整证据统一见 [gotchas.md](gotchas.md) 坑 340。

@@ -301,6 +301,7 @@ class MainActivity : ComponentActivity() {
   }
 
   private fun recoverPageIfPending(): Boolean {
+    if (!EngineTransport.ownsPort()) return false
     if (isFinishing || isDestroyed) return false
     return when (pageRecovery.takeRecovery()) {
       ForegroundPageRecoveryPolicy.Recovery.NONE -> false
@@ -311,7 +312,10 @@ class MainActivity : ComponentActivity() {
             pendingEngineCookie = null
           }
           enginePageFailed = false
-          try { webView.reload() } catch (e: Exception) { Log.w(TAG, "foreground page recovery reload failed", e) }
+          try {
+            if (webView.url == null || webView.url == "about:blank") webView.loadUrl(EngineProbe.ENGINE_URL)
+            else webView.reload()
+          } catch (e: Exception) { Log.w(TAG, "foreground page recovery reload failed", e) }
         }
         false
       }
@@ -1262,6 +1266,7 @@ class MainActivity : ComponentActivity() {
     // FX-210.5：此处只取**零网络**的本地缓存 cookie（预置 cookie 有效即用）；同步 refresh
     // 含最长 8s 的 HTTP 且持 EngineAuth 锁（排队可达 ~16s），原先在 onCreate 主线程同步调用
     // 会冻结首帧——已迁到下面的后台重试线程（首个尝试立即执行）。
+    if (!EngineTransport.ownsPort()) { enginePageFailed = true; return }
     val authCookie = EngineAuth.cookie(this)
     if (authCookie != null) {
       try {

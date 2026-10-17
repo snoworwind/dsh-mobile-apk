@@ -292,6 +292,7 @@ object EngineProbe {
    * @return true when the port accepts connections.
    */
   fun portReachable(timeoutMs: Int = 1000): Boolean {
+    if (EngineTransport.ownsPort()) return EngineTransport.backendReachable()
     return try {
       val sock = Socket(Proxy.NO_PROXY)
       try {

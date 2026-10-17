@@ -194,7 +194,9 @@ class ControlPoller(
   }
 
   private fun post(path: String, body: JSONObject): PostResult {
+    EngineTransport.requireOwnedPort()
     val connection = URL(BASE + path).openConnection(Proxy.NO_PROXY) as HttpURLConnection
+    connection.instanceFollowRedirects = false
     return try {
       connection.requestMethod = "POST"
       connection.doOutput = true

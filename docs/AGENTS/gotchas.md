@@ -2241,7 +2241,7 @@ spawnSync("node", ["--version"])               status=0  v24.18.0        ← 走
 
 **修法**：改为 Python `glob.glob(..., recursive=True)`，并仍要求匹配项至少包含一个实际文件；固定文件证据逐项检查不变。WSL Linux 与 Actions 同命令的 Python 8/8、Node 93/93 通过，涵盖缺证据拒绝和成功打包全项隐藏证据。首次 run 38937039856 失败无 APK/Release；修复后的首次重跑仍以 Actions 验证为准。
 
-350. **loopback URL 精确匹配仍无法认证 3080 端口的监听进程，探活可能泄露会话 Cookie（2026-10-17，待修）**
+350. **loopback URL 精确匹配仍无法认证 3080 端口的监听进程，探活可能泄露会话 Cookie（2026-10-17，源码修复见坑 352，设备待验）**
 
 **触发条件**：其他 Android 应用先在本机 `127.0.0.1:3080` 监听，而 DSH 引擎尚未启动或暂时退出；随后壳侧触发 `EngineProbe.check()`。Android 官方安全清单明确指出，localhost 端口可被设备上的其他应用访问，不应单独用于敏感 IPC。
 
@@ -2256,3 +2256,17 @@ spawnSync("node", ["--version"])               status=0  v24.18.0        ← 走
 **现象与真因**：来源链构建快照、APK 和单测均完成；末尾 `record-project-components.mjs outputs` 报 `untracked component inputs`，路径为 `dsh-shell-termux/D:/coding/dsh-mobile/.npm-cache/...`。根因是被提交的 `dsh-shell-termux/.npmrc` 固定 Windows 开发机缓存路径；Linux npm 把该相对解释后的目录写入源码组件树，污染生产输入，正确触发来源证明拒绝。
 
 **修法**：来源 workflow 在任何预检/依赖步骤前创建 `$RUNNER_TEMP/dsh-npm-cache` 并通过 `$GITHUB_ENV` 设置 `npm_config_cache`，覆盖仓内 `.npmrc`，缓存不再进入组件树。保留来源证明门禁，不忽略污染目录。入口回归检查覆盖覆盖设置位置；WSL Linux 实跑来源 Node/Python 测试。失败 run 38935633493 因来源输入污染无可用 artifact；旧提交运行不能代替修复后重跑。
+
+352. **敏感引擎流量不能靠发送前的端口探针认证，必须持续持有 TCP 绑定并核验实际后端连接（2026-10-17，设备待验）**
+
+**现象与真因**：坑 350 中的初始监听者冒充影响 Cookie 探活、token 交换、RPC、通知与 mux，也影响携带控制令牌/结果的 ControlPoller 和文件来件投递。即使添加一次“子进程活着”或 challenge 预检，后续新连接仍可在检查后被抢占；WebView 的持久 Cookie 也不会受原生 attach 单点保护。
+
+**修法**：壳进程 `EngineTransport` 在凭据出口和页面导航前先独占绑定 loopback 3080，直到整个壳进程结束都不关闭此 listener；引擎仅通过 APK 内 preload 改绑应用私有 Unix socket。转发器在同一条已建立的 LocalSocket 上读 SO_PEERCRED，确认 app UID 后才转发任何 HTTP/WS 字节。端口绑定失败时 attach、token exchange、mux、控制队列、文件投递和首次 WebView 导航拒绝；重试成功可从空页面恢复。启动、停机和 watchdog 的 portReachable 查后端而非 relay 自身，防永久假活。连接与线程有界，双向共享活动时间防流式响应因上传半边空闲被截断；mux 每次退出关闭连接，控制/来件不跟随重定向。引擎重启只替换后端 socket，不释放凭据所用 TCP 端口。
+
+**信任边界**：验证的是应用 UID 安全主体；同 UID 的任意恶意插件本来就可读取凭据，不由此 transport 隔离。上游源码不改，preload 从最终 APK assets 加载，因此必须来源链构建新 APK，热推不能代验。
+
+**代码证据**：WSL Linux 的 `node --test scripts/tests/engine-private-transport.test.mjs` 通过 2/2，覆盖伪造 TCP 监听者零凭据、私有 HTTP/token/Cookie、WebSocket upgrade、公开 address 保持与无关 HTTP 端口不受影响；已接入 PR Gate 和来源链预检。新增 Kotlin 拒绝用例与 `EngineTransportInstrumentedTest`（fresh process 的抢占负控 + 正常私有转发）。本机完整命令、日志和最终结果见 `.deploy-tmp/security-350/`；此目录仅供本机复核，不代替可分发 APK。
+
+**设备边界**：ADB devices 为空，连接 `127.0.0.1:16416`、`127.0.0.1:16384` 均返回 connection refused，真机未在线。**未做设备验证**，未执行 instrumentation、CDP 或 ADB 自主任务；源码修复不等于漏洞已完成三层关闭，来源链新包和双方向设备证据仍待补齐。
+
+本轮实际编译与测试：WSL Java 17 执行 `:app:testDebugUnitTest :app:compileDebugAndroidTestKotlin` 成功；最终 XML 为 113 类、1244 项，失败/错误/跳过均为 0，包含新增 3 条生产入口拒绝反证；instrumentation 仅编译，未执行。日志 `.deploy-tmp/security-350/gradle-final.log`。单测数量基线仅提升总数并登记新类，保留既有 featureRetirements；本机 buildDirectory 重定向到 WSL 私有缓存，仓内旧 app/build XML 不可作为当前证据。
