@@ -17,6 +17,7 @@ import {
 } from 'node:fs'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { tmpdir } from 'node:os'
+import { fileURLToPath } from 'node:url'
 // 并行上限的唯一真源（scripts/lib/shell.mjs）：本文件只用它解压校验用快照，见下方 xz 调用。
 // 不写死数字、更不用 `-T0`——`-T0` = 吃满全部逻辑核，本地跑链时会与模拟器抢满 CPU
 // （check-build-parallel-cap.mjs 明文禁止；本文件此前是漏网的一处）。
@@ -24,7 +25,8 @@ import { XZ_THREADS } from '../lib/shell.mjs'
 import { checkDshRuntimeDependencies } from './check-dsh-runtime-dependencies.mjs'
 import { checkAndroidNativeRuntimePackages } from './check-android-native-runtime-packages.mjs'
 import { checkPresetCarriers } from './preset-carriers.mjs'
-import { verifyPackagePayload, packagePayload } from './verify-package-payload.mjs'
+import { verifyPackagePayload, packagePayload, verifyPinnedPackagePayload } from './verify-package-payload.mjs'
+import { readCommittedFile } from './committed-file.mjs'
 import { collectPhysicalFiles, matchesPatchTarget, enginePatchTargets, verifyCanonicalEnginePatch } from './reconcile-engine-patch-copies.mjs'
 
 const snapshotArg = process.argv[2]
@@ -54,6 +56,20 @@ const within = (root, candidate) => {
 }
 const sourceManifest = JSON.parse(readFileSync(sourceManifestPath, 'utf8'))
 if (sourceManifest.commit !== expectedCommit) throw new Error(`unexpected Harness source commit: ${sourceManifest.commit}`)
+// Never trust a pin edited in the build workspace or the mutable export cache.
+const projectRoot = fileURLToPath(new URL('../../', import.meta.url))
+const checkedOutCommit = execFileSync('git', ['-C', projectRoot, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()
+const projectCommit = process.env.GITHUB_SHA || checkedOutCommit
+if (!/^[a-f0-9]{40}$/.test(projectCommit) || projectCommit !== checkedOutCommit) throw new Error('source payload pins require the audited project commit')
+const payloadPinPath = 'scripts/snapshot-config/engine-source-payload-pins.json'
+const payloadPinBytes = readCommittedFile(projectRoot, projectCommit, payloadPinPath)
+const payloadPins = JSON.parse(payloadPinBytes)
+if (payloadPins.schema !== 1 || payloadPins.harnessCommit !== expectedCommit
+  || payloadPins.lockfileSha256 !== sourceManifest.lockfileSha256) throw new Error('immutable source payload pins do not match Harness inputs')
+const adapterPath = 'scripts/source-build/prepare-harness-client-paths.mjs'
+const adapterBytes = readCommittedFile(projectRoot, projectCommit, adapterPath)
+if (payloadPins.clientBuildPathPolicy !== 'canonical-client-css-path-v1'
+  || payloadPins.clientBuildAdapterSha256 !== sha256(adapterBytes)) throw new Error('source payload pins use another client build transform')
 const sourceOverlay = JSON.parse(readFileSync(overlayPath, 'utf8'))
 if (sourceOverlay.engineVersion !== '0.2.0-rc.2' || sourceOverlay.rootPackage?.version !== '0.2.0-rc.2') {
   throw new Error('source snapshot overlay must target official 0.2.0-rc.2')
@@ -62,6 +78,10 @@ const expectedPackages = new Map(Object.entries(sourceOverlay.packages ?? {}).fi
 expectedPackages.set(sourceOverlay.rootPackage.name, sourceOverlay.rootPackage.version)
 if (sourceManifest.packageCount !== sourceManifest.packages?.length || sourceManifest.packageCount !== expectedPackages.size) {
   throw new Error(`source package manifest is incomplete: ${sourceManifest.packageCount}, expected ${expectedPackages.size}`)
+}
+if (Object.keys(payloadPins.packages ?? {}).length !== expectedPackages.size
+  || [...expectedPackages].some(([name, version]) => payloadPins.packages[name]?.version !== version)) {
+  throw new Error('immutable source payload pin set does not match the complete source overlay')
 }
 const overrideReport = JSON.parse(readFileSync(overridePath, 'utf8'))
 if (overrideReport.harnessSourceCommit !== expectedCommit
@@ -78,6 +98,7 @@ for (const item of sourceManifest.packages) {
   if (expectedPackages.get(item.name) !== item.version) {
     throw new Error(`source manifest has an unexpected overlay package: ${item.name}@${item.version}`)
   }
+  if (payloadPins.packages[item.name]?.sourcePath !== item.sourcePath) throw new Error(`${item.name} immutable source path mismatch`)
   const override = overrideByPackage.get(item.name)
   if ((override?.sourceCommit ?? expectedCommit) !== item.sourceCommit) {
     throw new Error(`source manifest commit mismatch for ${item.name}: ${item.sourceCommit}`)
@@ -122,6 +143,7 @@ try {
       if (child !== 'node_modules') rmSync(join(physical, child), { recursive: true, force: true })
     }
     execFileSync('tar', ['-xzf', archive, '-C', physical, '--strip-components=1', '--no-same-owner'])
+    verifyPinnedPackagePayload(physical, payloadPins.packages[item.name], item.name, item.version)
   }
   execFileSync(process.execPath, ['scripts/patches/apply-patches.mjs', referenceStage, '--apply', '--scope', 'engine'], { stdio: 'inherit' })
   execFileSync(process.execPath, ['scripts/check-browser-syntax-floor.mjs', '--degrade', '--stage', referenceStage], { stdio: 'inherit' })
@@ -168,6 +190,7 @@ try {
       sourceCommit: item.sourceCommit,
       sourceTarballSha256: item.sha256,
       payloadFiles,
+      sourcePayloadSha256: payloadPins.packages[item.name].payloadSha256,
     })
   }
 
@@ -270,6 +293,7 @@ try {
     source: sourceManifest.source,
     sourceCommit: sourceManifest.commit,
     sourceLockfileSha256: sourceManifest.lockfileSha256,
+    sourcePayloadPins: { projectCommit, path: payloadPinPath, sha256: sha256(payloadPinBytes) },
     vendorSourceOverrides: overrideReport.overrides.map(({ package: name, version, sourceCommit, sourceTree }) => ({
       package: name,
       version,

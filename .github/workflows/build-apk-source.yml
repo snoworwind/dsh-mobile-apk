@@ -216,6 +216,8 @@ jobs:
           test -n "$deployment_pnpm"
           printf '%s\n' "$deployment_pnpm" >> "$GITHUB_WORKSPACE/.deploy-tmp/source-build/package-manager-versions.txt"
           root_manifest="package.json"
+          node "$GITHUB_WORKSPACE/scripts/source-build/prepare-harness-client-paths.mjs" \
+            "$PWD" "$GITHUB_WORKSPACE/.deploy-tmp/source-build/harness-client-paths.json"
           root_manifest_backup="$GITHUB_WORKSPACE/.deploy-tmp/source-build/harness-root-package.json.original"
           cp "$root_manifest" "$root_manifest_backup"
           node <<'NODE'
@@ -852,6 +854,7 @@ jobs:
             .deploy-tmp/source-build/harness-vendor-lock-reconciliation.json
             .deploy-tmp/source-build/harness-pnpm-lock.original.yaml
             .deploy-tmp/source-build/harness-build-script-exclusion.json
+            .deploy-tmp/source-build/harness-client-paths.json
             .deploy-tmp/source-build/harness-root-package.json.original
             .deploy-tmp/source-build/android-build-inputs-sha256.txt
             .deploy-tmp/source-build/gradle-artifacts-sha256.txt

@@ -15,7 +15,7 @@
 | 382 | 四处 response.text 改为有界流读取；使用固定上限缓冲，不保留逐块对象列表；目录默认 8 MiB、主动探测 1 MiB；models.dev 30 秒 deadline、禁止 redirect | 解码字节超限取消 reader，旧缓存可沿用。text-only 注入离线适配器仅供宿主夹具，生产 fetch 使用流 |
 | 383 | public privilege/status 只读缓存，移除 shizukuChannelProbed，不占控制队列 | 初次无事实保持 unknown，刷新由受鉴权控制路径负责 |
 | 384 | nonce 限 1–64 位十六进制再拼入单引号参数 | 对应 BigInteger(256) 非定长输出；引号、换行、命令替换不能进入命令 |
-| 385 | 从摘要绑定源码 tarball 重建参考包，独立重放登记补丁，核对快照 JS/JSON/WASM/native 载荷及解析入口，并检查 pnpm 实体副本与受限链接 | 校验器、源码导出清单、Git 对象库和构建环境仍须可信；不能抵抗能重写检查器的任意构建代码。新来源全链待跑，小夹具不代替全链 |
+| 385 | 原始源码包载荷摘要固定于 Git，逐层验证 commit/tree/blob 对象哈希后读取；缓存与清单同时篡改也不能改 pin。全量 package.json 保留条件导出顺序；重放补丁后比对快照 JS/JSON/WASM/native 及 pnpm 实体副本 | 客户端 CSS 编译路径先规范化，避免绝对构建路径进入 JS 与类名；319 包在两个独立来源目录重建后摘要一致。校验器和宿主仍须可信，不能抵抗能重写检查器的任意构建代码。新来源全链待跑 |
 | 386 | workflow 初始输入及快照配置准备时从 GITHUB_SHA 重建 preinstall，再生成受控有效配置 | 续跑目录中的 preinstall 不再是权威 |
 | 387 | pnpm/Canvas 用源码固定 SHA-512，npm 仅用官方 registry | 固定值从官方端点核对；缺 pin、下载失败、摘要不符拒绝 |
 | 388 | deb 缓存复用同时验签名索引 SHA-256 与 size；坏缓存先移除，下载失败阻断；pnpm/Canvas 每次解包前复验 pin | 存在性与同体积不再作为内容证据 |
@@ -39,6 +39,7 @@
 - Kotlin 全量 1309 项通过；设备负控源码编译通过，未执行 instrumentation。日志 `security-r2-gradle-final.log`，计数 `security-r2-kotlin-summary.json`。
 - 桥对称、API 路由鉴权、Manifest、Kotlin 注释、补丁 id 自洽、vendor 补丁在场、执行地图、维护文档、Linux vendor 摘要检查通过；执行地图及 Linux vendor 的自检/负控通过。各日志按上述本机前缀保存。
 - 新字节门禁实际检查旧来源快照：319 个源码包及 pnpm 物理载荷对账通过，随后既有 narb-android-N1 副本门禁拒绝旧产物，完整命令 exit 1。见 `security-r2-existing-snapshot.log`；这不是新候选来源链通过，旧产物不得用于本轮交付。
+- 不可变 pin 加固：两个独立来源目录按固定 CSS 路径策略重建，319 包载荷摘要一致；上游 CSS/纯度测试 43 项通过。新增负控覆盖缓存与快照一起篡改、缺 pin、工作树伪造与 Git 对象内容损坏，见 `security-r2-source-pins.log`、`security-r2-upstream-css-tests.log`、`security-r2-immutable-pin-tests.log`。pin 同时绑定编译适配器摘要，不能静默更换路径策略；适配器与 pin 文件本身加 `-text`（`.gitattributes`），行尾转换不得改变信任输入。再生成入口为 `scripts/source-build/generate-engine-source-payload-pins.mjs`（读 Git 中的适配器字节、要求两棵独立构建树逐包一致，否则拒绝写出），用法见 build-and-env.md 的来源包载荷 pin 小节。
 - **未做设备验证**：本机 adb 可执行，设备列表为空；16416、16384 两个模拟器连接拒绝。没有 CDP、ADB 自主真实任务、双方向截图或真机证据。L2/L3 验收仍阻塞，不能作为发布候选。
 - 未生成本轮 APK；后续仅允许最终已提交源码的来源链。旧 APK、热推与宿主单测不能代替。
 - 已实际启动本地完整来源链；先后暴露本地缺 GitHub runner 环境变量、隔离检出无 origin 两个环境前提。补齐值均来自本轮任务目录和原工作树实际仓库坐标，不改校验规则；续跑记录 `security-r2-source-chain.log`。
